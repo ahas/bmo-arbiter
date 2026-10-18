@@ -41,7 +41,8 @@ Each contract names its counterpart by role, not by its code.
 ### The master
 
 Each setting is read from the environment; `--data-root` and `--code-root` name the first two on the
-command line instead.
+command line instead. The deployed unit, `bmo-card-master.service`, sets `BMO_DATA_DIR` to the deployment's
+data root and reads the deployment's own settings from `~/.config/bmo-arbiter/env` where it stands.
 
 | Environment | Meaning | Where unset |
 | --- | --- | --- |
@@ -56,6 +57,7 @@ command line instead.
 | `CARD_MASTER_PORT` | the loopback port of the master's API; `0` has the system choose, named in the line the master prints as it starts listening | `7440` |
 | `CARD_MASTER_READ_EVERY_MS` | how often every slave is read | `2000` |
 | `CARD_MASTER_DISCOVER_EVERY_MS` | how often the node registry is read | `60000` |
+| `CARD_INSTALL_POLL_MS` | how often the install polls the node setup and the unit, and how long it waits before reading the unit's main process again, all alike; a check sets it to run an install quickly | the setup every 5 s, the unit every second, then 5 s |
 | `HOME` | the home a key path written `~/…` and the defaults above stand under | `/` |
 
 ### The node arbiter
@@ -147,8 +149,10 @@ HTTP on `127.0.0.1:<CARD_MASTER_PORT>`, no key, loopback alone. Bodies are JSON 
   `blocks` (`from`, `to`, counted from 0) or none, `output`, `mtp`, `fullAttention` or none.
   - `204`: written whole to the master's store of descriptions, `placements/card-units/<service>.json`,
     replacing what the service said before; the next state shows it.
-  - `400` with `code` and `error`: a service that is not lower-case letters, digits and hyphens, a body
-    that does not read, or a unit whose name does not start with `<service>/`.
+  - `400` with `code` and `error`: `service_name_invalid`, a service that is not lower-case letters,
+    digits and hyphens; `description_invalid`, a body that does not read, holds no `units` object, names a
+    unit whose name does not start with `<service>/`, or gives a detail that does not read.
+  - `500` with `code` `description_not_written` and `error`: the store could not be written.
 - What each detail means is `docs/placement.md`, 「What a service says of its units」. The folder itself is
   the master's own; a service hands its description over by this route alone.
 
@@ -381,6 +385,30 @@ service hands its unit descriptions in (「Unit descriptions」). Nothing else o
   | `unit_lowered` | a unit kept in host memory moved into the dump store |
   | `unit_loaded` | a unit came back onto the card |
   | `unit_partly_unloaded` | some of a unit's buffers are out |
+- **The codes of what the master itself does and reads:**
+
+  | Code | What happened |
+  | --- | --- |
+  | `rules_read` | the rules file was read again |
+  | `rules_absent` | no rules file stands, so the default places the units |
+  | `rules_unreadable` | the rules file does not read, so the rules read before stand |
+  | `description_unreadable` | a unit description in the store does not read |
+  | `ticket_held` | a ticket is held; the text carries its reason |
+  | `units_unloaded` | units were unloaded to make room for a ticket |
+  | `unload_failed` | the unloads for a ticket failed and are tried again |
+  | `restore_waiting` | units wait to come back until their asker's units leave the card |
+  | `units_restored` | units unloaded for a ticket came back |
+  | `restore_failed` | units unloaded for a ticket did not come back yet and are tried again |
+- **The codes of the placement:**
+
+  | Code | What happened |
+  | --- | --- |
+  | `request_done` | a placement request ended done |
+  | `request_failed` | a placement request stopped; the text carries the step and why |
+  | `request_undone` | a request a stopped master left unfinished was undone at its start |
+  | `placement_unsettled` | a service's adapter and the node registry disagree on its nodes at the first start |
+  | `placement_drift` | what stands differs from the master's state; named and not followed |
+  | `service_not_uninstalled` | narrowing a single-node service, its old node's uninstall failed |
 
 ## Admission on a shared pool
 

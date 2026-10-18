@@ -21,6 +21,7 @@ the master's adapter verbs.
 | `card/` | The node arbiter: its Python package, pinned `pyproject.toml`, node setup and user unit, uploaded to every node as it stands |
 | `tests/` | The repository checks and every test: the master's as Cargo tests, the node arbiter's Python tests under `tests/card/` |
 | `docs/` | The canonical statements of what the arbiter does |
+| `deploy/` | The master's systemd user unit, which a deployment links from the deploy tree |
 
 At the root stand the Cargo manifest, the version, `testbed.toml` with its Korean ledger, `rustfmt.toml`
 and `CLAUDE.md`.

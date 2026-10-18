@@ -20,9 +20,9 @@ binaries = ["card-master"]
 
 # The master runs from its own deploy tree. A release is a worktree of the commit, so the `card/` package
 # the master's install uploads to every node stands in it beside `bin/card-master`, and the master reads
-# both through the deploy link (docs/api.md, 「Settings」, `BMO_CODE_ROOT`).
+# both through the deploy link (docs/api.md, 「Settings」, `BMO_CODE_ROOT`). Its unit is a `binary` one,
+# restarted only where its binary changed so no placement under way is cut, so no health is waited on.
 [deploy]
 root = "~/.local/share/bmo-arbiter"
 data_root = "~/.local/share/bmo-arbiter/data"
 units = ["deploy/systemd/*.service"]
-health = "curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:7440/state"

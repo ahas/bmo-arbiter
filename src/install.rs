@@ -73,6 +73,30 @@ pub struct Timing {
   pub running_settle: Duration,
 }
 
+/// The setting that sets every wait of the install alike (docs/api.md, 「Settings」).
+pub const INSTALL_POLL: &str = "CARD_INSTALL_POLL_MS";
+
+impl Timing {
+  /// As the environment sets it: `CARD_INSTALL_POLL_MS`, where it names a number of milliseconds, sets the
+  /// setup's polls, the unit's polls and the wait before its main process is read again alike, which a
+  /// check does to run an install quickly; else the defaults.
+  pub fn from_env() -> Self {
+    let named = std::env::var(INSTALL_POLL).ok().and_then(|value| value.trim().parse::<u64>().ok());
+    match named {
+      Some(ms) => {
+        let every = Duration::from_millis(ms);
+        Self {
+          setup_every: every,
+          running_every: every,
+          running_settle: every,
+          ..Self::default()
+        }
+      }
+      None => Self::default(),
+    }
+  }
+}
+
 impl Default for Timing {
   fn default() -> Self {
     Self {

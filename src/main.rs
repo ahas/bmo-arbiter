@@ -1,27 +1,79 @@
-//! `card-master`, the master's binary (docs/api.md, 「The master's command line」): `install`, `uninstall`,
-//! `lend` and `occupants` reach the nodes the node registry names.
+//! `card-master` (docs/api.md, 「The master's command line」): with no verb it stands as the master,
+//! answering on its loopback port; `--once` reads every slave once and prints the picture; `check` says
+//! what the placement rules would place where; `push` writes each node the part of them that reaches it;
+//! `rules --node <node> --json` prints one node's part; `place` and `remove` ask the running master to
+//! move a service; `install`, `uninstall`, `lend` and `occupants` reach the node arbiter on a node.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
+use bmo_arbiter::client::ask_master;
+use bmo_arbiter::hands::LiveHands;
 use bmo_arbiter::install::{
   InstallOptions, Timing, install, lend, read_occupants, rival_units_from_env, uninstall,
 };
-use bmo_arbiter::reach::{NodeRegistry, NodeShell};
+use bmo_arbiter::master::Master;
+use bmo_arbiter::placement::{Board, Placer, Verb as PlaceVerb, declaration_roots_from_env};
+use bmo_arbiter::reach::{NodeRegistry, NodeShell, home};
+use bmo_arbiter::rules::{NodeFacts, rules_path};
+use bmo_arbiter::serve::{LiveWorld, Settings, once, serve};
+use bmo_arbiter::verbs::{
+  Roots, carry_rules, check_lines, code_root, log_push, misfits, reach_nodes, standing_rules,
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "card-master", about = "The card arbiter's master")]
 struct Cli {
-  /// The arbiter's own tree, whose `card/` the install carries and whose version it writes.
+  /// The data root whose placements hold the rules.
+  #[arg(long, env = "BMO_DATA_DIR", global = true)]
+  data_root: Option<PathBuf>,
+  /// The arbiter's own tree, whose `card/` the install carries and whose version it shows: unless named,
+  /// `BMO_DEPLOY_DIR`, else the deploy link where the binary stands in a release, else the tree the binary
+  /// stands in.
   #[arg(long, env = "BMO_CODE_ROOT", global = true)]
   code_root: Option<PathBuf>,
+  /// Read every slave once, print the picture and end.
+  #[arg(long)]
+  once: bool,
   #[command(subcommand)]
-  verb: Verb,
+  verb: Option<Verb>,
 }
 
 #[derive(Subcommand)]
 enum Verb {
+  /// Read the rules and say what they would place where, writing nothing.
+  Check,
+  /// Write each node whose arbiter answers, or each node named, the part of the rules that reaches it.
+  Push {
+    #[arg(long = "node")]
+    nodes: Vec<String>,
+  },
+  /// Put a service on a node through the running master: its arbiter, its role, its occupants and its
+  /// adapter's install, the rest of a single-node service taken off.
+  Place {
+    service: String,
+    #[arg(long)]
+    to: String,
+  },
+  /// Take a service off a node through the running master.
+  Remove {
+    service: String,
+    #[arg(long)]
+    from: String,
+  },
+  /// Print the part of the rules that reaches one node, as the JSON a push writes.
+  Rules {
+    #[arg(long)]
+    node: String,
+    /// Print it as JSON, the one form it is given in, named so a reader of the call sees it.
+    #[arg(long, required = true)]
+    json: bool,
+    /// Whether the machine is a desktop, where its slave does not say.
+    #[arg(long)]
+    desktop: Option<bool>,
+  },
   /// Stand or update the node arbiter on each node named.
   Install {
     #[arg(long = "node", required = true)]
@@ -55,36 +107,136 @@ enum Verb {
   },
 }
 
-// The tree the binary stands in, `<tree>/bin/card-master`, where none is named.
+// The master's own data root, under the home.
+fn own_data_root() -> PathBuf {
+  home().join(".local/share/bmo/data")
+}
+
+// The arbiter's own tree, looked up through the deploy link rather than the release the binary started
+// from.
 fn own_code_root() -> PathBuf {
-  std::env::current_exe()
-    .ok()
-    .and_then(|exe| Some(exe.parent()?.parent()?.to_owned()))
-    .unwrap_or_else(|| PathBuf::from("."))
+  code_root(
+    std::env::var_os("BMO_DEPLOY_DIR").map(PathBuf::from),
+    std::env::current_exe().ok().as_deref(),
+    &home().join(".local/share/bmo-arbiter/deploy"),
+  )
 }
 
 fn say(line: String) {
   println!("{line}");
 }
 
-async fn shell(registry: &NodeRegistry, node: &str) -> Result<NodeShell, String> {
+async fn shell(roots: &Roots, node: &str) -> Result<NodeShell, String> {
   Ok(NodeShell {
-    connection: registry.read_connection(node).await?,
+    connection: roots.registry()?.read_connection(node).await?,
   })
 }
 
-async fn run(verb: Verb, code_root: &Path) -> Result<(), String> {
-  let registry = NodeRegistry::from_env()?;
+/// The master standing, or read once.
+async fn stand(roots: Roots, once_only: bool) -> Result<(), String> {
+  let settings = Settings::from_env();
+  if let Err(why) = &roots.registry {
+    eprintln!("card-master: {why}; no node is read");
+  }
+  let world = Arc::new(LiveWorld::new(roots.registry.clone(), roots.code_root.clone()));
+  let master = Master::new(world, rules_path(&roots.data_root), settings.read_every.as_secs_f64());
+  if once_only {
+    println!("{}", once(master).await);
+    return Ok(());
+  }
+  let placer = Placer::new(
+    Arc::new(LiveHands {
+      registry: roots.registry.clone(),
+      declaration_roots: roots.declaration_roots.clone(),
+      code_root: roots.code_root.clone(),
+      data_root: roots.data_root.clone(),
+    }),
+    &roots.data_root.join("placements"),
+    Arc::new(Mutex::new(Board::default())),
+  );
+  serve(master, settings, placer).await.map_err(|fault| fault.to_string())
+}
+
+/// A verb that reaches the nodes; whether it did all it says, or why it could not.
+async fn run(verb: Verb, roots: &Roots) -> Result<bool, String> {
   match verb {
+    Verb::Place { service, to } => {
+      ask_master(Settings::from_env().port, PlaceVerb::Place, &service, &to).await
+    }
+    Verb::Remove { service, from } => {
+      ask_master(Settings::from_env().port, PlaceVerb::Remove, &service, &from).await
+    }
+    Verb::Check => {
+      let rules = standing_rules(roots)?;
+      let reached = reach_nodes(roots, &[]).await?;
+      let cards: Vec<(NodeFacts, f64)> =
+        reached.iter().filter_map(|node| Some((node.facts.clone(), node.card_mib?))).collect();
+      let facts: Vec<NodeFacts> = reached.into_iter().map(|node| node.facts).collect();
+      for line in check_lines(&rules, &facts) {
+        println!("{line}");
+      }
+      let faults = misfits(&rules, &cards);
+      for fault in &faults {
+        eprintln!("card-master: {fault}");
+      }
+      Ok(faults.is_empty())
+    }
+    Verb::Push { nodes } => {
+      let rules = standing_rules(roots)?;
+      let mut failed = false;
+      for node in reach_nodes(roots, &nodes).await? {
+        // A node with no arbiter answering is left as it stands unless named.
+        if nodes.is_empty() && !node.answers {
+          println!("{}: no arbiter answers, so it is passed by", node.facts.name);
+          continue;
+        }
+        let part = rules.for_node(&node.facts);
+        match carry_rules(&node.shell, &part).await {
+          Ok(hash) => {
+            log_push(&roots.data_root, &node.facts.name, &hash);
+            println!(
+              "{}: {} occupants, {} groups, {} units, {} rules, {} turns ({hash})",
+              node.facts.name,
+              part.occupants.len(),
+              part.groups.len(),
+              part.units.len(),
+              part.rules.len(),
+              part.turns.len()
+            );
+          }
+          Err(fault) => {
+            eprintln!("card-master: the rules were not written to {}: {fault}", node.facts.name);
+            failed = true;
+          }
+        }
+      }
+      Ok(!failed)
+    }
+    Verb::Rules {
+      node,
+      json: _,
+      desktop,
+    } => {
+      let rules = standing_rules(roots)?;
+      let Some(reached) = reach_nodes(roots, std::slice::from_ref(&node)).await?.into_iter().next() else {
+        return Ok(false);
+      };
+      let facts = NodeFacts {
+        desktop: if reached.answers { reached.facts.desktop } else { desktop.unwrap_or(false) },
+        ..reached.facts
+      };
+      print!("{}", rules.for_node(&facts).node_text());
+      Ok(true)
+    }
     Verb::Install { nodes, store_gib } => {
       for node in nodes {
-        let connection = registry.read_connection(&node).await?;
+        let connection = roots.registry()?.read_connection(&node).await?;
         let options = InstallOptions {
           role: connection.role.clone(),
-          code_root: code_root.to_owned(),
+          code_root: roots.code_root.clone(),
           store_gib: store_gib.filter(|gib| *gib > 0.0),
           rival_units: rival_units_from_env(),
-          timing: Timing::default(),
+          timing: Timing::from_env(),
         };
         let outcome = install(&node, &NodeShell { connection }, &options, &say).await;
         if !outcome.ok {
@@ -93,14 +245,16 @@ async fn run(verb: Verb, code_root: &Path) -> Result<(), String> {
         }
         say(format!("{node}: the arbiter stands"));
       }
+      Ok(true)
     }
     Verb::Uninstall { nodes, keep_store } => {
       for node in nodes {
-        uninstall(&shell(&registry, &node).await?, keep_store)
+        uninstall(&shell(roots, &node).await?, keep_store)
           .await
           .map_err(|fault| format!("the arbiter was not taken off {node}: {fault}"))?;
         say(format!("{node}: the arbiter is taken off"));
       }
+      Ok(true)
     }
     Verb::Lend {
       node,
@@ -113,11 +267,12 @@ async fn run(verb: Verb, code_root: &Path) -> Result<(), String> {
         }
         None => None,
       };
-      let calls = shell(&registry, &node).await?;
-      lend(&node, &calls, text.as_deref(), &rival_units_from_env(), &Timing::default(), &say).await?;
+      let calls = shell(roots, &node).await?;
+      lend(&node, &calls, text.as_deref(), &rival_units_from_env(), &Timing::from_env(), &say).await?;
+      Ok(true)
     }
     Verb::Occupants { node } => {
-      let view = read_occupants(&shell(&registry, &node).await?, 5).await?;
+      let view = read_occupants(&shell(roots, &node).await?, 5).await?;
       say(format!(
         "{node} occupants: {}",
         if view.order.is_empty() { "(no file: *)" } else { view.order.as_str() }
@@ -130,20 +285,30 @@ async fn run(verb: Verb, code_root: &Path) -> Result<(), String> {
           say(format!("  {line}"));
         }
       }
+      Ok(true)
     }
   }
-  Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
   let cli = Cli::parse();
-  let code_root = cli.code_root.unwrap_or_else(own_code_root);
-  match run(cli.verb, &code_root).await {
-    Ok(()) => ExitCode::SUCCESS,
+  let roots = Roots {
+    data_root: cli.data_root.unwrap_or_else(own_data_root),
+    code_root: cli.code_root.unwrap_or_else(own_code_root),
+    declaration_roots: declaration_roots_from_env(),
+    registry: NodeRegistry::from_env(),
+  };
+  let ran = match cli.verb {
+    None => stand(roots, cli.once).await.map(|()| true),
+    Some(verb) => run(verb, &roots).await,
+  };
+  match ran {
+    Ok(true) => ExitCode::SUCCESS,
+    Ok(false) => ExitCode::FAILURE,
     Err(fault) => {
       eprintln!("card-master: {fault}");
-      ExitCode::from(1)
+      ExitCode::FAILURE
     }
   }
 }

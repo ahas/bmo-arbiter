@@ -1,0 +1,24 @@
+[Unit]
+Description=The card master: placing the services and planning every GPU node's card (docs/placement.md)
+After=network-online.target
+
+[Service]
+Type=simple
+# The deployed tree: its bin/ holds the master and its card/ the node arbiter the master installs on the
+# nodes. Bun runs a service's adapter where its command begins with bun.
+WorkingDirectory=%h/.local/share/bmo-arbiter/deploy
+Environment=PATH=%h/.bun/bin:%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BMO_DATA_DIR=%h/.local/share/bmo-arbiter/data
+# The deployment's own settings (docs/api.md, 「Settings」): the node registry's command, the declaration
+# roots, the console script and the rival units, none of which this repository knows.
+EnvironmentFile=-%h/.config/bmo-arbiter/env
+ExecStartPre=/usr/bin/mkdir -p %h/.local/share/bmo-arbiter/data/placements
+ExecStart=%h/.local/share/bmo-arbiter/deploy/bin/card-master
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+# Linked and enabled by every deployment, and restarted only where the deployment changed the binary, so a
+# placement under way is cut only by a new master.
+X-BMO-Deploy=binary

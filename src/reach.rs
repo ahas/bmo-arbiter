@@ -387,9 +387,9 @@ impl NodeRegistry {
     Ok(connection)
   }
 
-  /// The node's role written in the registry: the services joined by `+`, or none.
-  pub async fn set_role(&self, node: &str, role: Option<&str>) -> RunResult {
-    run(&self.argv(&["--set", node, "--role", role.unwrap_or("none")]), None, COMMAND_LIMIT).await
+  /// The node's role written in the registry, within `limit`: the services joined by `+`, or none.
+  pub async fn set_role(&self, node: &str, role: Option<&str>, limit: Duration) -> RunResult {
+    run(&self.argv(&["--set", node, "--role", role.unwrap_or("none")]), None, limit).await
   }
 }
 
