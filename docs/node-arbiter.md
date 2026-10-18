@@ -573,7 +573,8 @@ node:
 
 ## The checks
 
-- `python3 -m unittest discover tests/card` on the system Python: the desktop rule, where a claimant's
+- `python3 -m unittest discover -s tests/card` on the system Python, which `cargo test` runs as one of its
+  tests: the desktop rule, where a claimant's
   agent is found, the claimants and placing the rules declare, the occupants file and its history, the
   keeper, the queue and its API, resting turns and the tickets asking only to rest, a claimant's tickets
   and the one claim they make with its cgroup and its processes on the card, a terminal that is no task,

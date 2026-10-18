@@ -1,0 +1,22 @@
+[Unit]
+Description=The card arbiter, keeping the rules of this node's card lock (docs/node-arbiter.md)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/bmo-card
+# CARD_LOCK, and CARD_DESKTOP where the machine is a desktop.
+EnvironmentFile=%h/.config/bmo-card/env
+# The lend settings, where an engine borrows this node's card.
+EnvironmentFile=-%h/.config/bmo-card/lend.env
+# Under WSL the driver's libraries, NVML among them, stand here; elsewhere the folder is not there.
+Environment=LD_LIBRARY_PATH=/usr/lib/wsl/lib
+# An rpc-server it lends the card through is this process's child and goes down with the unit. It reads
+# the cgroups of the claimants' agents and /proc, which every account may read.
+ExecStart=%h/bmo-card/.venv/bin/python %h/bmo-card/card.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -18,7 +18,8 @@ the master's adapter verbs.
 | Folder | Holds |
 |---|---|
 | `src/` | The master's package: the library and the `card-master` binary |
-| `tests/` | The repository checks and every test |
+| `card/` | The node arbiter: its Python package, pinned `pyproject.toml`, node setup and user unit, uploaded to every node as it stands |
+| `tests/` | The repository checks and every test: the master's as Cargo tests, the node arbiter's Python tests under `tests/card/` |
 | `docs/` | The canonical statements of what the arbiter does |
 
 At the root stand the Cargo manifest, the version, `testbed.toml` with its Korean ledger, `rustfmt.toml`
