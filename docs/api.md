@@ -366,6 +366,21 @@ service hands its unit descriptions in (「Unit descriptions」). Nothing else o
   own language by the code, never by parsing the English.
 - **Every event's code** is a snake_case word naming what happened, never the node or the service it
   happened to; the node stands in `node`, the rest in `text`.
+- **The codes of what the master reads off a node between two rounds:**
+
+  | Code | What happened |
+  | --- | --- |
+  | `node_reconnected` | the master reaches the node again |
+  | `node_lost` | the master lost the node; the text carries the error where there is one |
+  | `card_claimed` | a claimant claimed the card |
+  | `card_given_back` | a claimant gave the card back |
+  | `stage_waiting` | the engine waits at the card's stage, its units out |
+  | `stage_resumed` | the engine goes on after waiting at the stage |
+  | `unit_unloaded_to_ram` | a unit went into its owner's host memory; the text carries the reason |
+  | `unit_unloaded_to_disk` | a unit went into the dump store; the text carries the reason |
+  | `unit_lowered` | a unit kept in host memory moved into the dump store |
+  | `unit_loaded` | a unit came back onto the card |
+  | `unit_partly_unloaded` | some of a unit's buffers are out |
 
 ## Admission on a shared pool
 
