@@ -517,8 +517,9 @@ no service's own install runs it.
 - **What it writes from them:**
   - `~/.config/bmo-card/env` (`0600`): `CARD_LOCK`, the lock in the node account's home, and
     `CARD_DESKTOP=1` on a WSL machine;
-  - `~/bmo-card/VERSION`, the commit the files were carried from, marked where the arbiter's files differ
-    from it, which the slave shows as its version;
+  - `~/bmo-card/VERSION`, this repository's version and the commit the files were carried from, marked
+    where the arbiter's files differ from it (`0.1.0+<commit>`, or `0.1.0+<commit>.changes`), which the
+    slave shows as its version;
   - the dump store, made in one allocation where it is missing or another size (`docs/placement.md`,
     「The dump store」).
 - **The lend settings** stand in `~/.config/bmo-card/lend.env` (`0600`), written by the `lend` verb alone,

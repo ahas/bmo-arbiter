@@ -37,3 +37,5 @@ libc = "0.2.177"
 # The layout check reads the README's folder table as markdown.
 pulldown-cmark = { version = "0.13.4", default-features = false }
 sse-stream = "0.2.6"
+# The tests that wait run on a paused clock, which moves on whenever nothing else can.
+tokio = { version = "1.47.0", features = ["macros", "rt", "test-util"] }
