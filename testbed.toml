@@ -1,0 +1,28 @@
+# How the testbed tests, checks, builds and deploys this repository, in the testbed's declaration format.
+testbed = 0
+name = "bmo-arbiter"
+
+# Every test is a test of the one Cargo package: the node arbiter's Python tests under `tests/card/` are
+# run by a Cargo test of their own, so the suite gathers them with the rest.
+[test]
+languages = ["cargo"]
+
+[check]
+quick = ["layout", "dependencies", "korean"]
+# No code file holds Korean, so the ledger allows none anywhere.
+korean_ledger = "korean-ledger.json"
+# The base libraries every unit may build on. The arbiter reaches other units only through commands and
+# HTTP (docs/api.md) and uses none of them today.
+base_libraries = ["bmo-chat", "bmo-chat-client", "bmo-ui"]
+
+[build]
+binaries = ["card-master"]
+
+# The master runs from its own deploy tree. A release is a worktree of the commit, so the `card/` package
+# the master's install uploads to every node stands in it beside `bin/card-master`, and the master reads
+# both through the deploy link (docs/api.md, 「Settings」, `BMO_CODE_ROOT`).
+[deploy]
+root = "~/.local/share/bmo-arbiter"
+data_root = "~/.local/share/bmo-arbiter/data"
+units = ["deploy/systemd/*.service"]
+health = "curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:7440/state"
