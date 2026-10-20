@@ -64,7 +64,7 @@ async def samples(root: Path) -> list[dict]:
     broker.turns = turns
     broker.ticket = turns.ask("model", local=True)["id"]
     broker.hold_lock = os.open(lock, os.O_RDWR | os.O_CREAT, 0o666)
-    api = card.UnitsApi(broker, turns, broker.units.store, root / "rules.json", "0.1.0-rev.1+sample",
+    api = card.UnitsApi(broker, turns, broker.units.store, root / "rules.json", "0.1.0-rev.2+sample",
                         memory=StandInMemory())
     api.loop = asyncio.get_running_loop()
     await broker.units.refresh()

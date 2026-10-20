@@ -26,7 +26,7 @@ const PATIENCE: Duration = Duration::from_secs(30);
 
 fn cluster() -> Value {
   json!({
-    "master": { "version": "0.1.0-rev.1", "startedAt": 1000, "rulesFile": "rules.yaml", "rulesLoadedAt": null,
+    "master": { "version": "0.1.0-rev.2", "startedAt": 1000, "rulesFile": "rules.yaml", "rulesLoadedAt": null,
       "rulesError": null, "readEveryMs": 2000 },
     "groups": [], "nodes": [], "declared": [], "services": [], "placement": null, "events": [],
   })
@@ -34,7 +34,7 @@ fn cluster() -> Value {
 
 fn card() -> Value {
   json!({
-    "version": "0.1.0-rev.1", "desktop": false, "occupants": ["voice"], "ranks": [["voice"]], "claim": null,
+    "version": "0.1.0-rev.2", "desktop": false, "occupants": ["voice"], "ranks": [["voice"]], "claim": null,
     "lockHeldBy": [], "busy": false, "queue": [], "typicalHoldMs": {}, "units": [], "device": null,
     "stage": { "waiting": false, "waitingMs": 0, "graphs": 0, "waits": 0, "waitedMs": 0 }, "store": null,
     "ram": { "dumpsMiB": 0, "availableMiB": null, "maxMiB": null, "floorMiB": null, "dump": "disk" },

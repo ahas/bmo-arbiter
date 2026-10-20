@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.1**.
+This document states version **0.1.0-rev.2**.
 
 ## The wire format
 
@@ -399,7 +399,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.1+<commit>` or `0.1.0-rev.1+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.2+<commit>` or `0.1.0-rev.2+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 
@@ -445,7 +445,7 @@ The node arbiter reads the occupants and rules files again within a second of a 
 
 ### The node service
 
-The master learns from the node service (bmo-node, `0.1.0-rev.1`) which nodes there are, how each is
+The master learns from the node service (bmo-node, `0.1.0-rev.2`) which nodes there are, how each is
 reached and which services each is reserved for, and writes a node's role there. It calls the node service
 only through that service's published Rust client, `bmo-node-client`, at `CARD_NODE_URL` with
 `CARD_NODE_TOKEN`:
@@ -571,7 +571,9 @@ the pipeline holds them is decided at these points, in order. Each service's `yi
    request's arrival, `Card._start_wanting` starts `Card._want_back`, which calls `Card.restore` with
    `waits`, and `Card._take_lock_back` asks `Turns.wait` for the lend service's ticket, backdated by the
    wait at the owner's door or the `WANT` seconds, saying `QUEUED <position> <seconds>` as its place moves
-   and waiting without bound for its turn. A claim standing, or the units already back, ends the attempt
+   and waiting without bound for its turn. The ticket names the first of the engine's units still out and
+   its size (`need.unitName`, `need.vramMiB`), so the master plans room for it by the rules (step 5); the
+   restore loads every unit the hold has out. A claim standing, or the units already back, ends the attempt
    (`Card._start_wanting`, `Card._want_back`).
    - `docs/placement.md`, 「The engine's turn」: "the borrowing engine queues for them through its own
      restore: a request that finds its units out has the head say `WANT` on each card, so its hold takes a
@@ -596,7 +598,11 @@ the pipeline holds them is decided at these points, in order. Each service's `yi
    turn not in use, or the service it is told to give way to — the decision becomes a hold, its reason
    "<service>'s turn is in use". So the pipeline's unit is planned onto the cards only once the engine's
    turn rests on every node of the group (`group_gate`), and the engine's units come back only through
-   step 2, never through a placement the master plans while the pipeline's turn is in use.
+   step 2, never through a restore the master plans.
+   - The engine's restore ticket is planned by that gate like any other: it names the unit it brings
+     back, so a rule naming the pipeline's units unloads them for it — held, before the turn may pass,
+     with that turn as its reason. What the master unloads there is the pipeline's; the engine's units
+     come back through step 2 alone.
    - `docs/placement.md`, 「The engine's turn」: "a target whose turn is in use is never unloaded for one of
      its rank, whatever a rule names: its turn passes to that rank by its own turn values …, by resting, by
      its holder giving its ticket back once it has emptied the card itself, or by its head saying `QUIET`

@@ -1507,6 +1507,13 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
     def model_tickets(self) -> list[dict]:
         return [one for one in self.turns.state()["queue"] if one["serviceName"] == "model"]
 
+    async def test_a_wants_ticket_names_the_first_unit_out_so_the_master_places_room_for_it(self) -> None:
+        broker, _told, _coder = await self.out_broker()
+        broker.want(5.0)
+        await self.until(lambda: bool(self.model_tickets()))
+        ticket = self.model_tickets()[0]
+        self.assertEqual(ticket["need"], {"unitName": "model/weights", "vramMiB": 1024})
+
     async def test_want_puts_a_hold_whose_units_are_out_in_the_queue_by_its_seconds_and_loads_them_on_its_turn(self) -> None:
         broker, told, coder = await self.out_broker()
         self.turns.ask("coder")

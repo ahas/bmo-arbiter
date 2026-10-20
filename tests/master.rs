@@ -36,6 +36,9 @@ rules:
   - when: { request: "coder/*" }
     evict: { cheapest: ["model/*"] }
     restore: true
+  - when: { request: "model/*" }
+    evict: { cheapest: ["coder/*"] }
+    restore: true
 "#;
 
 /// A world of nodes whose slaves all answer what the test sets, every command written down. Where `meet` is
@@ -369,6 +372,50 @@ async fn a_groups_tickets_are_planned_together_once_every_node_it_stands_on_has_
   master.poll().await;
   let evicted = sent(&stand, "evict");
   assert_eq!(evicted.len(), 2, "{evicted:?}");
+}
+
+/// A ticket the lending engine's `WANT` raises waiting behind the coder's turn on a card the coder fills.
+fn lending_engine_waiting(gives_way_to: Option<&str>) -> Value {
+  let mut turn = ticket(31, "coder", true, None);
+  turn["inUse"] = json!(true);
+  if let Some(service) = gives_way_to {
+    turn["giveWay"] = json!(true);
+    turn["giveWayFor"] = json!(service);
+  }
+  let mut waiting = ticket(41, "model", false, Some("model/weights"));
+  waiting["need"] = json!({ "unitName": "model/weights", "vramMiB": 4608 });
+  let mut answer = slave(1500.0, store_resident(), None, json!([turn, waiting]));
+  answer["units"]
+    .as_array_mut()
+    .unwrap()
+    .push(unit("coder/stage", "resident", 6000.0, None));
+  answer
+}
+
+#[tokio::test]
+async fn a_lending_engines_waiting_ticket_is_unloaded_for_by_a_rule_only_once_the_turn_passes_to_it() {
+  // the coder's turn is in use and does not give way: the engine's ticket is held with that reason
+  let (mut master, stand) = master(lending_engine_waiting(None));
+  master.discover().await;
+  master.poll().await;
+  assert!(sent(&stand, "evict").is_empty());
+  let held = master
+    .state()
+    .events
+    .iter()
+    .filter(|event| {
+      event.text.starts_with("model/weights ") && event.text.ends_with(": coder's turn is in use")
+    })
+    .count();
+  assert_eq!(held, 1);
+
+  // the coder gives way to the engine: the pipeline's unit is unloaded for the engine's ticket
+  *stand.answer.lock().unwrap() = lending_engine_waiting(Some("model"));
+  master.poll().await;
+  let evicted = sent(&stand, "evict");
+  assert_eq!(evicted.len(), 1, "{evicted:?}");
+  assert!(evicted[0].contains("/card-units/coder%2Fstage"), "{evicted:?}");
+  assert!(evicted[0].contains("back once 41 is done"), "{evicted:?}");
 }
 
 #[tokio::test]

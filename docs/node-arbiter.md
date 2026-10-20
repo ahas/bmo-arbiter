@@ -486,9 +486,10 @@ Each occupant chooses how it waits, inside the contract above:
   - **A lent hold whose units are out takes a place in the queue on `WANT`** through its own restore: the
     arbiter asks the lend service's turn back as a restore does, its ticket standing by those seconds,
     says `QUEUED <position> <seconds>` on the hold while it waits, and loads the units back once the turn
-    is the hold's, saying `RESTORED`. The occupant holding the turn then gives way to it by its own rules:
-    at once if it rests, by its turn values if it stands at the lend service's rank, never if it stands
-    above.
+    is the hold's, saying `RESTORED`. The ticket names the first of the hold's units still out and its
+    size, so the master plans room for it by the rules (`docs/api.md`, 「Admission on a shared pool」).
+    The occupant holding the turn then gives way to it by its own rules: at once if it rests, by its turn
+    values if it stands at the lend service's rank, never if it stands above.
   - **The seconds** count from the later of the request's arrival and its card's units going out, so a
     request held across a `PASS` stands behind the ticket the turn passed to.
   - **`UNWANT`** takes the ticket back where the units have not begun to come back; units already coming

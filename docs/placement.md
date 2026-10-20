@@ -459,8 +459,12 @@ sequenceDiagram
 - **Two engines at one rank on a shared pool** need rules that name what goes, since the default frees
   nothing between units of one priority: a rule for the pipeline's unit unloading the cheapest of the
   borrowing engine's units that make room, restored once the pipeline's ticket is done and planned only
-  once the borrowing engine's turn rests (「The engine's turn」); and none for the borrowing engine, which
-  takes its cards back through its hold's own restore on `WANT`. A third service asking on such a pool
+  once the borrowing engine's turn rests (「The engine's turn」); and a rule for the borrowing engine's
+  own request, unloading the cheapest of the pipeline's units that make room. That request is the ticket
+  the engine's `WANT` raises, which names the first of its units still out; the master plans it once the
+  pipeline's turn may pass to the engine and makes that room through the pipeline's own owner, so a
+  pipeline whose own pause is late is still emptied for the engine. The engine's units themselves come
+  back through its hold's own restore. A third service asking on such a pool
   unloads the cheapest of either engine's units that make room, and restores them once it is done.
 - **Cheapest** is the least sum of each unit's unload and load time and of the time its group waits
   meanwhile; a group's resident units waiting at a stage cost that wait for every request in hand.

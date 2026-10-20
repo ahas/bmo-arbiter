@@ -879,18 +879,21 @@ class Turns:
             }
 
     async def wait(self, service: str, on_queued: Callable[[dict], Awaitable[None]] | None = None,
-                   gives_way_s: float | None = None, waited_s: float = 0.0) -> int | None:
+                   gives_way_s: float | None = None, waited_s: float = 0.0,
+                   need: dict | None = None) -> int | None:
         """A turn waited for in this process, asked after every poll, giving way in `gives_way_s` where it
         does, and standing by a request that has waited `waited_s`; the ticket, or None where the service has
-        no place on the node. `on_queued` hears each answer that is not yet a turn."""
-        answered = self.ask(service, local=True, gives_way_s=gives_way_s, waited_s=waited_s)
+        no place on the node. `on_queued` hears each answer that is not yet a turn. `need` names the unit the
+        ticket asks for, which the master places by the rules. A ticket dropped for silence is asked for
+        afresh with the same need."""
+        answered = self.ask(service, local=True, need=need, gives_way_s=gives_way_s, waited_s=waited_s)
         try:
             while answered is not None and not answered["turn"]:
                 if on_queued is not None:
                     await on_queued(answered)
                 await asyncio.sleep(TURN_POLL_S)
                 answered = (self.again(answered["id"])
-                            or self.ask(service, local=True, gives_way_s=gives_way_s, waited_s=waited_s))
+                            or self.ask(service, local=True, need=need, gives_way_s=gives_way_s, waited_s=waited_s))
         except BaseException:
             if answered is not None:
                 self.done(answered["id"])
@@ -1849,6 +1852,14 @@ class Card:
             self.turns.done(self.ticket)
             self.ticket = None
 
+    def unit_out(self) -> dict | None:
+        """The first of the hold's units still out, as the card shows it, and the size it needs back; None where
+        every unit stands on the card. A restore the head's `WANT` starts names it in its ticket, so the master
+        places room for it by the rules (docs/api.md, 「Admission on a shared pool」)."""
+        if self.units is None:
+            return None
+        return next((one for one in self.units.shown() if one["state"] != units_mod.RESIDENT), None)
+
     async def _take_lock_back(self, waits: bool = False) -> None:
         """The standing hold's turn and lock taken again before its units come back, saying `QUEUED <position>
         <seconds>` on the hold whenever its place moves; NoRoom where another occupant keeps the lock past the
@@ -1869,7 +1880,12 @@ class Card:
                     shown = answer["position"]
                     self._tell(f"QUEUED {answer['position']} {answer['waitMs'] / 1000:g}")
 
-            waiting = self.turns.wait(self.lent_to, queued, gives_way_s=LEND_GIVES_WAY_S, waited_s=waited_s)
+            # A restore the head's WANT starts names the unit it brings back, so the master may make room for
+            # it by the rules; the hold's first turn takes none, the unit asked for being the hold's own card.
+            out = self.unit_out() if waits else None
+            need = None if out is None else {"unitName": out["name"], "vramMiB": out["vramMiB"]}
+            waiting = self.turns.wait(self.lent_to, queued, gives_way_s=LEND_GIVES_WAY_S, waited_s=waited_s,
+                                      need=need)
             try:
                 self.ticket = await (waiting if waits else asyncio.wait_for(waiting, self.lock_wait_s * 3))
             except asyncio.TimeoutError:

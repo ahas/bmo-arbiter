@@ -130,7 +130,7 @@ fn a_manifest_breaking_the_rules_is_named() {
     renamed = { package = "bmo-receiver", version = "0.1" }
     inside = { path = "src/inside" }
     outside = { path = "../../elsewhere" }
-    bmo-node-client = { path = "../node/crates/client", version = "=0.1.0-rev.1" }
+    bmo-node-client = { path = "../node/crates/client", version = "=0.1.0-rev.2" }
 
     [target.'cfg(unix)'.dev-dependencies]
     bmo-ui = "0.1"
