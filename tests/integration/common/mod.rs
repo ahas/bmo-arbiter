@@ -89,7 +89,7 @@ const [, , agent, command] = args;
 appendFileSync(`${dir}/commands.log`, `${agent}: ${command}\n`);
 const kept = (name) => `${dir}/files/${agent}/${name}`;
 if (command.startsWith("echo HOME")) {
-  process.stdout.write("HOME=/home/stand\n");
+  process.stdout.write("HOME=/srv/stand\n");
 } else if (command.includes("/card-units/")) {
   process.stdout.write('{}\n200');
 } else if (command.includes("MACHINE_WSL")) {
@@ -490,7 +490,7 @@ fn commit(tree: &Path) {
         "-c",
         "user.name=tester",
         "-c",
-        "user.email=tester@example.com",
+        "user.email=tester",
         "-c",
         "commit.gpgsign=false",
         "-c",

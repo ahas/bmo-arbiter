@@ -18,6 +18,7 @@ the master's adapter verbs. It is an upstream unit: a harness takes a turn on a 
 
 | Folder | Holds |
 |---|---|
+| `.graph/` | The code dependency graph: one node per feature with its files and the features it needs, and the APIs this repository exposes and calls |
 | `src/` | The master's package: the library and the `bmo-arbiter` binary |
 | `crates/` | The crates the arbiter publishes: `client/`, every body and a call for every route, and `plugin/`, the MCP server, the `bmo-arbiter` skill and the OpenAPI document's generator |
 | `packages/` | The TypeScript client, `arbiter-client/`, generated from `docs/openapi.json` |
@@ -37,6 +38,7 @@ At the root stand the Cargo manifest, the version, the MIT license, `testbed.tom
 | `docs/openapi.json` | The same routes as the OpenAPI 3.1 contract, generated from the client's types |
 | `docs/node-arbiter.md` | The node arbiter: the lock, the occupants, claimants, the desktop, the keeper, the hold, lending, and its install |
 | `docs/placement.md` | Units, host memory, the dump store, the master and its slaves, placing the services, and the rules |
+| `docs/PERSONAL-DATA.md` | The rule against personal data in the repository, and the check that holds every tracked file to it |
 
 ## Version
 

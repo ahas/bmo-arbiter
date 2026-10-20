@@ -119,7 +119,7 @@ fn the_readme_names_every_top_level_folder_and_no_other() {
     .map(|entry| entry.expect("a root entry is readable"))
     .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
     .map(|entry| entry.file_name().to_string_lossy().into_owned())
-    .filter(|name| !is_skipped(name) && !name.starts_with('.'))
+    .filter(|name| !is_skipped(name))
     .collect();
   standing.sort();
   assert_eq!(named, standing, "the README's folder table and the top-level folders differ");

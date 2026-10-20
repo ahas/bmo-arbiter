@@ -38,7 +38,7 @@ async fn a_place_stands_the_arbiter_reserves_the_node_installs_there_and_takes_t
     "{adapter}"
   );
   assert!(
-    world.commands().iter().any(|line| line == "b: upload /home/stand/bmo-card/card.py"),
+    world.commands().iter().any(|line| line == "b: upload /srv/stand/bmo-card/card.py"),
     "{:#?}",
     world.commands()
   );

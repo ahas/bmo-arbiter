@@ -491,14 +491,7 @@ fn declarations_are_found_through_the_git_index_a_submodule_s_among_them_and_not
   let pooled = tempfile::tempdir().unwrap();
   let git_in = |at: &Path, args: &[&str]| {
     let done = std::process::Command::new("git")
-      .args([
-        "-c",
-        "user.name=tester",
-        "-c",
-        "user.email=tester@example.com",
-        "-c",
-        "protocol.file.allow=always",
-      ])
+      .args(["-c", "user.name=tester", "-c", "user.email=tester", "-c", "protocol.file.allow=always"])
       .arg("-C")
       .arg(at)
       .args(args)

@@ -1686,16 +1686,16 @@ class LendingTest(unittest.TestCase):
         self.assertIsNone(card.lending({"CARD_LOCK": "/h/.gpu.lock"}))
 
     def test_lend_settings_must_be_whole(self) -> None:
-        self.assertEqual(card.lending({"LLM_KEY": "k", "CARD_ADDRESS": "10.0.0.2"}),
+        self.assertEqual(card.lending({"LLM_KEY": "k", "CARD_ADDRESS": "192.0.2.10"}),
                          "lending needs CARD_LEND_SERVICE CARD_RPC_SERVER CARD_RPC_CACHE CARD_SLOT_DIR")
 
     def test_whole_lend_settings_lend_the_card(self) -> None:
-        lent = card.lending({"LLM_KEY": "k", "CARD_ADDRESS": "10.0.0.2", "CARD_LEND_SERVICE": "svc", "CARD_RPC_SERVER": "/b/rpc",
+        lent = card.lending({"LLM_KEY": "k", "CARD_ADDRESS": "192.0.2.10", "CARD_LEND_SERVICE": "svc", "CARD_RPC_SERVER": "/b/rpc",
                              "CARD_RPC_CACHE": "/c", "CARD_SLOT_DIR": "/s", "CARD_PACKED": "1"})
         self.assertIsInstance(lent, card.Lending)
         assert isinstance(lent, card.Lending)
-        self.assertEqual((lent.address, lent.service, lent.rpc_server, lent.pieces, lent.packed), ("10.0.0.2", "svc", "/b/rpc", Path("/s"), True))
-        self.assertEqual(card.rpc_argv(lent.rpc_server, lent.address), ["/b/rpc", "-H", "10.0.0.2", "-p", "50052", "-c"])
+        self.assertEqual((lent.address, lent.service, lent.rpc_server, lent.pieces, lent.packed), ("192.0.2.10", "svc", "/b/rpc", Path("/s"), True))
+        self.assertEqual(card.rpc_argv(lent.rpc_server, lent.address), ["/b/rpc", "-H", "192.0.2.10", "-p", "50052", "-c"])
 
     def test_the_rules_follow_the_settings(self) -> None:
         with tempfile.TemporaryDirectory() as root:

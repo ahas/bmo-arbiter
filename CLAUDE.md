@@ -7,7 +7,7 @@ These rules hold every change to this repository.
 - `docs/` is the canonical statement of what the arbiter does; the code is one realisation of it. Before
   changing code, read the document covering that area: `docs/api.md` for every route, protocol, file,
   verb, setting and code; `docs/node-arbiter.md` for the node arbiter; `docs/placement.md` for units, the
-  dump store, the master and the rules.
+  dump store, the master and the rules; `docs/PERSONAL-DATA.md` for what no file may hold.
 - A change that would make a document wrong or incomplete repairs the document first, stating what is
   true now, and the code is written to match. A change to the boundary moves the version as
   `docs/api.md` says, in the same commit.
@@ -41,6 +41,7 @@ These rules hold every change to this repository.
 - What the arbiter says is an English sentence for a person, or a status, a protocol word and a
   kebab-case code for a machine. Words a person reads in another language are a console's language pack.
 - No personal data: no user names, home directories, machine names, addresses or names of any agent.
+  `docs/PERSONAL-DATA.md` states the rule, and the check in `tests/` holds every tracked file to it.
   Names the arbiter needs at runtime come from its settings, the node service and the services'
   declarations, never from the code. Tests use neutral names.
 

@@ -74,7 +74,7 @@ impl Node {
   fn answer(&self, command: &str) -> RunResult {
     let changes = &self.changes;
     if command.starts_with("echo HOME") {
-      answer("HOME=/home/user\n", 0)
+      answer("HOME=/srv/node\n", 0)
     } else if command.contains("MACHINE_WSL") {
       answer(changes.probe.unwrap_or(DESKTOP_PROBE), 0)
     } else if command.contains(&format!("is-active {RIVAL}")) {
@@ -167,11 +167,8 @@ fn the_lock_stands_in_the_nodes_own_home_and_the_desktop_rule_on_wsl() {
     card: card.clone(),
   };
   let node = Machine { wsl: false, card };
-  assert_eq!(
-    card_settings("/home/user", &desktop),
-    "CARD_LOCK=/home/user/.gpu.lock\nCARD_DESKTOP=1\n"
-  );
-  assert_eq!(card_settings("/home/other", &node), "CARD_LOCK=/home/other/.gpu.lock\n");
+  assert_eq!(card_settings("/srv/node", &desktop), "CARD_LOCK=/srv/node/.gpu.lock\nCARD_DESKTOP=1\n");
+  assert_eq!(card_settings("/srv/other", &node), "CARD_LOCK=/srv/other/.gpu.lock\n");
 }
 
 #[tokio::test(start_paused = true)]
@@ -196,12 +193,12 @@ async fn the_install_runs_its_steps_in_order_and_leaves_the_unit_standing() {
     ]
   );
   assert_eq!(
-    at.carried("/home/user/.config/bmo-card/env"),
-    Some(("CARD_LOCK=/home/user/.gpu.lock\nCARD_DESKTOP=1\n".to_owned(), 0o600))
+    at.carried("/srv/node/.config/bmo-card/env"),
+    Some(("CARD_LOCK=/srv/node/.gpu.lock\nCARD_DESKTOP=1\n".to_owned(), 0o600))
   );
-  assert!(at.commands().contains(&"chmod 600 /home/user/.config/bmo-card/env".to_owned()));
+  assert!(at.commands().contains(&"chmod 600 /srv/node/.config/bmo-card/env".to_owned()));
   for name in CARD_FILES {
-    assert!(at.commands().contains(&format!("upload /home/user/bmo-card/{name}")), "{name}");
+    assert!(at.commands().contains(&format!("upload /srv/node/bmo-card/{name}")), "{name}");
   }
   assert!(at.ran("systemctl --user enable bmo-card.service"));
   // The lend settings, the occupants and the node's rules are none of this install's: an existing lend
@@ -297,15 +294,15 @@ async fn the_lend_step_writes_its_settings_privately_replaces_the_rival_unit_and
     rival: Some("active\n"),
     ..Changes::default()
   });
-  let settings = "LLM_KEY=k\nCARD_ADDRESS=10.0.0.2\nCARD_RPC_SERVER={home}/rpc\n";
+  let settings = "LLM_KEY=k\nCARD_ADDRESS=192.0.2.10\nCARD_RPC_SERVER={home}/rpc\n";
 
   lend("node-a", &at, Some(settings), &[RIVAL.to_owned()], &Timing::default(), &|_| {})
     .await
     .unwrap();
 
   assert_eq!(
-    at.carried("/home/user/.config/bmo-card/lend.env"),
-    Some(("LLM_KEY=k\nCARD_ADDRESS=10.0.0.2\nCARD_RPC_SERVER=/home/user/rpc\n".to_owned(), 0o600))
+    at.carried("/srv/node/.config/bmo-card/lend.env"),
+    Some(("LLM_KEY=k\nCARD_ADDRESS=192.0.2.10\nCARD_RPC_SERVER=/srv/node/rpc\n".to_owned(), 0o600))
   );
   assert!(at.commands().iter().any(|command| command.contains(&format!("disable --now {RIVAL}"))
     && command.contains("restart bmo-card.service")));
