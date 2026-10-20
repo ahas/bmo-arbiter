@@ -1,0 +1,67 @@
+[
+  {
+    "id": "plugin/openapi",
+    "title": "OpenAPI document",
+    "what": "The OpenAPI 3.1 document of every route of both programs, its body schemas drawn from the client's types, with the events, the harness plugin and its tools beside them.",
+    "files": [
+      "crates/plugin/src/openapi.rs"
+    ],
+    "symbols": [
+      "openapi",
+      "openapi_json"
+    ],
+    "aliases": [],
+    "needs": [
+      "plugin/server",
+      "plugin/tools",
+      "client/card",
+      "client/cluster",
+      "client/descriptions",
+      "client/events",
+      "client/placements",
+      "client/wire"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393466
+  },
+  {
+    "id": "plugin/server",
+    "title": "MCP server",
+    "what": "The MCP server bmo-arbiter mcp starts on standard input and output, answering the harness tools over the master and the node arbiter through the arbiter client.",
+    "files": [
+      "crates/plugin/src/server.rs"
+    ],
+    "symbols": [
+      "ArbiterServer",
+      "ENTRY"
+    ],
+    "aliases": [],
+    "needs": [
+      "plugin/tools"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393461
+  },
+  {
+    "id": "plugin/tools",
+    "title": "Harness tools",
+    "what": "The tools a harness takes a turn on a card through: one for each route, each a thin call of one client method, listed by the MCP server and the OpenAPI document from one table.",
+    "files": [
+      "crates/plugin/src/tools.rs"
+    ],
+    "symbols": [
+      "tools",
+      "ArbiterTool",
+      "Clients",
+      "ToolFailure"
+    ],
+    "aliases": [],
+    "needs": [
+      "client/calls",
+      "client/card",
+      "client/placements"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393456
+  }
+]

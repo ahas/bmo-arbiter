@@ -1,0 +1,23 @@
+[
+  {
+    "id": "calls/node-service",
+    "title": "bmo-node nodes",
+    "what": "The node service's routes the master calls through its published client: every node, how one is reached and its role, and a node's role written.",
+    "files": [
+      "docs/api.md",
+      "src/reach.rs"
+    ],
+    "symbols": [
+      "NodeRegistry"
+    ],
+    "aliases": [],
+    "needs": [],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497388012,
+    "boundary": {
+      "side": "calls",
+      "repository": "bmo-node",
+      "api": "api/http"
+    }
+  }
+]

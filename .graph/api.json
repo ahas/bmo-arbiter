@@ -1,0 +1,165 @@
+[
+  {
+    "id": "api/cli",
+    "title": "Command API",
+    "what": "The words of bmo-arbiter, one binary with no verb standing as the master and every verb beside it, and its exit codes, as docs/api.md states them.",
+    "files": [
+      "docs/api.md",
+      "src/main.rs"
+    ],
+    "symbols": [],
+    "aliases": [],
+    "needs": [
+      "master/command"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393520,
+    "boundary": {
+      "side": "exposes"
+    }
+  },
+  {
+    "id": "api/client",
+    "title": "Service clients",
+    "what": "The clients the arbiter publishes: the Rust crate with every body and a call for every route, and the TypeScript package generated from the same OpenAPI document.",
+    "files": [
+      "docs/api.md",
+      "crates/client/src/call.rs",
+      "packages/arbiter-client/src/index.ts",
+      "packages/arbiter-client/src/schema.ts"
+    ],
+    "symbols": [
+      "ArbiterClient"
+    ],
+    "aliases": [],
+    "needs": [
+      "api/http",
+      "client/calls"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497544547,
+    "boundary": {
+      "side": "exposes"
+    }
+  },
+  {
+    "id": "api/http",
+    "title": "HTTP API",
+    "what": "The routes both programs serve over HTTP, their bodies, pages, events and refusal codes, as docs/api.md and docs/openapi.json state them.",
+    "files": [
+      "docs/api.md",
+      "docs/openapi.json",
+      "src/serve.rs",
+      "card/card.py"
+    ],
+    "symbols": [
+      "serve"
+    ],
+    "aliases": [],
+    "needs": [
+      "master/api",
+      "master/rounds",
+      "master/picture",
+      "master/placement",
+      "master/reach",
+      "master/install",
+      "node/hold",
+      "node/units",
+      "node/claims",
+      "node/desktop"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393509,
+    "boundary": {
+      "side": "exposes"
+    }
+  },
+  {
+    "id": "api/lending",
+    "title": "Lending protocol",
+    "what": "The line protocol a borrowing engine's head speaks over the inner network: HOLD, STATE, QUIET, WANT, UNWANT, DROP, FETCH and SPACE, and the lines the arbiter says back, as docs/api.md states them.",
+    "files": [
+      "docs/api.md",
+      "card/card.py"
+    ],
+    "symbols": [],
+    "aliases": [],
+    "needs": [
+      "node/lending",
+      "node/hold",
+      "node/units"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393514,
+    "boundary": {
+      "side": "exposes"
+    }
+  },
+  {
+    "id": "api/mcp",
+    "title": "Harness plugin",
+    "what": "The bmo-arbiter plugin: the MCP server bmo-arbiter mcp and its seven tools, and the skill telling a harness when and how to use them, as docs/api.md states them.",
+    "files": [
+      "docs/api.md",
+      "crates/plugin/skills/bmo-arbiter/SKILL.md",
+      "crates/plugin/src/server.rs"
+    ],
+    "symbols": [
+      "ArbiterServer"
+    ],
+    "aliases": [],
+    "needs": [
+      "plugin/tools",
+      "plugin/server"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393526,
+    "boundary": {
+      "side": "exposes"
+    }
+  },
+  {
+    "id": "api/service",
+    "title": "Service contract",
+    "what": "The way a service declares itself to the arbiter: a committed <service>.card.toml or a tool's [card] table, the adapter verbs it answers, and BMO_CARD_SERVICE in its processes, as docs/api.md states them.",
+    "files": [
+      "docs/api.md",
+      "src/placement.rs",
+      "src/hands.rs",
+      "card/card.py"
+    ],
+    "symbols": [
+      "Declaration",
+      "declarations"
+    ],
+    "aliases": [],
+    "needs": [
+      "master/placement",
+      "master/hands"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497544521,
+    "boundary": {
+      "side": "exposes"
+    }
+  },
+  {
+    "id": "api/turn-client",
+    "title": "Turn client API",
+    "what": "The turn client offered to an occupant in a process of its own, imported as TurnClient, hold, GivingTurn and quiet, or run as a command around another command, as docs/api.md states it.",
+    "files": [
+      "docs/api.md",
+      "card/turn.py"
+    ],
+    "symbols": [],
+    "aliases": [],
+    "needs": [
+      "node/turn-client"
+    ],
+    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "changed": 1792497393543,
+    "boundary": {
+      "side": "exposes"
+    }
+  }
+]
