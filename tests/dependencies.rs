@@ -1,5 +1,5 @@
-//! Dependencies: no path out of the repository, and no other unit's crate but the base libraries every
-//! unit may build on.
+//! Dependencies: no other repository's crate but the base libraries every unit may build on and the
+//! published clients of the units this one calls, and no path out of the repository but to one of those.
 
 mod support;
 
@@ -9,8 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use support::{ROOT, files_under, shown};
 use toml::{Table, Value};
 
-/// The crates of other repositories a unit may depend on: the base libraries, which know no unit.
-const BASE_LIBRARIES: [&str; 3] = ["bmo-chat", "bmo-chat-client", "bmo-ui"];
+/// The crates of other repositories the arbiter may depend on: the base libraries, which know no unit, and
+/// the published client of the node service it calls (docs/api.md, 「The node service」).
+const OTHER_REPOSITORIES: [&str; 4] = ["bmo-chat", "bmo-chat-client", "bmo-ui", "bmo-node-client"];
 
 /// The dependency tables a manifest or a target section may carry.
 const DEPENDENCY_TABLES: [&str; 5] = [
@@ -73,11 +74,14 @@ fn violations(root: &Path, manifest_dir: &Path, manifest: &Table, shown_as: &str
       let name = detail.and_then(|d| d.get("package")).and_then(Value::as_str).unwrap_or(key);
       let path = detail.and_then(|d| d.get("path")).and_then(Value::as_str);
       match path {
-        Some(path) if !lexical(&manifest_dir.join(path)).starts_with(root) => {
+        Some(path)
+          if !lexical(&manifest_dir.join(path)).starts_with(root)
+            && !OTHER_REPOSITORIES.contains(&name) =>
+        {
           found.push(format!("{shown_as}: {key} reaches outside the repository through {path}"));
         }
         Some(_) => {}
-        None if name.starts_with("bmo-") && !BASE_LIBRARIES.contains(&name) => {
+        None if name.starts_with("bmo-") && !OTHER_REPOSITORIES.contains(&name) => {
           found.push(format!("{shown_as}: {key} is another unit's crate ({name})"));
         }
         None => {}
@@ -113,7 +117,7 @@ fn the_testbed_allows_the_same_base_libraries() {
     .iter()
     .filter_map(Value::as_str)
     .collect();
-  assert_eq!(allowed, BASE_LIBRARIES);
+  assert_eq!(allowed, OTHER_REPOSITORIES);
 }
 
 #[test]
@@ -126,6 +130,7 @@ fn a_manifest_breaking_the_rules_is_named() {
     renamed = { package = "bmo-receiver", version = "0.1" }
     inside = { path = "src/inside" }
     outside = { path = "../../elsewhere" }
+    bmo-node-client = { path = "../node/crates/client", version = "=0.1.0-rev.1" }
 
     [target.'cfg(unix)'.dev-dependencies]
     bmo-ui = "0.1"

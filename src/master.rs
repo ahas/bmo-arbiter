@@ -1,6 +1,6 @@
 //! The card master (docs/placement.md, 「Master and slaves」). Every round it reads
 //! the slaves of the nodes its rules' groups choose, through each node's shell; now and then it reads the
-//! node registry again and asks every node whether a slave answers there. A ticket in a slave's queue that
+//! node service again and asks every node whether a slave answers there. A ticket in a slave's queue that
 //! names a unit is placed by the rules: what makes room is unloaded on that node, and what was unloaded
 //! to come back is loaded back once that ticket is gone, as the slaves say it. It holds no lock and no
 //! card.
@@ -10,8 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
+use bmo_arbiter_client::card::{Card, CardUnitChanges, UnitMove};
+use bmo_arbiter_client::cluster::{
+  CardStage, CardTurn, Cluster, ClusterCard, ClusterNode, ClusterUnit, DeclaredUnit, Group, MasterInfo,
+  NodeLink, Note, QueuedTicket,
+};
 use futures_util::future::join_all;
-use serde::Serialize;
 use serde_json::Value;
 use tokio::task::JoinSet;
 
@@ -19,11 +23,11 @@ use crate::picture::{
   CardView, DESCRIPTIONS_FOLDER, Link, LinkState, NodeView, SlaveRules, TicketView, Turn, UnitDetail,
   UnitPlace, UnitView, card_from, changes, descriptions_mark, plannable, read_descriptions,
 };
-use crate::placement::{Board, RequestView, ServiceView};
+use crate::placement::Board;
 use crate::plan::{Decision, Request};
 pub use crate::reach::BoxFuture;
 use crate::reach::{NodeShell, RunResult};
-use crate::rules::{NodeFacts, Num, Rules, UnitKind, read_rules, selects};
+use crate::rules::{NodeFacts, Num, Rules, read_rules, selects};
 
 /// Where the slave answers on each node's loopback.
 pub const SLAVE: &str = "http://127.0.0.1:7439";
@@ -47,7 +51,7 @@ impl Shell for NodeShell {
   }
 }
 
-/// A node reached: its role in the node registry and its shell.
+/// A node reached: its role in the node service and its shell.
 #[derive(Clone)]
 pub struct Reached {
   pub role: Option<String>,
@@ -67,9 +71,9 @@ pub trait World: Send + Sync {
   fn version(&self) -> String;
 }
 
-/// One event of the picture: when, on which node, the code a console reads it by and the English text a
-/// person reads (docs/api.md, 「Messages and codes」).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One note of the picture: when, in the master's clock's seconds, on which node, the code a reader
+/// translates by and the English text a person reads (docs/api.md, 「Messages and codes」).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Event {
   pub at: Num,
   pub node: Option<String>,
@@ -77,66 +81,9 @@ pub struct Event {
   pub text: String,
 }
 
-/// A unit as the state API gives it: as its slave said, with the kind the rules give it and what its
-/// service says it holds.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct StateUnit {
-  #[serde(flatten)]
-  pub unit: UnitView,
-  pub kind: Option<UnitKind>,
-  pub detail: Option<UnitDetail>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MasterInfo {
-  pub version: String,
-  pub started_at: Num,
-  pub rules_file: String,
-  pub rules_loaded_at: Option<Num>,
-  pub rules_error: Option<String>,
-  pub read_every_s: Num,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GroupState {
-  pub name: String,
-  pub pool: bool,
-  pub nodes: Vec<String>,
-  #[serde(rename = "totalMiB")]
-  pub total_mib: Num,
-  #[serde(rename = "freeMiB")]
-  pub free_mib: Num,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Declared {
-  pub unit: String,
-  pub service: String,
-  pub kind: UnitKind,
-  #[serde(rename = "vramMiB")]
-  pub vram_mib: Option<Num>,
-}
-
-/// The whole picture the state API answers.
-#[derive(Debug, Clone, Serialize)]
-pub struct MasterState {
-  pub master: MasterInfo,
-  pub groups: Vec<GroupState>,
-  pub nodes: Vec<NodeView<StateUnit>>,
-  /// The units the rules declare, so one asked for only on demand is known while no card holds it.
-  pub declared: Vec<Declared>,
-  pub events: Vec<Event>,
-  /// The services the master places, each with its declaration and its nodes.
-  pub services: Vec<ServiceView>,
-  /// The placement request under way, or none.
-  pub request: Option<RequestView>,
-}
-
-#[derive(Serialize)]
-struct Move<'a> {
-  units: Vec<&'a str>,
-  reason: &'a str,
+/// Seconds of the master's clock as epoch milliseconds.
+pub fn millis(seconds: f64) -> i64 {
+  (seconds * 1000.0).round() as i64
 }
 
 /// The reason the master hands a slave with an unload, naming where the unit comes back.
@@ -273,16 +220,16 @@ impl Master {
         self.rules_error = Some(fault.0.clone());
         self.say(
           None,
-          "rules_unreadable",
+          "rules-unreadable",
           format!("the rules file does not read, so the rules read before stand: {}", fault.0),
         );
       }
       Ok(read) => {
         self.rules_error = None;
         let (code, said) = match &read {
-          None => ("rules_absent", "no rules file stands, so the default places the units".to_owned()),
+          None => ("rules-absent", "no rules file stands, so the default places the units".to_owned()),
           Some(rules) => (
-            "rules_read",
+            "rules-read",
             format!(
               "the rules are read again ({} groups, {} units, {} rules)",
               rules.groups.len(),
@@ -325,7 +272,7 @@ impl Master {
     let (details, faults) = read_descriptions(&folder);
     self.details = details;
     for fault in faults {
-      self.say(None, "description_unreadable", format!("a unit description does not read: {fault}"));
+      self.say(None, "description-unreadable", format!("a unit description does not read: {fault}"));
     }
     self.revision += 1;
   }
@@ -363,7 +310,7 @@ impl Master {
       asking.spawn(async move {
         let reached = world.reach(&name).await;
         let asked = match &reached {
-          Ok(reached) => Some(reached.shell.exec(&format!("curl -s -m 3 {SLAVE}/units")).await),
+          Ok(reached) => Some(reached.shell.exec(&format!("curl -s -m 3 {SLAVE}/card")).await),
           Err(_) => None,
         };
         (name, reached, asked)
@@ -388,7 +335,7 @@ impl Master {
   }
 
   /// One slave's answer taken into the picture, or the node marked lost where it gave none.
-  fn take(&mut self, name: &str, answer: Option<Value>, read_ms: f64, error: Option<String>) {
+  fn take(&mut self, name: &str, answer: Option<Card>, read_ms: f64, error: Option<String>) {
     let before = self.nodes.get(name).cloned();
     let now = Num(self.world.clock());
     let role = self.reached.get(name).and_then(|reached| reached.role.clone());
@@ -421,21 +368,17 @@ impl Master {
         },
       },
       Some(said) => {
-        let rules = said.get("rules").filter(|one| !one.is_null()).map(|rules| SlaveRules {
-          loaded_at: rules.get("loadedAt").cloned(),
-          error: rules.get("error").cloned(),
-        });
+        let rules = SlaveRules {
+          loaded_at: said.rules.loaded_at,
+          error: said.rules.error.clone(),
+        };
         NodeView {
           name: name.to_owned(),
           role,
-          desktop: said.get("desktop") == Some(&Value::Bool(true)),
-          version: said.get("version").and_then(Value::as_str).map(str::to_owned),
-          rules,
-          occupants: said
-            .get("occupants")
-            .and_then(Value::as_array)
-            .map(|all| all.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-            .unwrap_or_default(),
+          desktop: said.desktop,
+          version: Some(said.version.clone()),
+          rules: Some(rules),
+          occupants: said.occupants.clone(),
           cards: vec![card_from(&said, name)],
           link: Link {
             state: LinkState::Connected,
@@ -469,7 +412,7 @@ impl Master {
       let Some(reached) = self.reached.get(&name).cloned() else { continue };
       asking.spawn(async move {
         let began = Instant::now();
-        let asked = reached.shell.exec(&format!("curl -s -m 3 {SLAVE}/units")).await;
+        let asked = reached.shell.exec(&format!("curl -s -m 3 {SLAVE}/card")).await;
         (name, asked, began.elapsed().as_secs_f64() * 1000.0)
       });
     }
@@ -485,31 +428,44 @@ impl Master {
     self.act().await;
   }
 
-  async fn move_units(&self, node: &str, verb: &str, units: &[&str], reason: &str) -> (bool, String) {
+  /// The units named moved on the node, one `PATCH /card-units/{unitName}` each, in order: whether every one
+  /// moved, and the last status, or the first refusal with its status and why.
+  async fn move_units(&self, node: &str, to: UnitMove, units: &[&str], reason: &str) -> (bool, String) {
     let Some(reached) = self.reached.get(node) else {
       return (false, "unreachable".into());
     };
-    let body = serde_json::to_string(&Move {
-      units: units.iter().map(|unit| bare(unit)).collect(),
-      reason,
-    })
-    .expect("move serializes")
-    .replace('\'', "'\\''");
-    let ran = reached
-      .shell
-      .exec(&format!(
-        "curl -s -m 300 -o /dev/stdout -w '\\n%{{http_code}}' -X POST -H 'content-type: application/json' -d '{body}' {SLAVE}/units/{verb}"
-      ))
-      .await;
-    let (body, status) = ran.stdout.trim().rsplit_once('\n').unwrap_or(("", ran.stdout.trim()));
-    let ok = ran.code == 0 && status == "200";
-    let why = serde_json::from_str::<Value>(body)
-      .ok()
-      .and_then(|answer| answer.get("error").and_then(Value::as_str).map(str::to_owned));
-    match why {
-      Some(why) if !ok => (false, format!("{status}: {why}")),
-      _ => (ok, status.to_owned()),
+    let mut status = String::new();
+    for (at, unit) in units.iter().enumerate() {
+      // A hold unloaded for a ticket keeps its lock and turn until the last of its units asked for is out.
+      let holder = |name: &str| bare(name).split_once('/').map(|(service, _)| service.to_owned());
+      let more = to == UnitMove::Evicted && units[at + 1..].iter().any(|next| holder(next) == holder(unit));
+      let body = serde_json::to_string(&CardUnitChanges {
+        state: to,
+        reason: Some(reason.to_owned()),
+        keeps_turn: more.then_some(true),
+      })
+      .expect("a move serializes")
+      .replace('\'', "'\\''");
+      let path = bare(unit).replace('/', "%2F");
+      let ran = reached
+        .shell
+        .exec(&format!(
+          "curl -s -m 300 -o /dev/stdout -w '\\n%{{http_code}}' -X PATCH -H 'content-type: application/json' -d '{body}' {SLAVE}/card-units/{path}"
+        ))
+        .await;
+      let (said, code) = ran.stdout.trim().rsplit_once('\n').unwrap_or(("", ran.stdout.trim()));
+      if ran.code != 0 || code != "200" {
+        let why = serde_json::from_str::<Value>(said)
+          .ok()
+          .and_then(|answer| answer.get("error").and_then(Value::as_str).map(str::to_owned));
+        return match why {
+          Some(why) => (false, format!("{code}: {why}")),
+          None => (false, code.to_owned()),
+        };
+      }
+      status = code.to_owned();
     }
+    (true, status)
   }
 
   /// What the master unloaded to come back loaded back once its ticket is gone, and every ticket naming a
@@ -525,7 +481,7 @@ impl Master {
     let mut waiting: Vec<(String, String, Vec<String>, String)> = Vec::new();
     for view in self.nodes.values() {
       let Some(card) = view.cards.first() else { continue };
-      if view.link.state != LinkState::Connected || card.claim.by.is_some() {
+      if view.link.state != LinkState::Connected || card.claim.is_some() {
         continue;
       }
       let standing: HashSet<&str> = card
@@ -577,7 +533,7 @@ impl Master {
       if self.restore_waits.insert((node.clone(), ticket)) {
         self.say(
           Some(&node),
-          "restore_waiting",
+          "restore-waiting",
           format!("{}: back once {asker}'s units leave the card", units.join(", ")),
         );
       }
@@ -586,7 +542,7 @@ impl Master {
     let master = &*self;
     let moved = join_all(due.iter().map(|(node, _, units)| async move {
       let names: Vec<&str> = units.iter().map(String::as_str).collect();
-      master.move_units(node, "restore", &names, "the asker is done").await
+      master.move_units(node, UnitMove::Resident, &names, "the asker is done").await
     }))
     .await;
     for ((node, ticket, units), (ok, status)) in due.into_iter().zip(moved) {
@@ -594,11 +550,11 @@ impl Master {
       if ok {
         self.unrestored.remove(&key);
         self.restore_waits.remove(&key);
-        self.say(Some(&node), "units_restored", format!("{} loaded back", units.join(", ")));
+        self.say(Some(&node), "units-restored", format!("{} loaded back", units.join(", ")));
       } else if self.unrestored.insert(key) {
         self.say(
           Some(&node),
-          "restore_failed",
+          "restore-failed",
           format!("{} not loaded back yet ({status}); trying again", units.join(", ")),
         );
       }
@@ -676,7 +632,7 @@ impl Master {
         Decision::Hold { reason, .. } => {
           // Held, and planned again at the next read: only a new reason is said.
           if self.held.get(&key) != Some(&reason) {
-            self.say(Some(&node), "ticket_held", format!("{unit} held: {reason}"));
+            self.say(Some(&node), "ticket-held", format!("{unit} held: {reason}"));
             self.held.insert(key, reason);
           }
         }
@@ -710,7 +666,7 @@ impl Master {
       for at in ats {
         let (node, _, evict, reason, _, _) = &unloads_ref[at];
         let names: Vec<&str> = evict.iter().map(String::as_str).collect();
-        moved.push((at, master.move_units(node, "evict", &names, reason).await));
+        moved.push((at, master.move_units(node, UnitMove::Evicted, &names, reason).await));
       }
       moved
     }))
@@ -723,7 +679,7 @@ impl Master {
         self.unloads_failed.remove(&key);
         self.say(
           Some(&node),
-          "units_unloaded",
+          "units-unloaded",
           format!(
             "{} unloaded to load {unit} (cost {} s)",
             evict.join(", "),
@@ -738,7 +694,7 @@ impl Master {
       if self.unloads_failed.get(&key) != Some(&status) {
         self.say(
           Some(&node),
-          "unload_failed",
+          "unload-failed",
           format!("no room was made to load {unit} ({status}); trying again"),
         );
         self.unloads_failed.insert(key, status);
@@ -746,8 +702,8 @@ impl Master {
     }
   }
 
-  /// The whole picture the state API answers.
-  pub fn state(&self) -> MasterState {
+  /// The whole picture `GET /cluster` answers.
+  pub fn state(&self) -> Cluster {
     let nodes: Vec<&NodeView> = self.known.iter().filter_map(|name| self.nodes.get(name)).collect();
     let rules = self.rules.as_ref();
     let groups = rules
@@ -767,95 +723,147 @@ impl Master {
           })
           .collect();
         let sum = |pick: fn(&CardView) -> Option<Num>| {
-          Num(chosen.iter().map(|node| node.cards.first().and_then(pick).map_or(0.0, |n| n.0)).sum())
+          chosen.iter().map(|node| node.cards.first().and_then(pick).map_or(0.0, |n| n.0)).sum()
         };
-        GroupState {
+        Group {
           name: group.name.clone(),
           pool: group.pool,
-          nodes: chosen.iter().map(|node| node.name.clone()).collect(),
+          node_names: chosen.iter().map(|node| node.name.clone()).collect(),
           total_mib: sum(|card| card.total_mib),
           free_mib: sum(|card| card.free_mib),
         }
       })
       .collect();
-    let kind_of = |name: &str| rules.and_then(|rules| rules.spec_of(name)).map(|spec| spec.kind);
-    MasterState {
+    let kind_of = |name: &str| rules.and_then(|rules| rules.spec_of(name)).map(|spec| spec.kind.into());
+    let board = self.board.as_ref().map(|board| board.lock().unwrap());
+    Cluster {
       master: MasterInfo {
         version: self.world.version(),
-        started_at: Num(self.started_at),
+        started_at: millis(self.started_at),
         rules_file: self.rules_file.display().to_string(),
-        rules_loaded_at: self.rules_loaded_at.map(Num),
+        rules_loaded_at: self.rules_loaded_at.map(millis),
         rules_error: self.rules_error.clone(),
-        read_every_s: Num(self.read_every_s),
+        read_every_ms: millis(self.read_every_s),
       },
       groups,
       nodes: nodes
         .into_iter()
-        .map(|node| NodeView {
+        .map(|node| ClusterNode {
           name: node.name.clone(),
           role: node.role.clone(),
           desktop: node.desktop,
           version: node.version.clone(),
-          rules: node.rules.clone(),
+          rules: node.rules.as_ref().map(|rules| bmo_arbiter_client::cluster::SlaveRules {
+            loaded_at: rules.loaded_at,
+            error: rules.error.clone(),
+          }),
           occupants: node.occupants.clone(),
-          cards: node
-            .cards
-            .iter()
-            .map(|card| CardView {
-              units: card
-                .units
-                .iter()
-                .map(|unit| StateUnit {
-                  unit: unit.clone(),
-                  kind: kind_of(&unit.name),
-                  detail: self.details.get(&unit.name).cloned(),
-                })
-                .collect(),
-              index: card.index,
-              name: card.name.clone(),
-              total_mib: card.total_mib,
-              used_mib: card.used_mib,
-              free_mib: card.free_mib,
-              turn: card.turn.clone(),
-              queue: card.queue.clone(),
-              claim: card.claim.clone(),
-              ram: card.ram.clone(),
-              stage: card.stage.clone(),
-              store: card.store.clone(),
-              processes: card.processes.clone(),
-            })
-            .collect(),
-          link: node.link.clone(),
+          cards: node.cards.iter().map(|card| cluster_card(card, &kind_of, &self.details)).collect(),
+          link: NodeLink {
+            state: node.link.state,
+            since_at: node.link.since.map(|at| millis(at.0)),
+            read_at: node.link.read_at.map(|at| millis(at.0)),
+            last_read_ms: node.link.last_read_ms.map(|ms| ms.0.round() as i64),
+            error: node.link.error.clone(),
+          },
         })
         .collect(),
       declared: rules
         .map(|rules| rules.units.as_slice())
         .unwrap_or_default()
         .iter()
-        .map(|spec| Declared {
+        .map(|spec| DeclaredUnit {
           unit: spec.unit.clone(),
-          service: spec.service.clone(),
-          kind: spec.kind,
-          vram_mib: spec.vram_mib,
+          service_name: spec.service.clone(),
+          kind: spec.kind.into(),
+          vram_mib: spec.vram_mib.map(|mib| mib.0),
         })
         .collect(),
-      events: self.events.iter().cloned().collect(),
-      services: self
-        .board
-        .as_ref()
-        .map(|board| board.lock().unwrap().services.clone())
-        .unwrap_or_default(),
-      request: self.board.as_ref().and_then(|board| board.lock().unwrap().request.clone()),
+      services: board.as_ref().map(|board| board.services.clone()).unwrap_or_default(),
+      placement: board.as_ref().and_then(|board| board.request.clone()),
+      events: self
+        .events
+        .iter()
+        .map(|event| Note {
+          at: millis(event.at.0),
+          node_name: event.node.clone(),
+          code: event.code.to_owned(),
+          text: event.text.clone(),
+        })
+        .collect(),
     }
   }
 }
 
-/// A slave's answer, where the call came back whole with one.
-fn answer_of(asked: &RunResult) -> Option<Value> {
+/// One card as `GET /cluster` answers it: its units with the kind the rules give each and what its service
+/// says it holds.
+fn cluster_card(
+  card: &CardView,
+  kind_of: &dyn Fn(&str) -> Option<bmo_arbiter_client::cluster::UnitKind>,
+  details: &BTreeMap<String, UnitDetail>,
+) -> ClusterCard {
+  let ticket_id = |ticket: &str| ticket.parse::<i64>().unwrap_or_default();
+  ClusterCard {
+    index: card.index,
+    name: card.name.clone(),
+    total_mib: card.total_mib.map(|mib| mib.0),
+    used_mib: card.used_mib.map(|mib| mib.0),
+    free_mib: card.free_mib.map(|mib| mib.0),
+    units: card
+      .units
+      .iter()
+      .map(|unit| ClusterUnit {
+        name: unit.name.clone(),
+        service_name: unit.service.clone(),
+        part: unit.part.clone(),
+        vram_mib: unit.vram_mib.0,
+        state: unit.state,
+        ram_mib: unit.ram_mib.0,
+        since_at: unit.since_at,
+        evictable: unit.evictable,
+        reason: unit.reason.clone(),
+        load_ms: unit.load_ms,
+        unload_ms: unit.unload_ms,
+        kind: kind_of(&unit.name),
+        detail: details.get(&unit.name).cloned(),
+      })
+      .collect(),
+    turn: card.turn.as_ref().map(|turn| CardTurn {
+      service_name: turn.service.clone(),
+      ticket_id: ticket_id(&turn.ticket),
+      waited_ms: turn.waited_ms,
+      in_use: turn.in_use,
+    }),
+    queue: card
+      .queue
+      .iter()
+      .map(|ticket| QueuedTicket {
+        ticket_id: ticket_id(&ticket.ticket),
+        service_name: ticket.service.clone(),
+        position: ticket.position,
+        waited_ms: ticket.waited_ms,
+        wait_ms: ticket.wait_ms,
+        unit_name: ticket.unit.clone(),
+        vram_mib: ticket.vram_mib.map(|mib| mib.0),
+      })
+      .collect(),
+    claim: card.claim.clone(),
+    ram: card.ram.clone(),
+    stage: CardStage {
+      waiting: card.stage.waiting,
+      waiting_ms: card.stage.waiting_ms,
+    },
+    store: card.store.clone(),
+    processes: card.processes.clone(),
+  }
+}
+
+/// A slave's card, where the call came back whole with one.
+fn answer_of(asked: &RunResult) -> Option<Card> {
   if asked.code != 0 {
     return None;
   }
-  serde_json::from_str::<Value>(&asked.stdout).ok().filter(|answer| !answer.is_null())
+  serde_json::from_str::<Card>(&asked.stdout).ok()
 }
 
 /// A ticket's plan that unloads another occupant's units held while the card's turn may not pass to it

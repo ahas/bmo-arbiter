@@ -1,38 +1,63 @@
-//! The master standing: its rounds, the live world it reads the nodes through, and its API on the
-//! loopback (docs/api.md, 「What the master serves」) — the whole picture, the same as Server-Sent Events
-//! whenever it changes and at least every five seconds, the placement requests, and the units'
-//! descriptions the services hand in.
+//! The master standing: its rounds, the live world it reads the nodes through, and its API on the loopback
+//! (docs/api.md, 「What the master serves」) — its health, its one event stream, the cluster, the placements
+//! run one at a time, and the units' descriptions the services hand in.
 
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::{Body, Bytes};
-use axum::extract::{Path as Named, State};
-use axum::http::{StatusCode, header};
+use axum::body::Bytes;
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Path as Named, Query, Request, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use http_body_util::channel::Channel;
-use serde::Deserialize;
+use bmo_arbiter_client::descriptions::Description;
+use bmo_arbiter_client::events::{Event, EventKind, EventPage, EventsQuery, Health};
+use bmo_arbiter_client::placements::{Placement, PlacementAsk, PlacementState};
+use bmo_arbiter_client::{ErrorCode, WireError};
+use futures_util::Stream;
+use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::master::{BoxFuture, Master, Reached, World};
 use crate::picture::detail_from;
-use crate::placement::{Placer, Say, Verb, write_whole};
+use crate::placement::{Placer, Say, write_whole};
 use crate::reach::{NodeRegistry, NodeShell};
 
-/// The address the state API answers on, and how often the rounds go.
+/// The address the API answers on, the token it takes, and how often the rounds go.
 pub struct Settings {
   pub port: u16,
+  pub token: Option<String>,
   pub read_every: Duration,
   pub discover_every: Duration,
 }
 
+/// The port the master answers on: `CARD_MASTER_PORT`, else 7440; 0 is one the system chooses.
+pub fn master_port() -> u16 {
+  std::env::var("CARD_MASTER_PORT")
+    .ok()
+    .and_then(|value| value.trim().parse::<u16>().ok())
+    .unwrap_or(7440)
+}
+
+/// The master's token, `CARD_MASTER_TOKEN`, where one is set.
+pub fn master_token() -> Option<String> {
+  std::env::var("CARD_MASTER_TOKEN")
+    .ok()
+    .map(|token| token.trim().to_owned())
+    .filter(|token| !token.is_empty())
+}
+
 impl Settings {
-  /// As the environment sets them: `CARD_MASTER_PORT`, `CARD_MASTER_READ_EVERY_MS` and
-  /// `CARD_MASTER_DISCOVER_EVERY_MS`, else 7440, two seconds and a minute.
+  /// As the environment sets them: `CARD_MASTER_PORT`, `CARD_MASTER_TOKEN`, `CARD_MASTER_READ_EVERY_MS` and
+  /// `CARD_MASTER_DISCOVER_EVERY_MS`, else 7440, no token, two seconds and a minute.
   pub fn from_env() -> Self {
     let number = |name: &str| {
       std::env::var(name)
@@ -40,19 +65,16 @@ impl Settings {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
     };
-    // A port of 0 is one the system chooses, which the master names as it starts answering.
-    let port = std::env::var("CARD_MASTER_PORT")
-      .ok()
-      .and_then(|value| value.trim().parse::<u16>().ok());
     Settings {
-      port: port.unwrap_or(7440),
+      port: master_port(),
+      token: master_token(),
       read_every: Duration::from_millis(number("CARD_MASTER_READ_EVERY_MS").unwrap_or(2_000)),
       discover_every: Duration::from_millis(number("CARD_MASTER_DISCOVER_EVERY_MS").unwrap_or(60_000)),
     }
   }
 }
 
-/// The nodes as the node registry gives them, reached through their own shells, and the version of the
+/// The nodes as the node service gives them, reached through their own shells, and the version of the
 /// arbiter's own tree.
 pub struct LiveWorld {
   registry: Result<NodeRegistry, String>,
@@ -72,7 +94,7 @@ impl LiveWorld {
 }
 
 impl World for LiveWorld {
-  /// The registry's nodes; none where no registry is named, which the master's start says.
+  /// The node service's nodes; none where no node service is named, which the master's start says.
   fn list_nodes(&self) -> BoxFuture<'_, Vec<String>> {
     Box::pin(async move {
       match &self.registry {
@@ -94,9 +116,7 @@ impl World for LiveWorld {
   }
 
   fn clock(&self) -> f64 {
-    std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .map_or(0.0, |since| since.as_secs_f64())
+    now_seconds()
   }
 
   fn log(&self, line: &str) {
@@ -118,35 +138,169 @@ impl World for LiveWorld {
   }
 }
 
-/// One placement request, and where what it does is said to its asker.
-pub struct Asked {
-  verb: Verb,
-  service: String,
-  node: String,
-  lines: mpsc::UnboundedSender<String>,
+fn now_seconds() -> f64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(0.0, |since| since.as_secs_f64())
 }
 
-/// The line a placement's answer ends with: `== done`, or `== failed: <why>`.
-pub const DONE_LINE: &str = "== done";
-pub const FAILED_LINE: &str = "== failed: ";
+fn now_ms() -> i64 {
+  (now_seconds() * 1000.0) as i64
+}
+
+/// How many events and placements the master keeps in its memory.
+const EVENTS_KEPT: usize = 256;
+const PLACEMENTS_KEPT: usize = 256;
+
+/// The master's events: the window kept for a reader that resumes, and the live ones for every open
+/// stream (docs/api.md, 「Events」).
+struct Events {
+  kept: VecDeque<Event>,
+  next_id: i64,
+  live: broadcast::Sender<Event>,
+}
+
+impl Events {
+  fn new() -> Self {
+    Self {
+      kept: VecDeque::new(),
+      // The first number of a run is the milliseconds at its start, so no number of an earlier run is this
+      // run's.
+      next_id: now_ms().max(1),
+      live: broadcast::channel(EVENTS_KEPT).0,
+    }
+  }
+
+  fn publish(&mut self, kind: EventKind, data: Value) {
+    let event = Event {
+      id: self.next_id,
+      kind,
+      at: now_ms(),
+      data,
+    };
+    self.next_id += 1;
+    self.kept.push_back(event.clone());
+    while self.kept.len() > EVENTS_KEPT {
+      self.kept.pop_front();
+    }
+    // A send with no stream open reaches nobody, which is no fault.
+    let _ = self.live.send(event);
+  }
+
+  /// Whether a reader that read up to `after` can resume: no event it has not read has left the window, and
+  /// the number is one this run gave.
+  fn resumes(&self, after: i64) -> bool {
+    let lowest = self.kept.front().map_or(self.next_id, |event| event.id);
+    after >= lowest - 1 && after < self.next_id
+  }
+}
+
+/// The placements the master keeps, the newest last.
+struct Placements {
+  kept: VecDeque<Placement>,
+  last_id: i64,
+}
+
+impl Placements {
+  /// A new id: larger than the last, and never below the milliseconds at which it is given.
+  fn next_id(&mut self) -> i64 {
+    self.last_id = (self.last_id + 1).max(now_ms());
+    self.last_id
+  }
+
+  fn get(&self, id: i64) -> Option<&Placement> {
+    self.kept.iter().find(|placement| placement.id == id)
+  }
+
+  fn change(&mut self, id: i64, change: impl FnOnce(&mut Placement)) -> Option<Placement> {
+    let placement = self.kept.iter_mut().find(|placement| placement.id == id)?;
+    change(placement);
+    Some(placement.clone())
+  }
+}
 
 #[derive(Clone)]
 struct App {
-  seen: watch::Receiver<Snapshot>,
-  requests: mpsc::UnboundedSender<Asked>,
+  cluster: Arc<Mutex<Value>>,
+  events: Arc<Mutex<Events>>,
+  placements: Arc<Mutex<Placements>>,
+  requests: mpsc::UnboundedSender<i64>,
   /// The master's store of the units' descriptions.
   descriptions: Arc<PathBuf>,
+  token: Option<Arc<str>>,
 }
 
-#[derive(Deserialize)]
-struct Asking {
-  service: String,
-  node: String,
+impl App {
+  fn publish(&self, kind: EventKind, data: Value) {
+    self.events.lock().unwrap().publish(kind, data);
+  }
+
+  fn publish_placement(&self, kind: EventKind, placement: &Placement) {
+    self.publish(kind, serde_json::to_value(placement).expect("a placement serializes"));
+  }
+
+  /// A placement changed and the change published.
+  fn change_placement(&self, id: i64, change: impl FnOnce(&mut Placement)) {
+    let changed = self.placements.lock().unwrap().change(id, change);
+    if let Some(changed) = changed {
+      self.publish_placement(EventKind::PlacementChanged, &changed);
+    }
+  }
 }
 
-/// The placement's own work, one request after another in arrival order: first a request a stopped
+/// An answer in the wire format's error shape.
+fn refused(code: ErrorCode, error: impl Into<String>) -> Response {
+  let status = StatusCode::from_u16(code.status()).expect("every code's status is a status");
+  (status, axum::Json(WireError::new(code, error))).into_response()
+}
+
+/// A refusal not yet answered: its code and its sentence.
+struct Refusal(ErrorCode, String);
+
+impl IntoResponse for Refusal {
+  fn into_response(self) -> Response {
+    refused(self.0, self.1)
+  }
+}
+
+fn answered<T: Serialize>(status: StatusCode, body: &T) -> Response {
+  (status, axum::Json(body)).into_response()
+}
+
+/// Every route takes the master's token where one is set.
+async fn authorized(State(app): State<App>, request: Request, next: Next) -> Response {
+  if let Some(token) = &app.token {
+    let given = request
+      .headers()
+      .get(header::AUTHORIZATION)
+      .and_then(|value| value.to_str().ok())
+      .and_then(|value| value.strip_prefix("Bearer "));
+    if given != Some(token.as_ref()) {
+      return refused(ErrorCode::Unauthorized, "the master's token is missing or wrong");
+    }
+  }
+  next.run(request).await
+}
+
+async fn health() -> Response {
+  answered(
+    StatusCode::OK,
+    &Health {
+      ready: true,
+      reason: None,
+      version: env!("CARGO_PKG_VERSION").to_owned(),
+    },
+  )
+}
+
+async fn cluster(State(app): State<App>) -> Response {
+  let cluster = app.cluster.lock().unwrap().clone();
+  answered(StatusCode::OK, &cluster)
+}
+
+/// The placement's own work, one placement after another in the order they were asked: first one a stopped
 /// master left unfinished, undone; then the first start's adoption and the drift named; then what is asked.
-async fn place_requests(placer: Placer, mut waiting: mpsc::UnboundedReceiver<Asked>) {
+async fn place_requests(placer: Placer, app: App, mut waiting: mpsc::UnboundedReceiver<i64>) {
   let log: Say = Arc::new(|line: String| println!("placement: {line}"));
   placer.recover(&log).await;
   if let Err(fault) = placer.adopt(&log).await {
@@ -155,108 +309,72 @@ async fn place_requests(placer: Placer, mut waiting: mpsc::UnboundedReceiver<Ask
   if let Err(fault) = placer.drift(&log).await {
     println!("placement: the drift was not read: {fault}");
   }
-  while let Some(asked) = waiting.recv().await {
-    let lines = asked.lines.clone();
+  while let Some(id) = waiting.recv().await {
+    let Some(asked) = app.placements.lock().unwrap().get(id).cloned() else { continue };
+    app.change_placement(id, |placement| placement.state = PlacementState::Running);
+    let telling = app.clone();
     let say: Say = Arc::new(move |line: String| {
       println!("placement: {line}");
-      let _ = lines.send(line);
+      telling.change_placement(id, |placement| placement.lines.push(line));
     });
-    let ended = match placer.run(asked.verb, &asked.service, &asked.node, &say).await {
-      Ok(()) => DONE_LINE.to_owned(),
-      Err(stopped) => format!("{FAILED_LINE}{stopped}"),
+    let ended = placer.run(asked.kind.into(), &asked.service_name, &asked.node_name, &say).await;
+    app.change_placement(id, |placement| {
+      placement.ended_at = Some(now_ms());
+      match ended {
+        Ok(()) => placement.state = PlacementState::Done,
+        Err(stopped) => {
+          placement.state = PlacementState::Failed;
+          placement.failure = Some(stopped.to_string());
+        }
+      }
+    });
+  }
+}
+
+/// A body read as the route's type, or the refusal naming what is wrong with it.
+fn body_of<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, Refusal> {
+  serde_json::from_slice(body).map_err(|fault| {
+    Refusal(ErrorCode::BadRequest, format!("the body is not the shape this route takes: {fault}"))
+  })
+}
+
+async fn create_placement(State(app): State<App>, body: Bytes) -> Response {
+  let ask: PlacementAsk = match body_of(&body) {
+    Ok(ask) => ask,
+    Err(refusal) => return refusal.into_response(),
+  };
+  let placement = {
+    let mut placements = app.placements.lock().unwrap();
+    let placement = Placement {
+      id: placements.next_id(),
+      kind: ask.kind,
+      service_name: ask.service_name,
+      node_name: ask.node_name,
+      state: PlacementState::Queued,
+      lines: Vec::new(),
+      failure: None,
+      created_at: now_ms(),
+      ended_at: None,
     };
-    let _ = asked.lines.send(ended);
-  }
-}
-
-/// A request taken in, and what it does sent back line by line as it does it.
-fn ask(app: App, verb: Verb, asking: Asking) -> Response {
-  let (lines, mut said) = mpsc::unbounded_channel::<String>();
-  let (mut sender, body) = Channel::<Bytes, std::convert::Infallible>::new(16);
-  let _ = app.requests.send(Asked {
-    verb,
-    service: asking.service,
-    node: asking.node,
-    lines,
-  });
-  tokio::spawn(async move {
-    while let Some(line) = said.recv().await {
-      let last = line.starts_with(DONE_LINE) || line.starts_with(FAILED_LINE);
-      if sender.send_data(Bytes::from(format!("{line}\n"))).await.is_err() || last {
-        break;
-      }
+    placements.kept.push_back(placement.clone());
+    while placements.kept.len() > PLACEMENTS_KEPT {
+      placements.kept.pop_front();
     }
-  });
-  Response::builder()
-    .header(header::CONTENT_TYPE, "text/plain;charset=utf-8")
-    .body(Body::new(body))
-    .expect("response builds")
+    placement
+  };
+  app.publish_placement(EventKind::PlacementCreated, &placement);
+  let _ = app.requests.send(placement.id);
+  answered(StatusCode::CREATED, &placement)
 }
 
-async fn place(State(app): State<App>, axum::Json(asking): axum::Json<Asking>) -> Response {
-  ask(app, Verb::Place, asking)
-}
-
-async fn remove(State(app): State<App>, axum::Json(asking): axum::Json<Asking>) -> Response {
-  ask(app, Verb::Remove, asking)
-}
-
-/// What the state API serves: the picture as JSON and the revision it was taken at.
-#[derive(Clone)]
-struct Snapshot {
-  revision: u64,
-  json: Arc<String>,
-}
-
-fn snapshot(master: &Master) -> Snapshot {
-  Snapshot {
-    revision: master.revision(),
-    json: Arc::new(serde_json::to_string(&master.state()).expect("state serializes")),
+async fn placement(State(app): State<App>, Named(id): Named<String>) -> Response {
+  let Ok(id) = id.parse::<i64>() else {
+    return refused(ErrorCode::BadRequest, format!("{id} is not a placement's id"));
+  };
+  match app.placements.lock().unwrap().get(id) {
+    Some(placement) => answered(StatusCode::OK, placement),
+    None => refused(ErrorCode::NotFound, format!("the master keeps no placement {id}")),
   }
-}
-
-async fn state(State(app): State<App>) -> Response {
-  let json = app.seen.borrow().json.clone();
-  ([(header::CONTENT_TYPE, "application/json;charset=utf-8")], json.as_ref().clone()).into_response()
-}
-
-async fn events(State(app): State<App>) -> Response {
-  let seen = app.seen;
-  let (mut sender, body) = Channel::<Bytes, std::convert::Infallible>::new(4);
-  tokio::spawn(async move {
-    let mut shown: Option<u64> = None;
-    let mut sent_at = Instant::now();
-    let mut every = tokio::time::interval(Duration::from_millis(500));
-    loop {
-      every.tick().await;
-      let now = seen.borrow().clone();
-      if shown == Some(now.revision) && sent_at.elapsed() < Duration::from_secs(5) {
-        continue;
-      }
-      shown = Some(now.revision);
-      sent_at = Instant::now();
-      let frame = format!("event: state\ndata: {}\n\n", now.json);
-      // A listener gone is a send that fails, and ends this stream.
-      if sender.send_data(Bytes::from(frame)).await.is_err() {
-        break;
-      }
-    }
-  });
-  Response::builder()
-    .header(header::CONTENT_TYPE, "text/event-stream")
-    .header(header::CACHE_CONTROL, "no-store")
-    .body(Body::new(body))
-    .expect("response builds")
-}
-
-/// A refusal of a description, with its code and its English reason.
-fn refused(code: &str, error: String) -> Response {
-  (
-    StatusCode::BAD_REQUEST,
-    [(header::CONTENT_TYPE, "application/json;charset=utf-8")],
-    serde_json::json!({ "code": code, "error": error }).to_string(),
-  )
-    .into_response()
 }
 
 /// Whether a word may name a service: lower-case letters, digits and hyphens.
@@ -268,17 +386,23 @@ fn service_word(name: &str) -> bool {
 
 /// What a service hands in of its units, held to its shape before it is written: a `units` object whose
 /// every name is the service's own and whose every detail reads.
-fn description(service: &str, body: &[u8]) -> Result<Value, String> {
-  let read: Value =
-    serde_json::from_slice(body).map_err(|fault| format!("the body does not read as JSON: {fault}"))?;
-  let units = read.get("units").and_then(Value::as_object).ok_or("the body holds no units object")?;
+fn description(service: &str, body: &[u8]) -> Result<Description, Refusal> {
+  let read: Value = serde_json::from_slice(body)
+    .map_err(|fault| Refusal(ErrorCode::BadRequest, format!("the body does not read as JSON: {fault}")))?;
+  let units = read
+    .get("units")
+    .and_then(Value::as_object)
+    .ok_or_else(|| Refusal(ErrorCode::BadRequest, "the body holds no units object".to_owned()))?;
+  let mut described = Description::default();
   for (unit, detail) in units {
     if !unit.starts_with(&format!("{service}/")) {
-      return Err(format!("{unit} is not a unit of {service}"));
+      return Err(Refusal(ErrorCode::BadField, format!("{unit} is not a unit of {service}")));
     }
-    detail_from(detail).map_err(|fault| format!("{unit}: {fault}"))?;
+    let detail =
+      detail_from(detail).map_err(|fault| Refusal(ErrorCode::BadField, format!("{unit}: {fault}")))?;
+    described.units.insert(unit.clone(), detail);
   }
-  Ok(serde_json::json!({ "units": units }))
+  Ok(described)
 }
 
 /// A service's description of its units written whole into the master's store, replacing what it said
@@ -286,34 +410,125 @@ fn description(service: &str, body: &[u8]) -> Result<Value, String> {
 async fn describe(State(app): State<App>, Named(service): Named<String>, body: Bytes) -> Response {
   if !service_word(&service) {
     return refused(
-      "service_name_invalid",
+      ErrorCode::NameRule,
       format!("{service} is not a service's name: lower-case letters, digits and hyphens"),
     );
   }
-  let read = match description(&service, &body) {
-    Ok(read) => read,
-    Err(why) => return refused("description_invalid", why),
+  let described = match description(&service, &body) {
+    Ok(described) => described,
+    Err(refusal) => return refusal.into_response(),
   };
   let path = app.descriptions.join(format!("{service}.json"));
-  let text = serde_json::to_string_pretty(&read).expect("a description serializes");
+  let replaced = path.exists();
+  let text = serde_json::to_string_pretty(&described).expect("a description serializes");
   match write_whole(&path, &text) {
-    Ok(()) => StatusCode::NO_CONTENT.into_response(),
-    Err(fault) => (
-      StatusCode::INTERNAL_SERVER_ERROR,
-      [(header::CONTENT_TYPE, "application/json;charset=utf-8")],
-      serde_json::json!({ "code": "description_not_written", "error": fault }).to_string(),
-    )
-      .into_response(),
+    Ok(()) => answered(if replaced { StatusCode::OK } else { StatusCode::CREATED }, &described),
+    Err(fault) => refused(ErrorCode::Failed, format!("the description was not written: {fault}")),
   }
 }
 
-async fn unknown() -> Response {
-  (
-    StatusCode::NOT_FOUND,
-    [(header::CONTENT_TYPE, "application/json;charset=utf-8")],
-    r#"{"error":"no such path"}"#,
-  )
+/// The kinds a reader asked for, or why they do not read; every kind where none is named.
+fn kinds_of(query: &EventsQuery) -> Result<Vec<EventKind>, String> {
+  let Some(named) = query.kinds.as_deref().filter(|named| !named.trim().is_empty()) else {
+    return Ok(EventKind::ALL.to_vec());
+  };
+  named
+    .split(',')
+    .map(str::trim)
+    .map(|name| EventKind::of_name(name).ok_or_else(|| format!("{name} is not a kind of event")))
+    .collect()
+}
+
+/// The master's one stream, or its page to a reader asking for JSON (docs/api.md, 「Events」).
+async fn events(
+  State(app): State<App>,
+  headers: HeaderMap,
+  query: Result<Query<EventsQuery>, QueryRejection>,
+) -> Response {
+  let query = match query {
+    Ok(Query(query)) => query,
+    Err(why) => return refused(ErrorCode::BadRequest, format!("the query does not read: {why}")),
+  };
+  let kinds = match kinds_of(&query) {
+    Ok(kinds) => kinds,
+    Err(why) => return refused(ErrorCode::BadRequest, why),
+  };
+  let resumed = headers
+    .get("last-event-id")
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.trim().parse::<i64>().ok());
+  let after = query.after.or(resumed);
+  let wants_page = headers
+    .get(header::ACCEPT)
+    .and_then(|value| value.to_str().ok())
+    .is_some_and(|accept| accept.contains("application/json"));
+  let events = app.events.lock().unwrap();
+  if let Some(after) = after
+    && !events.resumes(after)
+  {
+    return refused(
+      ErrorCode::Gone,
+      format!("event {after} is not within the window the master keeps; read the collections again"),
+    );
+  }
+  let wanted = |event: &Event| kinds.contains(&event.kind) && after.is_none_or(|after| event.id > after);
+  if wants_page {
+    let limit = query.limit.unwrap_or(EVENTS_KEPT as u32).clamp(1, EVENTS_KEPT as u32) as usize;
+    let matching: Vec<Event> = events.kept.iter().filter(|event| wanted(event)).cloned().collect();
+    let more = matching.len() > limit;
+    let page = EventPage {
+      items: matching.into_iter().take(limit).collect(),
+      more,
+    };
+    return answered(StatusCode::OK, &page);
+  }
+  // A stream opened with no number starts now; one resumed first hears what it missed.
+  let backlog: VecDeque<Event> = match after {
+    Some(_) => events.kept.iter().filter(|event| wanted(event)).cloned().collect(),
+    None => VecDeque::new(),
+  };
+  let live = events.live.subscribe();
+  drop(events);
+  Sse::new(stream(backlog, live, kinds))
+    .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
     .into_response()
+}
+
+/// What a stream sends: the events it missed, then each live one of the kinds it reads, none twice.
+fn stream(
+  backlog: VecDeque<Event>,
+  live: broadcast::Receiver<Event>,
+  kinds: Vec<EventKind>,
+) -> impl Stream<Item = Result<SseEvent, Infallible>> {
+  let sent = backlog.back().map(|event| event.id);
+  futures_util::stream::unfold(
+    (backlog, live, kinds, sent),
+    |(mut backlog, mut live, kinds, mut sent)| async move {
+      let event = loop {
+        if let Some(event) = backlog.pop_front() {
+          break event;
+        }
+        match live.recv().await {
+          Ok(event) if kinds.contains(&event.kind) && sent.is_none_or(|sent| event.id > sent) => {
+            break event;
+          }
+          Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+          // The master is going down.
+          Err(broadcast::error::RecvError::Closed) => return None,
+        }
+      };
+      sent = Some(event.id);
+      let frame = SseEvent::default()
+        .id(event.id.to_string())
+        .event(event.kind.name())
+        .data(serde_json::to_string(&event).expect("an event serializes"));
+      Some((Ok(frame), (backlog, live, kinds, sent)))
+    },
+  )
+}
+
+async fn no_route() -> Response {
+  refused(ErrorCode::NoRoute, "no route answers this method and path")
 }
 
 /// The master read once, its picture printed, for `--once`.
@@ -324,39 +539,51 @@ pub async fn once(mut master: Master) -> String {
   let mut out = Vec::new();
   let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
   let mut serializer = serde_json::Serializer::with_formatter(&mut out, formatter);
-  serde::Serialize::serialize(&master.state(), &mut serializer).expect("state serializes");
+  serde::Serialize::serialize(&master.state(), &mut serializer).expect("the cluster serializes");
   String::from_utf8(out).expect("serde_json writes UTF-8")
 }
 
-/// The master standing: the state API up, then a round every `read_every` and the node list read again
-/// every `discover_every`.
+/// The master standing: the API up, then a round every `read_every` and the node list read again every
+/// `discover_every`, each change of the picture published as `cluster.changed`.
 pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> std::io::Result<()> {
   master.read_rules_if_changed();
   master.attach(placer.board());
   let descriptions = Arc::new(master.descriptions_folder());
   let (requests, waiting) = mpsc::unbounded_channel();
-  tokio::spawn(place_requests(placer, waiting));
   master.discover().await;
-  let (publish, seen) = watch::channel(snapshot(&master));
-  let app = Router::new()
-    .route("/state", get(state))
+  let picture = || serde_json::to_value(master.state()).expect("the cluster serializes");
+  let app = App {
+    cluster: Arc::new(Mutex::new(picture())),
+    events: Arc::new(Mutex::new(Events::new())),
+    placements: Arc::new(Mutex::new(Placements {
+      kept: VecDeque::new(),
+      last_id: 0,
+    })),
+    requests,
+    descriptions,
+    token: settings.token.as_deref().map(Arc::from),
+  };
+  tokio::spawn(place_requests(placer, app.clone(), waiting));
+  let router = Router::new()
+    .route("/health", get(health))
     .route("/events", get(events))
-    .route("/place", post(place))
-    .route("/remove", post(remove))
-    .route("/descriptions/{service}", put(describe))
-    .fallback(unknown)
-    .with_state(App {
-      seen,
-      requests,
-      descriptions,
-    });
+    .route("/cluster", get(cluster))
+    .route("/placements", post(create_placement))
+    .route("/placements/{placementId}", get(placement))
+    .route("/descriptions/{serviceName}", put(describe))
+    .fallback(no_route)
+    .method_not_allowed_fallback(no_route)
+    .layer(middleware::from_fn_with_state(app.clone(), authorized))
+    .with_state(app.clone());
   let listener = tokio::net::TcpListener::bind(("127.0.0.1", settings.port)).await?;
-  println!("card-master: answering on 127.0.0.1:{}", listener.local_addr()?.port());
+  println!("bmo-arbiter: answering on 127.0.0.1:{}", listener.local_addr()?.port());
   tokio::spawn(async move {
-    if let Err(fault) = axum::serve(listener, app).await {
-      eprintln!("card-master: the state API stopped — {fault}");
+    if let Err(fault) = axum::serve(listener, router).await {
+      eprintln!("bmo-arbiter: the API stopped — {fault}");
     }
   });
+  let mut published = master.revision();
+  app.publish(EventKind::ClusterChanged, app.cluster.lock().unwrap().clone());
   let mut discovered = Instant::now();
   loop {
     let began = Instant::now();
@@ -365,7 +592,12 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
       discovered = began;
     }
     master.poll().await;
-    publish.send_replace(snapshot(&master));
+    if master.revision() != published {
+      published = master.revision();
+      let now = serde_json::to_value(master.state()).expect("the cluster serializes");
+      *app.cluster.lock().unwrap() = now.clone();
+      app.publish(EventKind::ClusterChanged, now);
+    }
     let rest = settings
       .read_every
       .saturating_sub(began.elapsed())

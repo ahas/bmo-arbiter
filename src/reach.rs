@@ -1,7 +1,7 @@
-//! How the master reaches a node by its registered name (docs/api.md, 「The node registry」, 「Node
-//! shells」). What a node is reached by belongs to the node registry, so it is asked of the registry's
-//! command at every run; a node of the console kind is driven through the console script by its agent's
-//! name, an ssh node by a batch login, and either runs a command in bash.
+//! How the master reaches a node by its registered name (docs/api.md, 「The node service」, 「Node
+//! shells」). What a node is reached by belongs to the node service, so its target is asked through the node
+//! service's client at every run; a hub node is driven through the console script by its agent's name, an ssh
+//! node by the batch login its target lays out, and either runs a command in bash.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -9,8 +9,8 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
 
-use regex::Regex;
-use serde::Deserialize;
+use bmo_node_client::NodeClient;
+use bmo_node_client::nodes::{LoginShell, NodeChanges, NodeKind, NodesQuery, Target};
 use tokio::process::Command;
 
 // A command is given one minute more than the hub streams one for, since the hub stops a command itself at
@@ -214,6 +214,15 @@ pub fn home() -> PathBuf {
   std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// A path written `~/…` under the account's own folder; any other as it is written.
+pub fn expand_home(path: &str) -> String {
+  match path.strip_prefix("~/") {
+    Some(rest) => home().join(rest).to_string_lossy().into_owned(),
+    None if path == "~" => home().to_string_lossy().into_owned(),
+    None => path.to_owned(),
+  }
+}
+
 /// The `bun` the console script and an adapter whose first word is `bun` run on: the one `BMO_BUN`
 /// names, the account's own install, else the one on the path.
 pub fn bun() -> String {
@@ -228,19 +237,19 @@ pub fn bun() -> String {
   }
 }
 
-/// The console script a node of the console kind is driven with, as `BMO_HUB_CONSOLE` names it; it has
-/// no default, so a deployment that reaches such nodes names it.
+/// The console script a hub node is driven with, as `BMO_HUB_CONSOLE` names it; it has no default, so a
+/// deployment that reaches such nodes names it.
 pub fn hub_console() -> Result<String, String> {
   match std::env::var_os("BMO_HUB_CONSOLE").filter(|one| !one.is_empty()) {
     Some(named) => Ok(named.to_string_lossy().into_owned()),
     None => {
-      Err("BMO_HUB_CONSOLE names no console script, so a node of the console kind is not reached".into())
+      Err("BMO_HUB_CONSOLE names no console script, so a node of the hub kind is not reached".into())
     }
   }
 }
 
-/// A node's connection as the node registry gives it: never a credential, only where one is kept, with
-/// the node's role — the services its row reserves it for, or none.
+/// A node's connection as the node service gives it: never a credential, only where one is kept, with the
+/// node's role — the services its row reserves it for, or none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
   pub way: Way,
@@ -254,6 +263,10 @@ pub enum Way {
     port: u16,
     user: String,
     key_path: Option<String>,
+    /// The batch login laid out for `ssh` ahead of the command, as the node service gives it.
+    ssh_args: Vec<String>,
+    /// The batch login's OpenSSH options, each given after `-o`.
+    ssh_options: Vec<String>,
     powershell: bool,
   },
   Hub {
@@ -261,118 +274,100 @@ pub enum Way {
   },
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListedConnection {
-  kind: String,
-  host: Option<String>,
-  port: Option<u16>,
-  user: Option<String>,
-  key_path: Option<String>,
-  shell: Option<String>,
-  agent: Option<String>,
-  hub_url: Option<String>,
-  token_file: Option<String>,
-  role: Option<String>,
+fn word(value: Option<&String>) -> Option<String> {
+  value.filter(|one| !one.is_empty()).cloned()
 }
 
-fn word(value: Option<String>) -> Option<String> {
-  value.filter(|one| !one.is_empty())
-}
-
-/// The connection out of the registry command's answer — its last line — or none where it is not one.
-pub fn parse_connection(text: &str) -> Option<Connection> {
-  let said: ListedConnection = serde_json::from_str(text.trim().lines().last()?).ok()?;
-  let role = word(said.role);
-  let way = match said.kind.as_str() {
-    "hub" => {
-      word(said.hub_url)?;
-      word(said.token_file)?;
-      Way::Hub {
-        agent: word(said.agent)?,
-      }
-    }
-    "ssh" => Way::Ssh {
-      host: word(said.host)?,
-      port: said.port?,
-      user: word(said.user)?,
-      key_path: word(said.key_path),
-      powershell: said.shell.as_deref() == Some("powershell"),
+/// The connection out of a node's target, or why the target does not make one.
+pub fn connection_of(target: &Target) -> Result<Connection, String> {
+  let name = &target.node_name;
+  let lacks = |field: &str| format!("the node service's target for {name} gives no {field}");
+  let way = match target.kind {
+    NodeKind::Hub => Way::Hub {
+      agent: word(target.agent_name.as_ref()).ok_or_else(|| lacks("agentName"))?,
     },
-    _ => return None,
+    NodeKind::Ssh => Way::Ssh {
+      host: word(target.host.as_ref()).ok_or_else(|| lacks("host"))?,
+      port: target.port.ok_or_else(|| lacks("port"))?,
+      user: word(target.user.as_ref()).ok_or_else(|| lacks("user"))?,
+      key_path: word(target.key_path.as_ref()),
+      ssh_args: target.ssh_args.clone(),
+      ssh_options: target.ssh_options.clone(),
+      powershell: target.shell == Some(LoginShell::Powershell),
+    },
   };
-  Some(Connection { way, role })
+  Ok(Connection {
+    way,
+    role: word(target.role.as_ref()),
+  })
 }
 
-/// The names the registry's listing holds, in its order: every line beginning `<name> [ssh]` or
-/// `<name> [hub]`, the rest of each line and every other line being the registry's own.
-pub fn parse_node_list(text: &str) -> Vec<String> {
-  let line = Regex::new(r"^(\S+) \[(?:ssh|hub)\]").expect("pattern");
-  text
-    .lines()
-    .filter_map(|one| Some(line.captures(one)?.get(1)?.as_str().to_owned()))
-    .collect()
-}
+/// The settings naming the node service's base address and its token.
+pub const NODE_URL: &str = "CARD_NODE_URL";
+pub const NODE_TOKEN: &str = "CARD_NODE_TOKEN";
 
-/// The setting naming the node registry's command.
-pub const NODES_COMMAND: &str = "CARD_NODES_COMMAND";
+// How long one call of the node service may take.
+const NODE_CALL_LIMIT: Duration = Duration::from_secs(30);
 
-/// The node registry, reached through its command (docs/api.md, 「The node registry」): the words
-/// `CARD_NODES_COMMAND` names, run with the words of each question.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The node service, reached through its published client (docs/api.md, 「The node service」).
+#[derive(Clone)]
 pub struct NodeRegistry {
-  pub command: Vec<String>,
+  client: NodeClient,
+}
+
+impl std::fmt::Debug for NodeRegistry {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("NodeRegistry")
+  }
 }
 
 impl NodeRegistry {
-  /// The registry `CARD_NODES_COMMAND` names, split by shell word rules, or why there is none.
+  /// The node service `CARD_NODE_URL` names, asked with `CARD_NODE_TOKEN`, or why there is none.
   pub fn from_env() -> Result<Self, String> {
-    let named = std::env::var(NODES_COMMAND).unwrap_or_default();
-    Self::from_words(&named)
+    let url = std::env::var(NODE_URL).unwrap_or_default();
+    if url.trim().is_empty() {
+      return Err(format!("{NODE_URL} names no node service"));
+    }
+    Self::at(url.trim(), &std::env::var(NODE_TOKEN).unwrap_or_default())
   }
 
-  /// The registry out of a command line, split by shell word rules, or why it names none.
-  pub fn from_words(line: &str) -> Result<Self, String> {
-    match shlex::split(line) {
-      Some(command) if !command.is_empty() => Ok(Self { command }),
-      Some(_) => Err(format!("{NODES_COMMAND} names no node registry command")),
-      None => Err(format!("{NODES_COMMAND} does not read as a command line")),
+  /// The node service at `url`, asked with `token`.
+  pub fn at(url: &str, token: &str) -> Result<Self, String> {
+    let http = reqwest::Client::builder()
+      .timeout(NODE_CALL_LIMIT)
+      .build()
+      .map_err(|fault| format!("no HTTP client could be made: {fault}"))?;
+    let client = NodeClient::with_http(url, token, http).map_err(|why| format!("{NODE_URL}: {why}"))?;
+    Ok(Self { client })
+  }
+
+  /// Every node the node service holds, by name, in its list's order; none where it cannot be read.
+  pub async fn listed_nodes(&self) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut query = NodesQuery::default();
+    loop {
+      let Ok(page) = self.client.nodes(&query).await else { return names };
+      let last = page.items.last().map(|node| node.name.clone());
+      names.extend(page.items.into_iter().map(|node| node.name));
+      match last {
+        Some(last) if page.more => query.after = Some(last),
+        _ => return names,
+      }
     }
   }
 
-  /// The registry's command with the words of one question.
-  pub fn argv(&self, rest: &[&str]) -> Vec<String> {
-    let mut argv = self.command.clone();
-    argv.extend(rest.iter().map(|one| (*one).to_owned()));
-    argv
-  }
-
-  /// Every node the registry holds, by name.
-  pub async fn listed_nodes(&self) -> Vec<String> {
-    let listed = run(&self.argv(&[]), None, COMMAND_LIMIT).await;
-    parse_node_list(&listed.stdout)
-  }
-
-  /// The node's connection as the registry has it now, whatever shell it logs into, or why it could not
+  /// The node's connection as the node service has it now, whatever shell it logs into, or why it could not
   /// be had.
   pub async fn listed_connection(&self, name: &str) -> Result<Connection, String> {
-    let asked = run(&self.argv(&["--target", name]), None, COMMAND_LIMIT).await;
-    let connection = if asked.code == 0 { parse_connection(&asked.stdout) } else { None };
-    let Some(connection) = connection else {
-      let said = tail(
-        if asked.stderr.trim().is_empty() { asked.stdout.trim() } else { asked.stderr.trim() },
-        300,
-      );
-      return Err(if said.is_empty() {
-        format!("the node registry gave no connection for {name}")
-      } else {
-        format!("the node registry gave no connection for {name}: {said}")
-      });
-    };
-    Ok(connection)
+    let target = self
+      .client
+      .target(name)
+      .await
+      .map_err(|fault| format!("the node service gave no connection for {name}: {fault}"))?;
+    connection_of(&target)
   }
 
-  /// The node's connection as the registry has it now, or why it could not be had or takes no bash.
+  /// The node's connection as the node service has it now, or why it could not be had or takes no bash.
   pub async fn read_connection(&self, name: &str) -> Result<Connection, String> {
     let connection = self.listed_connection(name).await?;
     if matches!(
@@ -387,9 +382,18 @@ impl NodeRegistry {
     Ok(connection)
   }
 
-  /// The node's role written in the registry, within `limit`: the services joined by `+`, or none.
-  pub async fn set_role(&self, node: &str, role: Option<&str>, limit: Duration) -> RunResult {
-    run(&self.argv(&["--set", node, "--role", role.unwrap_or("none")]), None, limit).await
+  /// The node's role written in the node service: the services joined by `+`, or none.
+  pub async fn set_role(&self, node: &str, role: Option<&str>) -> Result<(), String> {
+    let changes = NodeChanges {
+      role: Some(role.map(str::to_owned)),
+      ..NodeChanges::default()
+    };
+    self
+      .client
+      .change_node(node, &changes)
+      .await
+      .map(|_| ())
+      .map_err(|fault| format!("the node service did not take {node}'s role: {fault}"))
   }
 }
 
@@ -400,31 +404,6 @@ pub struct NodeShell {
 }
 
 impl NodeShell {
-  fn ssh_options(&self, port_flag: &str) -> Vec<String> {
-    let Way::Ssh { port, key_path, .. } = &self.connection.way else { return Vec::new() };
-    let mut options: Vec<String> = [
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=10",
-      "-o",
-      "StrictHostKeyChecking=accept-new",
-    ]
-    .iter()
-    .map(|one| (*one).to_owned())
-    .collect();
-    options.extend([port_flag.to_owned(), port.to_string()]);
-    if let Some(key) = key_path {
-      let expanded = match key.strip_prefix("~/") {
-        Some(rest) => home().join(rest).to_string_lossy().into_owned(),
-        None if key == "~" => home().to_string_lossy().into_owned(),
-        None => key.clone(),
-      };
-      options.extend(["-i".to_owned(), expanded, "-o".to_owned(), "IdentitiesOnly=yes".to_owned()]);
-    }
-    options
-  }
-
   /// The argv a command runs by on the node, handed to bash whatever shell the account logs into, or why
   /// the node cannot be reached.
   pub fn exec_argv(&self, command: &str) -> Result<Vec<String>, String> {
@@ -432,10 +411,9 @@ impl NodeShell {
       Way::Hub { agent } => {
         vec![bun(), hub_console()?, "exec".into(), "-a".into(), agent.clone(), command.to_owned()]
       }
-      Way::Ssh { host, user, .. } => {
+      Way::Ssh { ssh_args, .. } => {
         let mut argv = vec!["ssh".to_owned()];
-        argv.extend(self.ssh_options("-p"));
-        argv.push(format!("{user}@{host}"));
+        argv.extend(ssh_args.iter().cloned());
         argv.push(format!("bash -c '{}'", command.replace('\'', "'\\''")));
         argv
       }
@@ -455,10 +433,22 @@ impl NodeShell {
         "-a".into(),
         agent.clone(),
       ],
-      Way::Ssh { host, user, .. } => {
+      Way::Ssh {
+        host,
+        port,
+        user,
+        key_path,
+        ssh_options,
+        ..
+      } => {
         let mut argv = vec!["scp".to_owned(), "-q".to_owned()];
-        argv.extend(self.ssh_options("-P"));
-        argv.extend([local, format!("{user}@{host}:{remote}")]);
+        for option in ssh_options {
+          argv.extend(["-o".to_owned(), option.clone()]);
+        }
+        if let Some(key) = key_path {
+          argv.extend(["-i".to_owned(), expand_home(key)]);
+        }
+        argv.extend(["-P".to_owned(), port.to_string(), local, format!("{user}@{host}:{remote}")]);
         argv
       }
     })

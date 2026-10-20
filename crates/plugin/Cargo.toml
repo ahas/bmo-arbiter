@@ -1,0 +1,12 @@
+[package]
+name = "bmo-arbiter-plugin"
+description = "The arbiter's harness plugin: the MCP server bmo-arbiter mcp starts, its tools calling the arbiter client, the bmo-arbiter skill, and the arbiter's OpenAPI document."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bmo-arbiter-client = { path = "../client" }
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true

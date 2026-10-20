@@ -31,9 +31,9 @@ import dataclasses
 import fcntl
 import hmac
 import json
+import math
 import os
 import re
-import secrets
 import shutil
 import signal
 import subprocess
@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 import units as units_mod
 
@@ -500,7 +500,7 @@ class Keeper:
 class Ticket:
     """One occupant waiting for the card, or given its turn: who, where it stands, when it asked, when it
     was last heard from, and when its turn came."""
-    id: str
+    id: int
     service: str
     asked: float
     heard: float
@@ -568,8 +568,10 @@ class Turns:
         self.hold_open_s = hold_open_s
         # Each service's own turn values, None for one that declares none (docs/node-arbiter.md, 「One rank taking turns」).
         self.turn_values = turn_values
-        self.tickets: dict[str, Ticket] = {}
+        self.tickets: dict[int, Ticket] = {}
         self.typical: dict[str, float] = {}
+        # The last ticket id given: each next one larger, and never below the epoch milliseconds it is given at.
+        self.last_id = 0
         self.guard = threading.Lock()
         # Woken whenever a turn may have changed hands, so an answer held open goes out at once.
         self.changed = threading.Condition(self.guard)
@@ -717,7 +719,7 @@ class Turns:
                    if ticket.resting or self._above(other, ticket) or (pauses and self._rank(other) == self._rank(ticket))]
         return waiting[0].service if waiting else None
 
-    def passes_to(self, ticket_id: str) -> str | None:
+    def passes_to(self, ticket_id: int) -> str | None:
         """Who a turn that lets go only at its request boundary is to pass to there, by its own turn values
         (docs/node-arbiter.md, 「One rank taking turns」): the first of its rank waiting once its turn has been in use
         for their `yield_after_s`; None where no claim, value or waiter makes it pass."""
@@ -751,14 +753,20 @@ class Turns:
         return max(1.0, round(wait, 1))
 
     def answer(self, ticket: Ticket) -> dict:
+        """A ticket as every route answers it (docs/api.md, 「Tickets」)."""
         order = self._order()
-        if ticket.granted is not None:
-            giving_way_for = self._give_way_for(ticket)
-            said = {} if giving_way_for is None else {"giveWay": True, "for": giving_way_for}
-            return {"ticket": ticket.id, "service": ticket.service, "turn": True, "inUse": not ticket.resting,
-                    **({"resting": True} if ticket.resting else {}), **said}
-        return {"ticket": ticket.id, "service": ticket.service, "turn": False,
-                "position": order.index(ticket) + 1, "waitS": self._wait_s(ticket, order), "claim": self.claimed()}
+        granted = ticket.granted is not None
+        giving_way_for = self._give_way_for(ticket) if granted else None
+        return {"id": ticket.id, "serviceName": ticket.service, "turn": granted, "inUse": granted and not ticket.resting,
+                "resting": granted and ticket.resting, "giveWay": giving_way_for is not None, "giveWayFor": giving_way_for,
+                "position": None if granted else order.index(ticket) + 1,
+                "waitMs": None if granted else to_ms(self._wait_s(ticket, order)), "claimantName": self.claimed(),
+                "waitedMs": to_ms(self.clock() - ticket.asked), "need": ticket.need, "ref": ticket.ref, "rest": ticket.rest,
+                "keep": None}
+
+    def _new_id(self) -> int:
+        self.last_id = max(self.last_id + 1, int(time.time() * 1000))
+        return self.last_id
 
     def ask(self, service: str, local: bool = False, need: dict | None = None, ref: str | None = None,
             gives_way_s: float | None = None, waited_s: float = 0.0, wait_s: float = 0.0, rest: bool = False) -> dict | None:
@@ -769,7 +777,7 @@ class Turns:
             return None
         with self.guard:
             now = self.clock()
-            ticket = Ticket(secrets.token_hex(8), service, now - max(0.0, waited_s), now, local=local, need=need, ref=ref,
+            ticket = Ticket(self._new_id(), service, now - max(0.0, waited_s), now, local=local, need=need, ref=ref,
                             gives_way_s=gives_way_s, rest=rest)
             self.tickets[ticket.id] = ticket
             # A turn that gives way, its answer held open, hears at once that somebody now waits.
@@ -779,7 +787,7 @@ class Turns:
             self._held_open(ticket, wait_s)
             return self.answer(ticket)
 
-    def again(self, ticket_id: str, wait_s: float = 0.0, next_waited_s: float | None = None, rest: bool = False) -> dict | None:
+    def again(self, ticket_id: int, wait_s: float = 0.0, next_waited_s: float | None = None, rest: bool = False) -> dict | None:
         """A ticket asked after, which keeps it; None where it was dropped. A waiting one may be answered once
         its turn is given within `wait_s`; a turn asked with its next request's wait is told whether it keeps
         the card for that request, which ends its rest where it does; a turn asked with `rest` rests from
@@ -809,7 +817,7 @@ class Turns:
                 answered["keep"] = kept
             return answered
 
-    def done(self, ticket_id: str) -> bool:
+    def done(self, ticket_id: int) -> bool:
         """A ticket given back, its hold over; how long it held the card is counted for the next waits, and
         the next in line is given its turn there and then."""
         with self.guard:
@@ -826,7 +834,7 @@ class Turns:
             self.changed.notify_all()
             return True
 
-    def follow_use(self, ticket_id: str, in_use: bool) -> None:
+    def follow_use(self, ticket_id: int, in_use: bool) -> None:
         """A turn this process holds for another's engine, in use or resting as that engine's use says: a turn
         coming into use is busy from now, one going quiet rests from now, and every answer held open hears it."""
         with self.guard:
@@ -849,16 +857,11 @@ class Turns:
             return self.occupants.claims_by_ticket(name) and any(ticket.service == name for ticket in self.tickets.values())
 
     def state(self) -> dict:
-        """The queue as the status shows it."""
+        """The queue as the card shows it (docs/api.md, 「The card」), the claim standing by its claimant's name."""
         with self.guard:
             self._tidy()
             self._grant()
-            now = self.clock()
             order = self._order()
-
-            def shown(ticket: Ticket) -> dict:
-                said = {name: value for name, value in (("need", ticket.need), ("ref", ticket.ref), ("rest", ticket.rest)) if value}
-                return {**self.answer(ticket), "waitedS": round(now - ticket.asked, 1), **said}
             claim = self.claimed()
             held_by = self.holders(self.lock, os.getpid())
             granted = [ticket for ticket in order if ticket.granted is not None]
@@ -871,12 +874,12 @@ class Turns:
                 "claim": claim,
                 "lockHeldBy": held_by,
                 "busy": busy,
-                "queue": [shown(ticket) for ticket in order],
-                "typicalHoldS": {service: round(held, 1) for service, held in self.typical.items()},
+                "queue": [self.answer(ticket) for ticket in order],
+                "typicalHoldMs": {service: to_ms(held) for service, held in self.typical.items()},
             }
 
     async def wait(self, service: str, on_queued: Callable[[dict], Awaitable[None]] | None = None,
-                   gives_way_s: float | None = None, waited_s: float = 0.0) -> str | None:
+                   gives_way_s: float | None = None, waited_s: float = 0.0) -> int | None:
         """A turn waited for in this process, asked after every poll, giving way in `gives_way_s` where it
         does, and standing by a request that has waited `waited_s`; the ticket, or None where the service has
         no place on the node. `on_queued` hears each answer that is not yet a turn."""
@@ -886,17 +889,27 @@ class Turns:
                 if on_queued is not None:
                     await on_queued(answered)
                 await asyncio.sleep(TURN_POLL_S)
-                answered = (self.again(answered["ticket"])
+                answered = (self.again(answered["id"])
                             or self.ask(service, local=True, gives_way_s=gives_way_s, waited_s=waited_s))
         except BaseException:
             if answered is not None:
-                self.done(answered["ticket"])
+                self.done(answered["id"])
             raise
-        return None if answered is None else answered["ticket"]
+        return None if answered is None else answered["id"]
+
+
+def to_ms(seconds: float) -> int:
+    """Seconds as the wire's whole milliseconds."""
+    return round(seconds * 1000)
+
+
+def epoch_ms(seconds: float | None) -> int | None:
+    """Seconds since the epoch as the wire's epoch milliseconds, None kept."""
+    return None if seconds is None else round(seconds * 1000)
 
 
 def asked_need(need: object) -> dict | None:
-    """A ticket's `need` as the state shows it: `gpus` and `vramMiB`, each a whole number, and `unit`, the
+    """A ticket's `need` as the card shows it: `gpus` and `vramMiB`, each a whole number, and `unitName`, the
     unit asked for, which the master places by the rules (docs/placement.md); a null or missing one left
     out, anything else a body not understood."""
     if need is None:
@@ -904,10 +917,10 @@ def asked_need(need: object) -> dict | None:
     if not isinstance(need, dict):
         raise ValueError("need is not an object")
     kept: dict = {}
-    if need.get("unit") is not None:
-        if not isinstance(need["unit"], str) or not need["unit"].strip():
-            raise ValueError("need.unit is not a unit name")
-        kept["unit"] = need["unit"].strip()
+    if need.get("unitName") is not None:
+        if not isinstance(need["unitName"], str) or not need["unitName"].strip():
+            raise ValueError("need.unitName is not a unit name")
+        kept["unitName"] = need["unitName"].strip()
     for name in ("gpus", "vramMiB"):
         value = need.get(name)
         if value is None:
@@ -918,30 +931,30 @@ def asked_need(need: object) -> dict | None:
     return kept or None
 
 
-def asked_gives_way(seconds: object) -> float | None:
-    """A ticket's `givesWayS`: the positive seconds the occupant takes to let go, or None for a turn held
-    to its end; anything else a body not understood."""
-    if seconds is None:
+def asked_gives_way(millis: object) -> float | None:
+    """A ticket's `givesWayMs` in seconds: the positive time the occupant takes to let go, or None for a turn
+    held to its end; anything else a body not understood."""
+    if millis is None:
         return None
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not seconds > 0:
-        raise ValueError("givesWayS is not a positive number of seconds")
-    return float(seconds)
+    if isinstance(millis, bool) or not isinstance(millis, int) or not millis > 0:
+        raise ValueError("givesWayMs is not a positive whole number of milliseconds")
+    return millis / 1000
 
 
-def asked_seconds(seconds: object, name: str) -> float | None:
-    """A number of seconds asked in a body or a query: none where it was not given, else a number not below
-    nought; anything else is not understood."""
-    if seconds is None:
+def asked_ms(millis: object, name: str) -> float | None:
+    """A span asked in milliseconds in a body or a query, in seconds: none where it was not given, else a
+    whole number not below nought; anything else is not understood."""
+    if millis is None:
         return None
-    if isinstance(seconds, bool):
-        raise ValueError(f"{name} is not a number of seconds")
+    if isinstance(millis, bool) or isinstance(millis, float):
+        raise ValueError(f"{name} is not a whole number of milliseconds")
     try:
-        value = float(seconds)  # type: ignore[arg-type]
+        value = int(millis)  # type: ignore[call-overload]
     except (TypeError, ValueError):
-        raise ValueError(f"{name} is not a number of seconds") from None
-    if not value >= 0:
-        raise ValueError(f"{name} is not a number of seconds")
-    return value
+        raise ValueError(f"{name} is not a whole number of milliseconds") from None
+    if value < 0:
+        raise ValueError(f"{name} is not a whole number of milliseconds")
+    return value / 1000
 
 
 def outcome_line(outcomes: list[dict]) -> str:
@@ -975,30 +988,39 @@ class UnitsApi:
         self.rules_mtime: float | None = -1.0
 
     def state(self) -> dict:
+        """The card as `GET /card` answers it (docs/api.md, 「The card」)."""
         card = self.card
         claim = card.claimed()
         since = card.claims.get(claim) if claim is not None else None
-        units = card.units
         available = units_mod.memory_available()
         placing = card.placing()
+        state = self.turns.state()
+        stage = (card.units.stage_shown() if card.units is not None
+                 else {"waiting": False, "waitingMs": 0, "graphs": 0, "waits": 0, "waitedMs": 0})
         return {
-            **self.turns.state(),
+            **state,
+            "claim": None if claim is None else {
+                "claimantName": claim,
+                "claimedAt": None if since is None else epoch_ms(time.time() - (time.monotonic() - since))},
             "version": self.version,
             "desktop": self.desktop,
-            "card": self.card_shown(),
-            "units": (units.shown() if units is not None else []) + (self.owners.shown() if self.owners is not None else []),
+            "units": self.units(),
+            "device": self.card_shown(),
             # the lent owner's door alone; every other owner's stands on its own units as `door`
-            "stage": units.stage_shown() if units is not None else {"waiting": False, "waitingS": 0, "graphs": 0,
-                                                                    "waits": 0, "waitedS": 0},
+            "stage": stage,
             "store": self.store.state() if self.store is not None else None,
-            "claim": {"by": claim, "since": None if since is None else time.time() - (time.monotonic() - since)},
             "ram": {"dumpsMiB": round(card.dumps_bytes() / 2**20),
                     "availableMiB": None if available is None else round(available / 2**20),
                     "maxMiB": None if placing.ram_max_bytes is None else round(placing.ram_max_bytes / 2**20),
                     "floorMiB": None if placing.floor_bytes >= units_mod.NO_RAM else round(placing.floor_bytes / 2**20),
                     "dump": placing.default},
-            "rules": {"loadedAt": self.rules_read, "error": self.rules_error},
+            "rules": {"loadedAt": epoch_ms(self.rules_read), "error": self.rules_error},
         }
+
+    def units(self) -> list[dict]:
+        """Every unit on the card: the lent owner's, then every other owner's."""
+        units = self.card.units
+        return (units.shown() if units is not None else []) + (self.owners.shown() if self.owners is not None else [])
 
     def card_shown(self) -> dict | None:
         """The card as the driver says it, with every process on it and the service each is known as."""
@@ -1007,32 +1029,37 @@ class UnitsApi:
             return None
         return {**read, "processes": units_mod.processes_shown(self.memory.processes(), self.card.service_of)}
 
-    def act(self, verb: str, body: dict) -> tuple[int, dict]:
-        names = body.get("units")
-        if names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)):
-            return HTTPStatus.BAD_REQUEST, {"error": "units is a list of unit names"}
-        reason = str(body.get("reason") or "the master")
+    def move_one(self, name: str, to: str, reason: str, keeps_turn: bool = False) -> tuple[int, dict]:
+        """One unit moved, `evicted` off the card or `resident` back onto it, answered as the unit stands after
+        (docs/api.md, 「Card units」), or refused in the wire's error shape. A lent hold keeps its lock and turn
+        after an unload where the asker says more of its units follow (`keeps_turn`)."""
+        if not any(unit["name"] == name for unit in self.units()):
+            return HTTPStatus.NOT_FOUND, refusal("not-found", f"no unit {name} stands on this card")
         if self.loop is None:
-            return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "the arbiter is starting"}
-        work = self.move(verb, names, reason)
+            return HTTPStatus.SERVICE_UNAVAILABLE, refusal("not-ready", "the arbiter is starting")
+        verb = "evict" if to == units_mod.EVICTED else "restore"
         try:
-            outcomes = asyncio.run_coroutine_threadsafe(work, self.loop).result(timeout=300)
+            outcomes = asyncio.run_coroutine_threadsafe(self.move(verb, [name], reason, not keeps_turn),
+                                                        self.loop).result(timeout=300)
         except units_mod.NoRoom as why:
-            return HTTPStatus.CONFLICT, {"error": f"no room: {why}"}
+            return HTTPStatus.CONFLICT, refusal("conflict", f"no room: {why}")
         except Exception as fault:  # noqa: BLE001 - said to the asker rather than ending the thread
-            return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(fault).__name__}: {fault}"}
+            return HTTPStatus.INTERNAL_SERVER_ERROR, refusal("failed", f"{type(fault).__name__}: {fault}")
         failed = [one for one in outcomes if not one["ok"]]
         if verb == "evict" and failed:
-            return HTTPStatus.CONFLICT, {"error": f"not unloaded: {outcome_line(failed)}", "results": outcomes}
-        return HTTPStatus.OK, {"results": outcomes}
+            return HTTPStatus.CONFLICT, refusal("conflict", f"not unloaded: {outcome_line(failed)}")
+        after = next((unit for unit in self.units() if unit["name"] == name), None)
+        if after is None:
+            return HTTPStatus.NOT_FOUND, refusal("not-found", f"{name} left the card's units while it moved")
+        return HTTPStatus.OK, after
 
-    async def move(self, verb: str, names: list[str] | None, reason: str) -> list[dict]:
+    async def move(self, verb: str, names: list[str] | None, reason: str, hand_on: bool = True) -> list[dict]:
         """The units named moved: the lent ones through the card's hold, each other owner's through its own socket.
         Nothing is loaded back onto a card a claim stands on."""
         lent, others = self.owners.split(names) if self.owners is not None else (names, {})
         outcomes: list[dict] = []
         if lent is None or lent:
-            outcomes += await (self.card.evict(lent, reason) if verb == "evict" else self.card.restore(lent))
+            outcomes += await (self.card.evict(lent, reason, hand_on=hand_on) if verb == "evict" else self.card.restore(lent))
         for service, named in others.items():
             owner = self.owners.units[service] if self.owners is not None else None
             if owner is None:
@@ -1085,85 +1112,177 @@ class UnitsApi:
             await asyncio.sleep(2.0 if self.card.held else 1.0)
 
 
-def turns_handler(turns: Turns, units_api: UnitsApi | None = None) -> type[BaseHTTPRequestHandler]:
-    """The hold API on the node's loopback (docs/node-arbiter.md, 「The hold」): a ticket asked for, asked after
-    and given back, and the queue read; and the units read and moved (docs/placement.md)."""
+def refusal(code: str, error: str) -> dict:
+    """The wire's one error shape: a kebab-case code and an English sentence (docs/api.md, 「The wire format」)."""
+    return {"code": code, "error": error}
+
+
+def card_answer(turns: Turns, units_api: UnitsApi | None, version: str) -> dict:
+    """The card as `GET /card` answers it; with the hold alone, its queue and every other part empty."""
+    if units_api is not None:
+        return units_api.state()
+    state = turns.state()
+    claim = state["claim"]
+    return {**state, "claim": None if claim is None else {"claimantName": claim, "claimedAt": None},
+            "version": version, "desktop": False, "units": [], "device": None,
+            "stage": {"waiting": False, "waitingMs": 0, "graphs": 0, "waits": 0, "waitedMs": 0}, "store": None,
+            "ram": {"dumpsMiB": 0, "availableMiB": None, "maxMiB": None, "floorMiB": None, "dump": units_mod.TO_DISK},
+            "rules": {"loadedAt": None, "error": None}}
+
+
+def turns_handler(turns: Turns, units_api: UnitsApi | None = None, version: str = "") -> type[BaseHTTPRequestHandler]:
+    """The node arbiter's routes on the node's loopback (docs/api.md, 「What the node arbiter serves」): its
+    health, the card, a ticket asked for, asked after, rested and given back (docs/node-arbiter.md, 「The
+    hold」), and the card's units read and moved one at a time (docs/placement.md)."""
 
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, status: int, body: dict | None) -> None:
+        def _send(self, status: int, body: dict | None, retry_after: int | None = None) -> None:
             data = b"" if body is None else json.dumps(body).encode()
             self.send_response(status)
             if body is not None:
                 self.send_header("content-type", "application/json")
-                if status == HTTPStatus.ACCEPTED:
-                    self.send_header("retry-after", str(max(1, round(body.get("waitS", 1)))))
+            if retry_after is not None:
+                self.send_header("retry-after", str(retry_after))
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
-        def _ticket_answer(self, answered: dict | None, missing: HTTPStatus, why: str) -> None:
-            if answered is None:
-                self._send(missing, {"error": why})
-                return
+        def _refuse(self, status: int, code: str, error: str) -> None:
+            self._send(status, refusal(code, error))
+
+        def _body(self) -> object:
+            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+            return json.loads(raw) if raw else None
+
+        def _route(self) -> tuple[list[str], dict[str, list[str]]]:
+            path, _, query = self.path.partition("?")
+            return [unquote(part) for part in path.strip("/").split("/")], parse_qs(query)
+
+        def _ticket_id(self, word: str) -> int | None:
             try:
-                self._send(HTTPStatus.OK if answered["turn"] else HTTPStatus.ACCEPTED, answered)
+                return int(word)
+            except ValueError:
+                self._refuse(HTTPStatus.BAD_REQUEST, "bad-request", f"{word} is not a ticket's id")
+                return None
+
+        def _no_route(self) -> None:
+            self._refuse(HTTPStatus.NOT_FOUND, "no-route", "no route answers this method and path")
+
+        def _ticket_answer(self, answered: dict, status: int, retry_after: int | None = None) -> None:
+            try:
+                self._send(status, answered, retry_after)
             except (BrokenPipeError, ConnectionResetError):
                 # the asker left while its answer was held open: nobody takes this turn, so it is given back
-                turns.done(answered["ticket"])
-                say(f"turns: {answered['service']} left before its ticket {answered['ticket']} was answered; given back")
-
-        def do_POST(self) -> None:  # noqa: N802
-            if self.path in ("/units/evict", "/units/restore") and units_api is not None:
-                try:
-                    body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
-                    if not isinstance(body, dict):
-                        raise ValueError
-                except ValueError:
-                    return self._send(HTTPStatus.BAD_REQUEST, {"error": "a body {\"units\"?: [<name>…], \"reason\"?} is wanted"})
-                return self._send(*units_api.act(self.path.rsplit("/", 1)[1], body))
-            if self.path != "/turns":
-                return self._send(HTTPStatus.NOT_FOUND, {"error": "no such path"})
-            try:
-                body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
-                service = body["service"]
-                need = asked_need(body.get("need"))
-                gives_way_s = asked_gives_way(body.get("givesWayS"))
-                waited_s = asked_seconds(body.get("waitedS"), "waitedS")
-                wait_s = asked_seconds(body.get("waitS"), "waitS")
-                rest = body.get("rest", False)
-                if not isinstance(rest, bool):
-                    raise ValueError("rest is true or false")
-            except (ValueError, KeyError, TypeError, AttributeError):
-                return self._send(HTTPStatus.BAD_REQUEST, {"error": "a body {\"service\": \"<name>\", \"need\"?: {\"gpus\"?, \"vramMiB\"?}, \"ref\"?, \"givesWayS\"?, \"waitedS\"?, \"waitS\"?, \"rest\"?} is wanted"})
-            ref = None if body.get("ref") is None else str(body["ref"])
-            self._ticket_answer(turns.ask(str(service), need=need, ref=ref, gives_way_s=gives_way_s, waited_s=waited_s or 0.0,
-                                          wait_s=wait_s or 0.0, rest=rest), HTTPStatus.FORBIDDEN, f"{service} has no place among this node's occupants")
+                turns.done(answered["id"])
+                say(f"turns: {answered['serviceName']} left before its ticket {answered['id']} was answered; given back")
 
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/units" and units_api is not None:
-                return self._send(HTTPStatus.OK, units_api.state())
-            if self.path == "/turns":
-                return self._send(HTTPStatus.OK, turns.state() if units_api is None else {**turns.state(), "units": units_api.state()["units"]})
-            if self.path.startswith("/turns/"):
-                path, _, query = self.path.partition("?")
-                asked = parse_qs(query)
+            parts, query = self._route()
+            if parts == ["health"]:
+                ready = units_api is None or units_api.loop is not None
+                return self._send(HTTPStatus.OK, {"ready": ready, "reason": None if ready else "the arbiter is starting",
+                                                  "version": units_api.version if units_api is not None else version})
+            if parts == ["card"]:
+                return self._send(HTTPStatus.OK, card_answer(turns, units_api, version))
+            if parts == ["card-units"]:
+                return self._send(HTTPStatus.OK, {"items": units_api.units() if units_api is not None else [], "more": False})
+            if len(parts) == 2 and parts[0] == "tickets":
+                ticket_id = self._ticket_id(parts[1])
+                if ticket_id is None:
+                    return None
                 try:
-                    wait_s = asked_seconds(asked.get("waitS", [None])[0], "waitS")
-                    next_waited_s = asked_seconds(asked.get("next", [None])[0], "next")
-                    rest = asked.get("rest", ["0"])[0]
-                    if rest not in ("0", "1"):
-                        raise ValueError("rest is 1 or 0")
+                    wait_s = asked_ms(query.get("waitMs", [None])[0], "waitMs")
+                    next_waited_s = asked_ms(query.get("nextWaitedMs", [None])[0], "nextWaitedMs")
                 except ValueError as why:
-                    return self._send(HTTPStatus.BAD_REQUEST, {"error": str(why)})
-                return self._ticket_answer(turns.again(path[len("/turns/"):], wait_s=wait_s or 0.0, next_waited_s=next_waited_s,
-                                                       rest=rest == "1"),
-                                           HTTPStatus.NOT_FOUND, "no such ticket; ask for a new one")
-            self._send(HTTPStatus.NOT_FOUND, {"error": "no such path"})
+                    return self._refuse(HTTPStatus.BAD_REQUEST, "bad-request", str(why))
+                answered = turns.again(ticket_id, wait_s=wait_s or 0.0, next_waited_s=next_waited_s)
+                if answered is None:
+                    return self._refuse(HTTPStatus.NOT_FOUND, "not-found", f"no ticket {ticket_id} is held; ask for a new one")
+                return self._ticket_answer(answered, HTTPStatus.OK)
+            self._no_route()
+
+        def do_POST(self) -> None:  # noqa: N802
+            parts, _ = self._route()
+            if parts != ["tickets"]:
+                return self._no_route()
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    raise ValueError("the body is not an object")
+                service = body["serviceName"]
+                if not isinstance(service, str) or not service:
+                    raise ValueError("serviceName is not a service's name")
+                need = asked_need(body.get("need"))
+                gives_way_s = asked_gives_way(body.get("givesWayMs"))
+                waited_s = asked_ms(body.get("waitedMs"), "waitedMs")
+                wait_s = asked_ms(body.get("waitMs"), "waitMs")
+                rest = body.get("rest", False)
+                if rest is None:
+                    rest = False
+                if not isinstance(rest, bool):
+                    raise ValueError("rest is true or false")
+            except (ValueError, KeyError, TypeError) as why:
+                return self._refuse(HTTPStatus.BAD_REQUEST, "bad-request",
+                                    f"a body of serviceName and need, ref, givesWayMs, waitedMs, waitMs and rest is wanted: {why}")
+            ref = None if body.get("ref") is None else str(body["ref"])
+            answered = turns.ask(service, need=need, ref=ref, gives_way_s=gives_way_s, waited_s=waited_s or 0.0,
+                                 wait_s=wait_s or 0.0, rest=rest)
+            if answered is None:
+                return self._refuse(HTTPStatus.UNPROCESSABLE_ENTITY, "no-place", f"{service} has no place among this node's occupants")
+            if answered["turn"]:
+                return self._ticket_answer(answered, HTTPStatus.CREATED)
+            self._ticket_answer(answered, HTTPStatus.ACCEPTED, max(1, math.ceil(answered["waitMs"] / 1000)))
+
+        def do_PATCH(self) -> None:  # noqa: N802
+            parts, _ = self._route()
+            if len(parts) == 2 and parts[0] == "tickets":
+                ticket_id = self._ticket_id(parts[1])
+                if ticket_id is None:
+                    return None
+                try:
+                    body = self._body()
+                except ValueError:
+                    body = None
+                if not isinstance(body, dict) or not isinstance(body.get("resting"), bool):
+                    return self._refuse(HTTPStatus.BAD_REQUEST, "bad-request", "a body {\"resting\": true} is wanted")
+                if ticket_id not in turns.tickets:
+                    return self._refuse(HTTPStatus.NOT_FOUND, "not-found", f"no ticket {ticket_id} is held; ask for a new one")
+                if not body["resting"]:
+                    return self._refuse(HTTPStatus.CONFLICT, "conflict", "a rest ends only by asking with nextWaitedMs")
+                answered = turns.again(ticket_id, rest=True)
+                if answered is None:
+                    return self._refuse(HTTPStatus.NOT_FOUND, "not-found", f"no ticket {ticket_id} is held; ask for a new one")
+                return self._send(HTTPStatus.OK, answered)
+            if len(parts) == 2 and parts[0] == "card-units" and units_api is not None:
+                try:
+                    body = self._body()
+                except ValueError:
+                    body = None
+                to = body.get("state") if isinstance(body, dict) else None
+                reason = body.get("reason") if isinstance(body, dict) else None
+                keeps_turn = body.get("keepsTurn") if isinstance(body, dict) else None
+                if (to not in (units_mod.EVICTED, units_mod.RESIDENT) or not (reason is None or isinstance(reason, str))
+                        or not (keeps_turn is None or isinstance(keeps_turn, bool))):
+                    return self._refuse(HTTPStatus.BAD_REQUEST, "bad-request",
+                                        "a body {\"state\": \"evicted\" or \"resident\", \"reason\"?, \"keepsTurn\"?} is wanted")
+                return self._send(*units_api.move_one(parts[1], to, reason or "asked", bool(keeps_turn)))
+            if len(parts) == 2 and parts[0] == "card-units":
+                return self._refuse(HTTPStatus.NOT_FOUND, "not-found", f"no unit {parts[1]} stands on this card")
+            self._no_route()
 
         def do_DELETE(self) -> None:  # noqa: N802
-            if not self.path.startswith("/turns/"):
-                return self._send(HTTPStatus.NOT_FOUND, {"error": "no such path"})
-            self._send(HTTPStatus.NO_CONTENT if turns.done(self.path.partition("?")[0][len("/turns/"):]) else HTTPStatus.NOT_FOUND, None)
+            parts, _ = self._route()
+            if len(parts) != 2 or parts[0] != "tickets":
+                return self._no_route()
+            ticket_id = self._ticket_id(parts[1])
+            if ticket_id is None:
+                return None
+            if turns.done(ticket_id):
+                return self._send(HTTPStatus.NO_CONTENT, None)
+            self._refuse(HTTPStatus.NOT_FOUND, "not-found", f"no ticket {ticket_id} is held")
+
+        def do_PUT(self) -> None:  # noqa: N802
+            self._no_route()
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             pass
@@ -1314,7 +1433,7 @@ class Card:
         # the hold standing now.
         self.turns: Turns | None = None
         self.lent_to = ANY
-        self.ticket: str | None = None
+        self.ticket: int | None = None
         self.held = False
         self.holder: asyncio.StreamWriter | None = None
         # Each claimant whose claim stands, with when it began; the lock held for them while any does.
@@ -1581,7 +1700,7 @@ class Card:
                 nonlocal shown
                 if answer["position"] != shown:
                     shown = answer["position"]
-                    writer.write(f"QUEUED {answer['position']} {answer['waitS']:g}\n".encode())
+                    writer.write(f"QUEUED {answer['position']} {answer['waitMs'] / 1000:g}\n".encode())
                     await writer.drain()
 
             waiting = asyncio.ensure_future(self.turns.wait(self.lent_to, queued, gives_way_s=LEND_GIVES_WAY_S))
@@ -1748,7 +1867,7 @@ class Card:
                 nonlocal shown
                 if answer["position"] != shown:
                     shown = answer["position"]
-                    self._tell(f"QUEUED {answer['position']} {answer['waitS']:g}")
+                    self._tell(f"QUEUED {answer['position']} {answer['waitMs'] / 1000:g}")
 
             waiting = self.turns.wait(self.lent_to, queued, gives_way_s=LEND_GIVES_WAY_S, waited_s=waited_s)
             try:
@@ -1778,12 +1897,14 @@ class Card:
                 self.ticket = None
             raise
 
-    async def evict(self, names: list[str] | None, reason: str, claimant: str | None = None) -> list[dict]:
+    async def evict(self, names: list[str] | None, reason: str, claimant: str | None = None,
+                    hand_on: bool = True) -> list[dict]:
         """Units of the standing hold unloaded, each where the node's rules put it, within the host memory
         the claims standing (and `claimant`'s) leave, and the head told on the hold once any is out, with
         `EVICTED claim <claimant>` where they went out for a claim and `EVICTED <reason>` otherwise. Its
         lock and turn are given back only once every unit asked for went out: one still on the card keeps
-        both, so nobody is handed a card the hold's memory still fills."""
+        both, so nobody is handed a card the hold's memory still fills; and where the asker says more of its
+        units follow (`hand_on` false), they are kept until the last of them is out."""
         if self.units is None:
             return [{"name": name, "ok": False, "error": "this node lends no evictable card"} for name in names or ["*"]]
         aside = await self._want_aside()
@@ -1792,7 +1913,7 @@ class Card:
                 outcomes = await self.units.evict(names, reason, self.placing(claimant))
                 whole = bool(outcomes) and all(one["ok"] for one in outcomes)
                 if self.units.out():
-                    if whole:
+                    if whole and hand_on:
                         self._let_lock_go()
                     self._tell(f"EVICTED claim {claimant}" if claimant is not None else f"EVICTED {reason}")
                 say(f"units: out for {reason}: {outcome_line(outcomes)}"
@@ -2090,13 +2211,13 @@ class LocalTurn:
     def __init__(self, turns: Turns, service: str) -> None:
         self.turns = turns
         self.service = service
-        self.ticket: str | None = None
+        self.ticket: int | None = None
 
     def want(self) -> bool:
         answered = self.turns.again(self.ticket) if self.ticket is not None else None
         if answered is None:
             answered = self.turns.ask(self.service, local=True)
-        self.ticket = None if answered is None else answered["ticket"]
+        self.ticket = None if answered is None else answered["id"]
         return answered is not None and answered["turn"]
 
     def drop(self) -> None:

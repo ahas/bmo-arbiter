@@ -1,0 +1,13 @@
+[package]
+name = "bmo-arbiter-client"
+description = "The arbiter's client: every body of the master's and the node arbiter's routes as a type, and a call for every route."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+reqwest = { workspace = true, features = ["query", "stream"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sse-stream.workspace = true

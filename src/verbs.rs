@@ -13,14 +13,14 @@ use crate::reach::{NodeRegistry, NodeShell};
 use crate::rules::{Dump, NodeFacts, Num, RamFree, Rules, read_rules, rules_path, selects};
 
 /// Where the master's slave answers on each node's loopback.
-pub const SLAVE_UNITS: &str = "curl -s -m 3 http://127.0.0.1:7439/units";
+pub const SLAVE_UNITS: &str = "curl -s -m 3 http://127.0.0.1:7439/card";
 
 // Where a node keeps the rules it was pushed, under its account's home.
 const NODE_RULES: &str = ".config/bmo-card/rules.json";
 const NODE_CONFIG: &str = ".config/bmo-card";
 
 /// What the verbs stand on (docs/api.md, 「Settings」): the data root the rules are under, the arbiter's own
-/// tree, the roots the services' declarations are read from, and the node registry, or why none is named.
+/// tree, the roots the services' declarations are read from, and the node service, or why none is named.
 pub struct Roots {
   pub data_root: PathBuf,
   pub code_root: PathBuf,
@@ -29,14 +29,14 @@ pub struct Roots {
 }
 
 impl Roots {
-  /// The node registry, or why the verb that needs it cannot reach the nodes.
+  /// The node service, or why the verb that needs it cannot reach the nodes.
   pub fn registry(&self) -> Result<&NodeRegistry, String> {
     self.registry.as_ref().map_err(Clone::clone)
   }
 }
 
 /// The arbiter's own tree the master and the verbs read where none is named: the one
-/// `BMO_DEPLOY_DIR` names; else, where the binary `<tree>/bin/card-master` stands in a release beside
+/// `BMO_DEPLOY_DIR` names; else, where the binary `<tree>/bin/bmo-arbiter` stands in a release beside
 /// the deploy link's, the link itself, never resolved, so each read finds the release live then; else
 /// the tree the binary stands in (docs/placement.md, 「Master and slaves」).
 pub fn code_root(deploy_dir: Option<PathBuf>, exe: Option<&Path>, link: &Path) -> PathBuf {
@@ -65,7 +65,7 @@ pub struct ReachedNode {
 /// The memory of the card the slave's answer gives; none where it did not answer or gave no card.
 pub fn slave_card_mib(answer: &str) -> Option<f64> {
   let read: serde_json::Value = serde_json::from_str(answer).ok()?;
-  read.get("card")?.get("totalMiB")?.as_f64()
+  read.get("device")?.get("totalMiB")?.as_f64()
 }
 
 /// Whether the slave's answer says its machine is a desktop; none where it did not answer.
@@ -74,9 +74,9 @@ pub fn slave_desktop(answer: &str) -> Option<bool> {
   Some(read.get("desktop") == Some(&serde_json::Value::Bool(true)))
 }
 
-/// Each node named, or each of the node registry, with its role and whether the machine is a desktop, as
-/// its slave says. A node the registry cannot give is said and passed by; with no registry named, there
-/// are no nodes to reach.
+/// Each node named, or each the node service lists, with its role and whether the machine is a desktop, as
+/// its slave says. A node the node service cannot give is said and passed by; with no node service named,
+/// there are no nodes to reach.
 pub async fn reach_nodes(roots: &Roots, named: &[String]) -> Result<Vec<ReachedNode>, String> {
   let registry = roots.registry()?;
   let names = if named.is_empty() { registry.listed_nodes().await } else { named.to_vec() };
@@ -85,7 +85,7 @@ pub async fn reach_nodes(roots: &Roots, named: &[String]) -> Result<Vec<ReachedN
     let connection = match registry.read_connection(&name).await {
       Ok(connection) => connection,
       Err(fault) => {
-        eprintln!("card-master: {fault}");
+        eprintln!("bmo-arbiter: {fault}");
         continue;
       }
     };

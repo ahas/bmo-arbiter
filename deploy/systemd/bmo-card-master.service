@@ -9,11 +9,12 @@ Type=simple
 WorkingDirectory=%h/.local/share/bmo-arbiter/deploy
 Environment=PATH=%h/.bun/bin:%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=BMO_DATA_DIR=%h/.local/share/bmo-arbiter/data
-# The deployment's own settings (docs/api.md, 「Settings」): the node registry's command, the declaration
-# roots, the console script and the rival units, none of which this repository knows.
+# The deployment's own settings (docs/api.md, 「Settings」): the node service's address and token, the
+# master's own token, the declaration roots, the console script and the rival units, none of which this
+# repository knows.
 EnvironmentFile=-%h/.config/bmo-arbiter/env
 ExecStartPre=/usr/bin/mkdir -p %h/.local/share/bmo-arbiter/data/placements
-ExecStart=%h/.local/share/bmo-arbiter/deploy/bin/card-master
+ExecStart=%h/.local/share/bmo-arbiter/deploy/bin/bmo-arbiter
 Restart=always
 RestartSec=5
 

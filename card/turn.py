@@ -1,9 +1,10 @@
 """Waiting a turn for the card through the node's card arbiter (docs/node-arbiter.md, 「The hold」), for an occupant
 that runs in a process of its own: an engine serving calls, a server with a bound of its own, a training run.
 
-An occupant asks the arbiter on the node's loopback for a ticket under its own service name. The answer is
-200 with `turn: true` where the card is its now, or 202 with its place in the queue and how long the wait
-is counted at; the answer is held open until the turn comes or a while passes, so the occupant hears of its
+An occupant asks the arbiter on the node's loopback for a ticket under its own service name (docs/api.md,
+「Tickets」). The answer is 201 with `turn: true` where the card is its now, or 202 with its place in the queue
+and how long the wait is counted at; the answer is held open until the turn comes or a while passes, so the
+occupant hears of its
 turn the moment the card is handed on, then takes the node's card lock itself and gives the ticket back
 once it has let go. An occupant serving requests one after another asks after each whether its next request
 still stands first (`keep`), and carries on with the card where it does (docs/node-arbiter.md, 「One queue of
@@ -69,8 +70,9 @@ class TurnClient:
 
     def __init__(self, service: str, port: int = PORT, gives_way_s: float | None = None) -> None:
         self.service = service
-        self.base = f"http://127.0.0.1:{port}/turns"
-        self.ticket: str | None = None
+        self.root = f"http://127.0.0.1:{port}"
+        self.base = f"{self.root}/tickets"
+        self.ticket: int | None = None
         self.gives_way_s = gives_way_s
 
     def _call(self, method: str, url: str, body: dict | None = None, held_s: float = 0.0) -> tuple[int, dict] | None:
@@ -94,40 +96,40 @@ class TurnClient:
         a new ticket stands by its request's arrival, `waited_s` ago, or with `rest` for no request, only to
         rest on the card once it is free. A service the node has no place for is told so as a refusal."""
         held_s = max(0.0, min(wait_s, HOLD_OPEN_S))
-        query = f"?waitS={held_s:g}" if held_s > 0 else ""
+        query = f"?waitMs={round(held_s * 1000)}" if held_s > 0 else ""
         answered = self._call("GET", f"{self.base}/{self.ticket}{query}", held_s=held_s) if self.ticket is not None else None
         if answered is None or answered[0] == 404:
-            asked: dict = {"service": self.service}
+            asked: dict = {"serviceName": self.service}
             if self.gives_way_s is not None:
-                asked["givesWayS"] = round(self.gives_way_s, 1)
+                asked["givesWayMs"] = max(1, round(self.gives_way_s * 1000))
             if waited_s is not None and waited_s > 0:
-                asked["waitedS"] = round(waited_s, 3)
+                asked["waitedMs"] = round(waited_s * 1000)
             if rest:
                 asked["rest"] = True
             if held_s > 0:
-                asked["waitS"] = held_s
+                asked["waitMs"] = round(held_s * 1000)
             answered = self._call("POST", self.base, asked, held_s=held_s)
         if answered is None:
             self.ticket = None
             return None
         status, body = answered
-        if status == 403:
+        if status == 422 and body.get("code") == "no-place":
             raise PermissionError(body.get("error", f"{self.service} has no place among this node's occupants"))
-        if status not in (200, 202):
+        if status not in (200, 201, 202):
             return None
-        self.ticket = body.get("ticket")
+        self.ticket = body.get("id")
         return answer_of(body)
 
-    def watch(self, ticket: str, wait_s: float = HOLD_OPEN_S) -> Answer | None:
+    def watch(self, ticket: int, wait_s: float = HOLD_OPEN_S) -> Answer | None:
         """A turn that gives way asked after with its answer held open until it is to give way, `wait_s` at
         most (docs/node-arbiter.md, 「Handing on」). It never asks for a new ticket: None where the arbiter no longer
         holds this one, and an OSError where no arbiter answers."""
         held_s = max(0.0, min(wait_s, HOLD_OPEN_S))
-        answered = self._call("GET", f"{self.base}/{ticket}?waitS={held_s:g}", held_s=held_s)
+        answered = self._call("GET", f"{self.base}/{ticket}?waitMs={round(held_s * 1000)}", held_s=held_s)
         if answered is None:
             raise OSError("the card arbiter did not answer")
         status, body = answered
-        return answer_of(body) if status in (200, 202) else None
+        return answer_of(body) if status == 200 else None
 
     def keep(self, next_waited_s: float) -> bool:
         """Whether a turn carries on to the occupant's next request, which has waited `next_waited_s`: true only
@@ -135,7 +137,7 @@ class TurnClient:
         no arbiter, one that does not answer the question — lets the card go."""
         if self.ticket is None:
             return False
-        answered = self._call("GET", f"{self.base}/{self.ticket}?next={max(0.0, next_waited_s):.3f}")
+        answered = self._call("GET", f"{self.base}/{self.ticket}?nextWaitedMs={round(max(0.0, next_waited_s) * 1000)}")
         return answered is not None and answered[0] == 200 and answered[1].get("keep") is True
 
     def rest(self) -> Answer | None:
@@ -144,7 +146,7 @@ class TurnClient:
         once; None where there is no ticket, no arbiter, or one that no longer holds the ticket."""
         if self.ticket is None:
             return None
-        answered = self._call("GET", f"{self.base}/{self.ticket}?rest=1")
+        answered = self._call("PATCH", f"{self.base}/{self.ticket}", {"resting": True})
         return answer_of(answered[1]) if answered is not None and answered[0] == 200 else None
 
     def give_back(self) -> None:
@@ -153,14 +155,15 @@ class TurnClient:
             self.ticket = None
 
     def state(self) -> dict | None:
-        """The arbiter's state of the card, or None where no arbiter answers."""
-        answered = self._call("GET", self.base)
+        """The card as the arbiter keeps it (docs/api.md, 「The card」), or None where no arbiter answers."""
+        answered = self._call("GET", f"{self.root}/card")
         return answered[1] if answered is not None and answered[0] == 200 else None
 
 
 def answer_of(body: dict) -> Answer:
-    return Answer(bool(body.get("turn")), body.get("position"), body.get("waitS"),
-                  body.get("for") if body.get("giveWay") else None, body.get("claim"), bool(body.get("resting")))
+    wait_ms = body.get("waitMs")
+    return Answer(bool(body.get("turn")), body.get("position"), None if wait_ms is None else wait_ms / 1000,
+                  body.get("giveWayFor") if body.get("giveWay") else None, body.get("claimantName"), bool(body.get("resting")))
 
 
 def try_lock(path: Path) -> int | None:
@@ -222,7 +225,7 @@ class GivingTurn:
         if self.client.ticket is not None:
             threading.Thread(target=self._watching, args=(self.client.ticket, self._stop), daemon=True).start()
 
-    def _watching(self, ticket: str, stop: threading.Event) -> None:
+    def _watching(self, ticket: int, stop: threading.Event) -> None:
         while not stop.is_set() and self._asked is None:
             try:
                 self.check(ticket, stop)
@@ -230,7 +233,7 @@ class GivingTurn:
                 # An arbiter that does not answer is asked again after a pause rather than at once.
                 stop.wait(AGAIN_S)
 
-    def check(self, ticket: str | None = None, stop: threading.Event | None = None, wait_s: float = HOLD_OPEN_S) -> None:
+    def check(self, ticket: int | None = None, stop: threading.Event | None = None, wait_s: float = HOLD_OPEN_S) -> None:
         """The ticket asked after once, its answer held open until the turn is to give way, `wait_s` at most."""
         ticket = ticket or self.client.ticket
         if ticket is None:

@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use bmo_arbiter_client::cluster::{PlacedService, PlacementUnderWay};
+use bmo_arbiter_client::placements::PlacementKind;
 use serde::{Deserialize, Serialize};
 
 use crate::reach::BoxFuture;
@@ -427,27 +429,31 @@ pub struct Journal {
   pub done: Vec<Step>,
 }
 
-/// One service as the state API shows it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceView {
-  pub service: String,
-  #[serde(rename = "cardMiB")]
-  pub card_mib: Num,
-  pub priority: Num,
-  pub spread: Spread,
-  pub alone: bool,
-  pub nodes: Vec<String>,
-  pub unsettled: Option<String>,
+impl From<Spread> for bmo_arbiter_client::cluster::Spread {
+  fn from(spread: Spread) -> Self {
+    match spread {
+      Spread::One => Self::One,
+      Spread::Many => Self::Many,
+    }
+  }
 }
 
-/// The request under way, as the state API shows it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RequestView {
-  pub verb: Verb,
-  pub service: String,
-  pub node: String,
-  pub step: Option<Step>,
+impl From<Verb> for PlacementKind {
+  fn from(verb: Verb) -> Self {
+    match verb {
+      Verb::Place => Self::Place,
+      Verb::Remove => Self::Remove,
+    }
+  }
+}
+
+impl From<PlacementKind> for Verb {
+  fn from(kind: PlacementKind) -> Self {
+    match kind {
+      PlacementKind::Place => Self::Place,
+      PlacementKind::Remove => Self::Remove,
+    }
+  }
 }
 
 /// One thing the placement has to say among the master's events: the node it is of, the code a console
@@ -462,8 +468,8 @@ pub struct Said {
 /// What the placement shows the master's picture, and what it has to say among its events.
 #[derive(Debug, Default)]
 pub struct Board {
-  pub services: Vec<ServiceView>,
-  pub request: Option<RequestView>,
+  pub services: Vec<PlacedService>,
+  pub request: Option<PlacementUnderWay>,
   pub said: Vec<Said>,
 }
 
@@ -562,13 +568,13 @@ impl Placer {
     let services = self
       .declared()
       .iter()
-      .map(|one| ServiceView {
-        service: one.service.clone(),
-        card_mib: Num(one.card_mib as f64),
-        priority: Num(one.priority as f64),
-        spread: one.spread,
+      .map(|one| PlacedService {
+        service_name: one.service.clone(),
+        card_mib: one.card_mib as f64,
+        priority: one.priority as f64,
+        spread: one.spread.into(),
         alone: one.alone,
-        nodes: placements.nodes_of(&one.service).to_vec(),
+        node_names: placements.nodes_of(&one.service).to_vec(),
         unsettled: placements.unsettled.get(&one.service).cloned(),
       })
       .collect();
@@ -584,11 +590,11 @@ impl Placer {
   }
 
   fn at_step(&self, journal: &Journal, step: Option<Step>) {
-    self.board.lock().unwrap().request = Some(RequestView {
-      verb: journal.verb,
-      service: journal.service.clone(),
-      node: journal.node.clone(),
-      step,
+    self.board.lock().unwrap().request = Some(PlacementUnderWay {
+      kind: journal.verb.into(),
+      service_name: journal.service.clone(),
+      node_name: journal.node.clone(),
+      step: step.map(|step| step.word().to_owned()),
     });
   }
 
@@ -631,7 +637,7 @@ impl Placer {
           placements.unsettled.insert(
             declaration.service.clone(),
             format!(
-              "the adapter places it on {}, and the node registry reserves {} for it",
+              "the adapter places it on {}, and the node service reserves {} for it",
               words(&nodes),
               words(&by_role)
             ),
@@ -643,7 +649,7 @@ impl Placer {
     for (service, why) in &placements.unsettled {
       self.tell(
         None,
-        "placement_unsettled",
+        "placement-unsettled",
         format!("{service}'s placement is unsettled: {why}; a place settles it"),
       );
     }
@@ -678,7 +684,7 @@ impl Placer {
       let role = role_of(&row.name, &placements, &declarations);
       if role != row.role {
         found.push(format!(
-          "{}: the node registry's role is {}, the placement gives {}",
+          "{}: the node service's role is {}, the placement gives {}",
           row.name,
           row.role.as_deref().unwrap_or("none"),
           role.as_deref().unwrap_or("none")
@@ -701,7 +707,7 @@ impl Placer {
       }
     }
     for line in &found {
-      self.tell(None, "placement_drift", format!("drift: {line}"));
+      self.tell(None, "placement-drift", format!("drift: {line}"));
     }
     Ok(found)
   }
@@ -719,7 +725,7 @@ impl Placer {
       journal.node
     );
     say(text.clone());
-    self.tell(Some(&journal.node), "request_undone", text);
+    self.tell(Some(&journal.node), "request-undone", text);
     self.undo(&journal, say).await;
     self.clear_journal();
   }
@@ -795,9 +801,9 @@ impl Placer {
     };
     self.board.lock().unwrap().request = None;
     match &outcome {
-      Ok(()) => self.tell(Some(node), "request_done", format!("{} {service}: done", verb.word())),
+      Ok(()) => self.tell(Some(node), "request-done", format!("{} {service}: done", verb.word())),
       Err(stopped) => {
-        self.tell(Some(node), "request_failed", format!("{} {service}: {stopped}", verb.word()))
+        self.tell(Some(node), "request-failed", format!("{} {service}: {stopped}", verb.word()))
       }
     }
     outcome
@@ -808,7 +814,7 @@ impl Placer {
       .hands
       .nodes()
       .await
-      .map_err(|why| refuse(format!("the node registry was not read: {why}")))
+      .map_err(|why| refuse(format!("the node service was not read: {why}")))
   }
 
   async fn place(&self, service: &str, node: &str, say: &Say) -> Result<(), Stopped> {
@@ -818,7 +824,7 @@ impl Placer {
     })?;
     let rows = self.rows().await?;
     let Some(row) = rows.iter().find(|row| row.name == node) else {
-      return Err(refuse(format!("the node registry holds no {node}")));
+      return Err(refuse(format!("the node service holds no {node}")));
     };
     let before = self.state().unwrap_or_default();
     // Services standing alone at one priority share a node as equals, its reservation naming them all.
@@ -850,7 +856,7 @@ impl Placer {
       && !reserved_above
     {
       return Err(refuse(format!(
-        "{node} is reserved for {} in the node registry, so {service} cannot stand there",
+        "{node} is reserved for {} in the node service, so {service} cannot stand there",
         row.role.as_deref().unwrap_or("")
       )));
     }
@@ -913,7 +919,7 @@ impl Placer {
             say(format!("{gone}: {service} was not uninstalled: {}", answer.detail));
             self.tell(
               Some(gone),
-              "service_not_uninstalled",
+              "service-not-uninstalled",
               format!("{service} was not uninstalled: {}", answer.detail),
             );
           }

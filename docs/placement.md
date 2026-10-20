@@ -194,7 +194,7 @@ sequenceDiagram
     slot of an owner not answering is kept as it stands.
 - **What it is not:** KV paged out of the card. Nothing reads a slot while its unit runs; a slot is only
   where an unloaded unit waits.
-- **Removed with the arbiter:** `card-master uninstall --node <node>` stops and disables the unit and
+- **Removed with the arbiter:** `bmo-arbiter uninstall --node <node>` stops and disables the unit and
   removes the store and its table, unless `--keep-store` keeps them.
 
 ## Master and slaves
@@ -203,8 +203,8 @@ sequenceDiagram
   the queue, the desktop, the occupants, and the claims: a claim evicts every evictable unit on the node at
   once and lets go of the lock for the claimant, the rest yields as it always has, and the master is told
   afterwards by what it next reads. It keeps the units as they are placed when the master is gone.
-- **The master** is `bmo-card-master.service`, which runs the `card-master` binary on one host of the
-  system. It reads the rules (「The rules」) and the node registry (`docs/api.md`, 「The node registry」),
+- **The master** is `bmo-card-master.service`, which runs the `bmo-arbiter` binary on one host of the
+  system. It reads the rules (「The rules」) and the node service (`docs/api.md`, 「The node service」),
   reads every slave's state every two seconds through the node's shell, decides which units go and come
   back where, and tells each slave. It holds no lock and no card: losing it loses the plan, never the rules
   a slave keeps.
@@ -241,22 +241,24 @@ sequenceDiagram
     never restores them again; they go out again only by a rule planned anew, under the same conditions as
     any unload (「The engine's turn」). While a unit's own service stands in the card's line, its own turn is
     what brings it back, and the master tries no restore of it meanwhile.
-  - **How often it reads:** every two seconds, and the node registry once a minute;
+  - **How often it reads:** every two seconds, and the node service once a minute;
     `CARD_MASTER_READ_EVERY_MS` and `CARD_MASTER_DISCOVER_EVERY_MS` set them otherwise.
-- **The slave hands the card on only once every unit asked for is out.** The standing hold's lock and turn
-  are let go when an unload has taken out all it was asked for; where any unit stayed on the card, the
-  slave keeps both, so no occupant is given a card some of the hold's memory still fills, and what did go
-  out stays out. Such an unload is answered `409`, with every unit's outcome and why.
+- **The slave hands the card on only once every unit asked for is out.** The master asks for each unit
+  apart, saying with every one of a holder's but the last that more of that holder's units follow
+  (`keepsTurn`); the standing hold's lock and turn are let go once the last is out. Where a unit stays on
+  the card, the slave keeps both, so no occupant is given a card some of the hold's memory still fills, and
+  what did go out stays out. Such an unload is answered `409` with why, and the master asks for none of
+  that holder's units after it.
 - **An unload that fails leaves its ticket on hold,** its reason the slave's answer, said once and again
   only where it changes, and planned again at every read: the unload is tried again while the ticket
   stands, and what went out for it comes back once the ticket is gone.
 - **A node alone** — a machine that is no part of a group of nodes the rules treat as one, such as a
   person's desktop — plans its own card with the same default as the master, and the master only shows
   it.
-- **What a slave answers on its loopback,** beside the hold, is `docs/api.md`, 「The node arbiter's units」:
-  the node's card and every process using it, every unit with its state, the host memory the dumps take,
-  the store, the door of the owner the card is lent through, every other owner's door on each of its own
-  units, and the arbiter's version; and the unload and restore the master asks for.
+- **What a slave answers on its loopback** is `docs/api.md`, 「The card」 and 「Card units」: the node's card
+  and every process using it, every unit with its state, the host memory the dumps take, the store, the
+  door of the owner the card is lent through, every other owner's door on each of its own units, the queue
+  and the arbiter's version; and the unload and restore of one unit the master asks for.
 
 ### The engine's turn
 
@@ -304,8 +306,8 @@ sequenceDiagram
   own placement apart from it. It keeps:
   - each service's nodes, in asking order, in `placements/services.json` in its data root, which it alone
     writes: `services`, an object from each service to its nodes in order;
-  - each node's role in the node registry, written through the registry's own command
-    (`docs/api.md`, 「The node registry」);
+  - each node's role in the node service, written through its published client (`docs/api.md`, 「The node
+    service」);
   - each node's occupants (`docs/node-arbiter.md`, 「The occupants」), derived and written whole;
   - each service's own placement, kept in step through that service's adapter.
 - **The arbiter on a node takes no placement decision.** It keeps the lock, the queue and the claims by the
@@ -333,7 +335,7 @@ sequenceDiagram
   - `priority` — its place among the occupants of a node it shares, higher first; services of equal
     priority stand at one rank and never push each other out (`docs/node-arbiter.md`, 「The occupants」);
   - `spread` — `one`, standing on a single node and moved whole, or `many`, standing on several;
-  - `alone` — whether a node it stands on is reserved for it in the node registry. Services that stand
+  - `alone` — whether a node it stands on is reserved for it in the node service. Services that stand
     alone at one priority may share a node, which is then reserved for all of them. Beside them a reserved
     node takes only a service that does not stand alone and stands below every one of them: it gives way
     to each of them on the card, so the node stays theirs first, and the reservation names it too, last;
@@ -364,12 +366,12 @@ sequenceDiagram
 
 ### A request
 
-- **`card-master place <service> --to <node>` and `card-master remove <service> --from <node>`** are the
-  one way a service moves. The command sends the request to the running master on its loopback port,
-  prints what it does as it does it, and ends with how it ended. The master runs requests one at a time,
-  in arrival order.
+- **A placement is the one way a service moves:** `POST /placements` to the running master
+  (`docs/api.md`, 「Placements」), which `bmo-arbiter place <service> --to <node>` and `bmo-arbiter remove
+  <service> --from <node>` ask through the arbiter's client, printing what the master does as it does it
+  and how it ended. The master runs placements one at a time, in the order they were asked.
 - **A `place`, in order:**
-  1. Refuses a node the node registry does not hold; a node reserved for other services unless this one
+  1. Refuses a node the node service does not hold; a node reserved for other services unless this one
      stands alone at their priority, or does not stand alone and stands below every service standing alone
      there; and, for an `alone` service, a node where a service stands that neither stands alone at its
      priority nor stands below it without standing alone. A service placed beside others standing alone at
@@ -399,8 +401,8 @@ sequenceDiagram
 - **On every start it names the drift and follows none of it:** a service whose adapter places it
   elsewhere than the master's state, a node whose role is not the one the placement gives it, and a node
   whose occupants are not the derived order, each said once among the events.
-- **The state API carries the placement:** `services`, each with its declaration, its nodes and whether it
-  is unsettled, and `request`, the request under way with its step, or none.
+- **The cluster carries the placement:** `services`, each with its declaration, its nodes and whether it
+  is unsettled, and `placement`, the one under way with its step, or none.
 
 ### Occupants are derived
 
@@ -424,7 +426,7 @@ sequenceDiagram
     it is `seen_by` (its `tickets`, a unit's `cgroup`, a `containers` prefix) and the host memory it needs
     (`ram_free`, GiB or `all`); `docs/node-arbiter.md`, 「Claimants」, is what each means. Every node is
     pushed all of them.
-  - **`nodes`** — groups of nodes chosen by their row in the node registry, never by name: a `select` on
+  - **`nodes`** — groups of nodes chosen by their row in the node service, never by name: a `select` on
     the row's `role` or its machine (`desktop`), and whether they are one `pool` (cards counted as one);
     each with the memory every card keeps back for the driver and the CUDA context (`reserve_mib`), where
     its units go when unloaded (`dump`), the most host memory the dumps may take on one node
@@ -480,5 +482,5 @@ sequenceDiagram
 
 ## The console
 
-- **A console screen** reads the master's state API and nothing else, and changes nothing. The API is
-  `docs/api.md`, 「The master's state」.
+- **A console screen** reads the master's cluster and its event stream and nothing else, and changes
+  nothing. The API is `docs/api.md`, 「The cluster」 and 「Events」.

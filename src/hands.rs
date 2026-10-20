@@ -1,5 +1,5 @@
 //! The world a placement acts on (docs/placement.md, 「Placing the services」): the services declared in
-//! the declaration roots, read as each request is taken, the node registry, each node's shell, the node
+//! the declaration roots, read as each request is taken, the node service, each node's shell, the node
 //! arbiter's install, and each service's adapter run as the command it is.
 
 use std::path::{Path, PathBuf};
@@ -13,7 +13,6 @@ use crate::rules::{NodeFacts, read_rules, rules_path};
 use crate::verbs::{SLAVE_UNITS, carry_rules, log_push, slave_desktop, with_turns};
 
 // How long each kind of call may take: an install builds environments and carries checkpoints.
-const ROLE_LIMIT: Duration = Duration::from_secs(120);
 const ARBITER_LIMIT: Duration = Duration::from_secs(45 * 60);
 const ADAPTER_LIMIT: Duration = Duration::from_secs(3 * 60 * 60);
 const ASK_LIMIT: Duration = Duration::from_secs(10 * 60);
@@ -22,7 +21,7 @@ const OCCUPANTS: &str = ".config/bmo-card/occupants";
 const NONE_MARK: &str = "__BMO_NO_OCCUPANTS__";
 
 pub struct LiveHands {
-  /// The node registry, or why none is named.
+  /// The node service, or why none is named.
   pub registry: Result<NodeRegistry, String>,
   /// The roots the services' declarations are read from.
   pub declaration_roots: Vec<PathBuf>,
@@ -92,10 +91,7 @@ impl Hands for LiveHands {
   }
 
   fn set_role<'a>(&'a self, node: &'a str, role: Option<&'a str>) -> BoxFuture<'a, Result<(), String>> {
-    Box::pin(async move {
-      let ran = self.registry()?.set_role(node, role, ROLE_LIMIT).await;
-      if ran.ok() { Ok(()) } else { Err(fault_of(&ran)) }
-    })
+    Box::pin(async move { self.registry()?.set_role(node, role).await })
   }
 
   fn occupants<'a>(&'a self, node: &'a str) -> BoxFuture<'a, Result<Option<String>, String>> {

@@ -1,4 +1,4 @@
-//! The verbs apart from the standing master (docs/api.md, 「The master's command line」): `check`'s lines and
+//! The verbs apart from the standing master (docs/api.md, 「The command line」): `check`'s lines and
 //! misfits, what a slave says of its card and its machine, the tree the binary reads, and how a push names
 //! what it wrote.
 
@@ -81,8 +81,8 @@ fn a_check_refuses_a_unit_no_card_it_may_stand_on_holds() {
 
 #[test]
 fn a_slave_gives_its_cards_memory() {
-  assert_eq!(slave_card_mib(r#"{"card": {"totalMiB": 12282}}"#), Some(12282.0));
-  assert_eq!(slave_card_mib(r#"{"card": null}"#), None);
+  assert_eq!(slave_card_mib(r#"{"device": {"totalMiB": 12282}}"#), Some(12282.0));
+  assert_eq!(slave_card_mib(r#"{"device": null}"#), None);
   assert_eq!(slave_card_mib(""), None);
 }
 
@@ -104,7 +104,7 @@ fn a_binary_in_a_release_reads_the_deploy_link_and_any_other_reads_its_own_tree(
   std::os::unix::fs::symlink(releases.join("live"), &link).unwrap();
   let dev = top.path().join("checkout");
   std::fs::create_dir_all(dev.join("bin")).unwrap();
-  let exe_in = |tree: &Path| tree.join("bin").join("card-master");
+  let exe_in = |tree: &Path| tree.join("bin").join("bmo-arbiter");
 
   assert_eq!(code_root(None, Some(&exe_in(&releases.join("old"))), &link), link);
   assert_eq!(code_root(None, Some(&exe_in(&releases.join("live"))), &link), link);

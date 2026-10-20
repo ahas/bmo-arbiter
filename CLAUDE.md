@@ -19,11 +19,17 @@ These rules hold every change to this repository.
 - **The arbiter knows no service.** Services declare themselves, name themselves in
   `BMO_CARD_SERVICE` and answer the adapter verbs; anything that differs per service stands in that
   service's declaration, its rules entry or its own settings, never in a table or a branch here.
-- **Other units are reached only as `docs/api.md` states:** the node registry through its configured
-  command, nodes through their shells, services through their adapters and declarations. Nothing here
-  imports another unit's code or reads its files or database.
+- **The arbiter is an upstream** (bmo-chat's `docs/conventions.md`): its API, code, documents and tool
+  schemas name no caller and no concept only one caller uses, and it publishes its own clients and its
+  harness plugin, `bmo-arbiter mcp` and the `bmo-arbiter` skill, every tool a thin call through its own
+  client.
+- **Other units are reached only as `docs/api.md` states:** the node service through its published client,
+  nodes through their shells, services through their adapters and declarations. Nothing here imports
+  another unit's code beyond that client, reads its files or database, or serves again what it serves.
 - **Dependencies:** crates from the registry pinned in the manifest, and of other repositories only the
-  base libraries `bmo-chat`, `bmo-chat-client` and `bmo-ui`. The dependency check in `tests/` holds this.
+  base libraries `bmo-chat`, `bmo-chat-client` and `bmo-ui` and the published client of the unit the
+  arbiter calls, `bmo-node-client`, at the version `docs/api.md` names. The dependency check in `tests/`
+  holds this.
 - **No lookup table standing in for polymorphism,** and no hand-written parser for a general format:
   TOML, YAML, JSON, markdown, command lines and their kin are read by a maintained library.
 
@@ -33,15 +39,17 @@ These rules hold every change to this repository.
   and branch names. No Korean in code or tests; the Hangul check in `tests/` and the testbed's `korean`
   check hold this against `korean-ledger.json`, which allows none.
 - What the arbiter says is an English sentence for a person, or a status, a protocol word and a
-  snake_case code for a machine. Words a person reads in another language are a console's language pack.
+  kebab-case code for a machine. Words a person reads in another language are a console's language pack.
 - No personal data: no user names, home directories, machine names, addresses or names of any agent.
-  Names the arbiter needs at runtime come from its settings, the node registry and the services'
+  Names the arbiter needs at runtime come from its settings, the node service and the services'
   declarations, never from the code. Tests use neutral names.
 
 ## Layout
 
-- One Cargo package at the root, the master, and no other build tool's manifest at the root. The node
-  arbiter is the Python package in `card/` with its own `pyproject.toml`, uploaded to every node as it
+- One Cargo workspace: the master as the package at the root, and the crates it publishes under
+  `crates/`, the client and the harness plugin; no other build tool's manifest at the root. The
+  TypeScript client is the package in `packages/arbiter-client`, generated from `docs/openapi.json`. The
+  node arbiter is the Python package in `card/` with its own `pyproject.toml`, uploaded to every node as it
   stands.
 - No directory named after its parent, and the README's folder table names every top-level folder.
 - Tests live in `tests/`, never beside the code they test: the master's as Cargo tests, the node
@@ -49,10 +57,12 @@ These rules hold every change to this repository.
 
 ## The stages of a change
 
-1. **Writing:** the only check is `cargo check --all-targets`, and `python3 -m py_compile` on a changed
-   Python file.
-2. **Review:** read the whole diff against the document governing it, then `cargo fmt --check` and
-   `cargo clippy --all-targets -- -D warnings`.
+1. **Writing:** the only check is `cargo check --workspace --all-targets`, and `python3 -m py_compile` on
+   a changed Python file. A change to a body or a route writes `docs/openapi.json` again
+   (`cargo run -p bmo-arbiter-plugin --example openapi`) and the TypeScript types with it
+   (`bun run generate` in `packages/arbiter-client`).
+2. **Review:** read the whole diff against the document governing it, then `cargo fmt --all --check`,
+   `cargo clippy --workspace --all-targets -- -D warnings` and `bun run check` in the TypeScript package.
 3. **Verification:** the test targets touched, then `cargo test` once, output written to a file and the
    file read.
 

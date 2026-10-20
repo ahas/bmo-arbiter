@@ -94,7 +94,7 @@ keeps its model on it until another asks for the card.
   has changed. A file it cannot read leaves the order as it stood and says why in the journal.
 - **Every change it takes up is kept:** one line in `~/.config/bmo-card/occupants.log` beside the file,
   the time, the order before and the order after, and the same line in the journal.
-- **Shown by** `card-master occupants --node <node>`: the order and the last changes the arbiter took
+- **Shown by** `bmo-arbiter occupants --node <node>`: the order and the last changes the arbiter took
   up. It writes nothing; a different order is a placement's to make.
 
 ### One rank taking turns
@@ -104,21 +104,21 @@ keeps its model on it until another asks for the card.
   in the middle of a request (`canPause`).
   - **Once its turn has been in use for its `yieldAfterS`** while a ticket of its rank waits, it gives
     way to that ticket: in the middle of a request where `canPause` is true, told `"giveWay": true` with
-    `"for"` as it is for an occupant above it (「Giving way」); at its next request boundary where it is
+    `"giveWayFor"` as it is for an occupant above it (「Giving way」); at its next request boundary where it is
     false.
   - **The use is counted as `CARD_TURN_HOLD_S` counts it,** from the turn's grant or from the request
     that ended its rest (「One queue of requests」).
-  - **An occupant whose `canPause` is true asks its tickets with `givesWayS`,** which is what makes a
+  - **An occupant whose `canPause` is true asks its tickets with `givesWayMs`,** which is what makes a
     turn hear `giveWay` at all.
-  - **Its request boundary,** where `canPause` is false: for an occupant that asks `next`, `next`
-    answering `"keep": false`, which `CARD_TURN_HOLD_S` already brings sooner where it is shorter; for the
-    lent hold, which asks no `next`, the head told `PASS` on its hold (「Lending」).
+  - **Its request boundary,** where `canPause` is false: for an occupant that asks `nextWaitedMs`, its
+    answer's `"keep": false`, which `CARD_TURN_HOLD_S` already brings sooner where it is shorter; for the
+    lent hold, which asks none, the head told `PASS` on its hold (「Lending」).
   - **The waiting order stays the queue's,** by rank and then by the arrival of the request each ticket
     stands for, so two of one rank take the card in turn, and neither waits on the other past the
     holder's `yieldAfterS`, the boundary or the letting go it then reaches, and its own units' coming
     back.
 - **An occupant with no turn values is never made to give way to one of its rank.** Its turn passes only
-  at the request boundaries `next` hands on, or when it rests.
+  at the request boundaries `nextWaitedMs` hands on, or when it rests.
 - **The values are each service's own,** declared in a `[turn]` table of its declaration
   (`docs/placement.md`, 「A service declares itself」). The arbiter keeps no list of them and names no
   service.
@@ -242,33 +242,33 @@ Once a second the arbiter reads who holds the lock and what each holder declares
 Every occupant asks for its turn before it takes the lock, a claimant too where it is seen by its
 tickets. Where the card is not its turn it is put on hold, never refused: it is told its place and how
 long the wait is counted at, and it carries on once its turn comes. The wire contract is
-`docs/api.md`, 「The node arbiter's hold」; this section is what it means.
+`docs/api.md`, 「Tickets」 and 「The card」; this section is what it means.
 
 ```mermaid
 sequenceDiagram
   participant O as Occupant
   participant A as Arbiter
-  O->>A: POST /turns {"service": "voice", "waitS": 20}
+  O->>A: POST /tickets {"serviceName": "voice", "waitMs": 20000}
   Note over A: held open until the turn is handed on
-  A-->>O: 200 {"ticket", "turn": true}
+  A-->>O: 201 {"id", "turn": true}
   loop each request of its own
     O->>O: take the lock, serve one request
-    O->>A: GET /turns/<ticket>?next=<its next request's wait>
+    O->>A: GET /tickets/<id>?nextWaitedMs=<its next request's wait>
     A-->>O: 200 {"keep": true} — carry on, weights on the card
   end
-  O->>A: GET /turns/<ticket>?rest=1 — nothing left to serve
+  O->>A: PATCH /tickets/<id> {"resting": true} — nothing left to serve
   A-->>O: 200 {"resting": true} — weights stay on the card
-  O->>A: GET /turns/<ticket>?waitS=20
+  O->>A: GET /tickets/<id>?waitMs=20000
   Note over A: held open until another asks for the card
-  A-->>O: 200 {"resting": true, "giveWay": true, "for": "classifier-train"}
+  A-->>O: 200 {"resting": true, "giveWay": true, "giveWayFor": "classifier-train"}
   O->>O: weights off the card, the lock let go
-  O->>A: DELETE /turns/<ticket>
+  O->>A: DELETE /tickets/<id>
   Note over A: the next ticket's held answer goes out at once
-  O->>A: POST /turns {"service": "classifier", "rest": true}
+  O->>A: POST /tickets {"serviceName": "classifier", "rest": true}
   Note over A: granted once the card stands free, to rest on it again
 ```
 
-- **The resume signal is the `200`:** the occupant then takes the lock itself, without waiting, and holds
+- **The resume signal is `turn: true`:** the occupant then takes the lock itself, without waiting, and holds
   it for as long as its use; a take that fails, since a process that never asks for turns took the lock
   in the moment between, is asked after again. A claimant alone takes no lock: the arbiter holds it for
   the claim (「Claimants」).
@@ -303,7 +303,7 @@ sequenceDiagram
     again at once: a free card is never left ungiven for the five seconds.
 - **How a wait is counted:** each ticket ahead holds the card for as long as its service has typically
   held it in use here, a turn already given less what it has used, ten seconds for a service not yet
-  seen, a resting turn its `givesWayS` or one second, and ten more where a process that asks for no turns
+  seen, a resting turn its `givesWayMs` or one second, and ten more where a process that asks for no turns
   holds the lock.
 - **A process that asks for no turns** still takes the lock as it comes; the queue waits behind it. **An
   occupant on a node whose arbiter does not answer** takes the lock as it comes.
@@ -314,15 +314,15 @@ sequenceDiagram
 
 - **The card goes to the next in line the moment it is given back,** never at the next time somebody
   happens to ask. A `DELETE` from the holder grants the head of the queue there and then.
-- **A waiting occupant does not poll.** It asks with `waitS` — the body's on a `POST`, the query's on a
-  `GET` — and the answer is held open until its turn is given or those seconds pass, at most twenty
+- **A waiting occupant does not poll.** It asks with `waitMs` — the body's on a `POST`, the query's on a
+  `GET` — and the answer is held open until its turn is given or that time passes, at most twenty seconds
   (`CARD_TURN_HOLD_OPEN_S`), so it is heard from well inside the thirty seconds a silent ticket is kept.
-  The held answer goes out the instant the turn is granted; past its seconds it is the `202` it would
-  have been, and the occupant asks again the same way.
-- **A holder whose turn gives way, or rests, does not poll either.** Its `GET` with `waitS` is held open
+  The held answer goes out the instant the turn is granted; past its time it says the ticket still waits,
+  and the occupant asks again the same way.
+- **A holder whose turn gives way, or rests, does not poll either.** Its `GET` with `waitMs` is held open
   until it is to give way — an occupant above it asking, any occupant asking while it rests, or a claim
-  beginning — and goes out that instant with `"giveWay": true`; past its seconds it is the plain `200`,
-  and the holder asks again. A turn that neither gives way nor rests is answered at once.
+  beginning — and goes out that instant with `"giveWay": true`; past its time it is the plain answer, and
+  the holder asks again. A turn that neither gives way nor rests is answered at once.
 - **A lock that frees with no `DELETE`** — a holder that died, one that asks for no turns — is found
   within a quarter of a second, and the held answers are woken then.
 
@@ -330,65 +330,66 @@ sequenceDiagram
 
 - **The queue is one line of requests, not of processes.** Each occupant stands in it by the oldest
   request it has waiting, placed by the occupants' order and then by that request's arrival, which its
-  ticket's `waitedS` backdates.
-- **A holder asks after every request it serves whether it carries on:** `GET /turns/<ticket>?next=<s>`,
-  where `s` is how long its next request has waited, is answered `200` with `"keep": true` while that
+  ticket's `waitedMs` backdates.
+- **A holder asks after every request it serves whether it carries on:** `GET
+  /tickets/<id>?nextWaitedMs=<ms>`, `ms` being how long its next request has waited, is answered with
+  `"keep": true` while that
   request would stand first in the queue — no waiting ticket of a higher occupant, none of its own rank
   asked earlier — and `"keep": false` otherwise.
   - Kept, it serves the next request with its weights still on the card: the same occupant twice in a
     row pays no move.
   - Not kept, it lets go after the request in hand and asks for a new ticket with that next request's
-    `waitedS`, taking its place in the line by it.
+    `waitedMs`, taking its place in the line by it.
   - A holder with no request left rests (「Resting」).
 - **No turn is kept past `CARD_TURN_HOLD_S`** (10 seconds) of use while another ticket waits: past it,
-  `next` answers `"keep": false` whatever stands, so an occupant below a busy one has its turn between two
+  `nextWaitedMs` answers `"keep": false` whatever stands, so an occupant below a busy one has its turn between two
   of the busy one's requests. The use is counted from the turn's grant, or from the request that ended
   its rest. Nobody waiting, a turn is kept for as long as its occupant has requests. A ticket asking only
   to rest is nobody waiting.
-- **A turn that gives way** keeps its own rules (「Giving way」); `next` is for an occupant that serves
+- **A turn that gives way** keeps its own rules (「Giving way」); `nextWaitedMs` is for an occupant that serves
   requests one at a time, which finishes the request in hand and never stops mid-way.
 
 ### Giving way
 
 - **An occupant that can let go of the card in the middle of its work** asks its ticket with
-  `givesWayS`, by its own measure of how long letting go takes it. Its turn then lasts only while nobody
+  `givesWayMs`, by its own measure of how long letting go takes it. Its turn then lasts only while nobody
   above it wants the card, so a holder that keeps the card for hours, low in the order, holds the
   occupants above it up for those seconds alone.
 - **Told to give way:** while such a turn stands and a ticket of an occupant above it waits, a ticket of
   its own rank has waited past its turn values (「One rank taking turns」), or a claim stands, every
-  answer to its ticket carries `"giveWay": true` and `"for"`, the highest occupant waiting or the
+  answer to its ticket carries `"giveWay": true` and `"giveWayFor"`, the highest occupant waiting or the
   claimant. A holder that gives way keeps one ask after its ticket held open the whole time it holds the
   card (「Handing on」): on a turn of its own, the held answer goes out the instant it is to give way, so it
   hears of it without asking again and again.
 - **What it does then:** at its next safe point it takes everything off the card, lets the lock go and
   gives the ticket back. When it asks again is its own choice, and its new ticket joins the line in its
   place.
-- **The wait counted** for a ticket above such a holder is the holder's `givesWayS`, not its typical
+- **The wait counted** for a ticket above such a holder is the holder's `givesWayMs`, not its typical
   hold, so the `Retry-After` an occupant above passes on says how long the holder takes to let go.
 - **Nothing is ended for giving way slowly.** The keeper's rules alone end a holder, and a claim's grace
   counts from the claim as it always does.
-- **A ticket asked without `givesWayS`** holds its turn to its end, unless it rests.
+- **A ticket asked without `givesWayMs`** holds its turn to its end, unless it rests.
 
 ### Resting
 
 - **A holder keeps its weights on the card after its last request.** With nothing left to serve it asks
-  its ticket `?rest=1` and keeps its turn and the lock, its weights where they are, so its next request
+  its ticket rested (`PATCH` with `"resting": true`) and keeps its turn and the lock, its weights where they are, so its next request
   pays no move onto the card. It takes them off only when the card is wanted by another: another occupant
   asking for it, a claim beginning, or the desktop taking it.
 - **A resting turn gives way to any occupant that asks,** above or below it in the order. The ranks order
   those using the card and those waiting for it; a holder with nothing to serve keeps nobody waiting
-  whatever its rank. Told so with `"giveWay": true` and `"for"`, on the held-open ask it keeps while it
+  whatever its rank. Told so with `"giveWay": true` and `"giveWayFor"`, on the held-open ask it keeps while it
   rests (「Handing on」), it takes everything off the card, lets the lock go and gives the ticket back, and
   the occupant asking has the card as soon as that is done.
   - **The card is one lock,** so an occupant asking for it never goes on beside a resting holder: what it
     asks for is the card's memory the resting weights stand in. An owner whose units the master unloads
     one at a time stays beside instead, by the rules' plan of the card's memory (`docs/placement.md`,
     「The rules」).
-- **A request that comes while it rests** asks `next` as any request does (「One queue of requests」).
+- **A request that comes while it rests** asks `nextWaitedMs` as any request does (「One queue of requests」).
   Kept, the turn is in use again and is served with its weights still on the card; not kept, the holder
   gives way and asks for a new ticket.
 - **The answers say it:** every answer to a resting turn carries `"resting": true`. An occupant whose
-  `?rest=1` is answered without it is asking an arbiter that keeps no rests, and lets go.
+  rest is answered without it is asking an arbiter that keeps no rests, and lets go.
 - **Coming back once the card is free:** a holder that gave way while resting asks a new ticket with
   `"rest": true`, standing for no request, to rest on the card again.
   - It is granted only while no other ticket waits, no claim stands and nobody holds the lock; once
@@ -399,7 +400,7 @@ sequenceDiagram
   - A request that comes meanwhile gives it back and asks for a ticket of its own, standing as that
     request does.
 - **What a resting turn counts for:** none of its rest is counted in how long its service typically holds
-  the card; a ticket behind it waits its `givesWayS`, or one second; and the card reads as not `busy`
+  the card; a ticket behind it waits its `givesWayMs`, or one second; and the card reads as not `busy`
   while it rests, so an occupant waiting for a quiet card is not held off by it.
 
 ### Who waits how
@@ -408,7 +409,7 @@ Each occupant chooses how it waits, inside the contract above:
 
 - **An engine serving calls** asks for a turn as it needs the card for a call and waits for it inside the
   call for as long as the call's caller waits. Each call it serves is a request of the queue, and it
-  carries on with the next while `next` keeps it. Between calls it rests with its weights on the card,
+  carries on with the next while `nextWaitedMs` keeps it. Between calls it rests with its weights on the card,
   and comes back to them once the card is free after giving way.
 - **A server with a bound of its own** waits its turn within that bound and past it answers its caller
   that the card stayed taken; a turn it is granted may wait further until the card's free memory takes
@@ -423,7 +424,7 @@ Each occupant chooses how it waits, inside the contract above:
   waits for it within its own bound for a hold (「Lending」). Once its units are out, it takes its place in
   the queue again through its own restore, on the head's `WANT`, and its turn passes to one of its rank at
   its request boundary, on `PASS` (「Lending」).
-- **A pipeline whose stages can pause** asks from each stage with `givesWayS`, waits for the turn with
+- **A pipeline whose stages can pause** asks from each stage with `givesWayMs`, waits for the turn with
   the answer held open, and pauses in the middle of a request when told to give way, dumping its engine.
 - **Two occupants of one rank** wait for each other by the turn values each declares (「One rank taking
   turns」): one that declares none holds its turn to its request boundary or its rest, as above.
@@ -469,7 +470,7 @@ Each occupant chooses how it waits, inside the contract above:
   - **the count of graphs** the owner has computed stands in the units' own state beside its door
     (`docs/placement.md`, 「Master and slaves」), so a reader of the node's state sees what the quiet is
     measured against;
-  - **a turn that gives way** (「Giving way」), its `givesWayS` 3 seconds (`CARD_LEND_GIVES_WAY_S`), since
+  - **a turn that gives way** (「Giving way」), its `givesWayMs` 3 seconds (`CARD_LEND_GIVES_WAY_S`), since
     its units unload with the engine waiting at its stage: to an occupant above it whenever one asks, and
     to any occupant while it rests. It gives way by having its units unloaded, which the master does for
     the ticket it gives way to (`docs/placement.md`, 「The engine's turn」);
@@ -503,13 +504,13 @@ Each occupant chooses how it waits, inside the contract above:
 
 ## What the install reads and writes
 
-The master's `install` verb stands the arbiter on a node (`docs/api.md`, 「The master's command line」);
+The master's `install` verb stands the arbiter on a node (`docs/api.md`, 「The command line」);
 no service's own install runs it.
 
 - **Nothing about a node is written into this repository.** The install reads, at every run:
   - from the node's machine: whether it runs under WSL, and its card's name and size, asked of the
     driver; a machine whose driver answers for no card is refused;
-  - from the node registry: how the node is reached, and the service its row reserves it for;
+  - from the node service: how the node is reached, and the service its row reserves it for;
   - from the node itself: the account's home, which the lock stands in.
   - It reads no placement rules: the size of the dump store the node's group fixes is handed to it as
     `--store-gib` by the master, which runs this install as its own step of every placement and writes
@@ -537,13 +538,13 @@ no service's own install runs it.
   `default.target` and reads both settings files. Linger is on for the account, so it stands after a
   reboot with nobody logged in. Under WSL the driver's libraries are found where WSL keeps them.
 - **What it carries nothing of:** no key but the lend settings', no checkpoint, no data beyond the units
-  it unloads. `card-master uninstall --node <node>` stops, disables and removes the unit, and the dump
+  it unloads. `bmo-arbiter uninstall --node <node>` stops, disables and removes the unit, and the dump
   store with its table unless `--keep-store`; the occupants file and its history stay with the node's
   settings.
 
 ## Installing
 
-`card-master install --node <node> [--node …] [--store-gib <n>]`, run again to update. The master runs
+`bmo-arbiter install --node <node> [--node …] [--store-gib <n>]`, run again to update. The master runs
 the same steps as the first of every placement (`docs/placement.md`, 「Placing the services」). For each
 node:
 
@@ -585,4 +586,4 @@ node:
   taking turns by their turn values and those declaring none holding theirs to a boundary or a rest, and
   units unloaded where the rules put them, every owner's dumps counted and lowered together.
 - On a node: `systemctl --user status bmo-card` stands active, the journal's first line names the lock
-  and the rules kept there, and `curl -s http://127.0.0.1:7439/turns` there answers the state.
+  and the rules kept there, and `curl -s http://127.0.0.1:7439/card` there answers the card.

@@ -1,7 +1,7 @@
-//! A world of stand-ins the card master's binary is started over, as a process on a free port: the node
-//! registry's command, the console answering each node's shell out of files the test writes (the node
-//! arbiter's install among them), the arbiter's own tree, and a service's adapter. The master is asked
-//! through its own API, as a console and a person ask it, and taken down with everything it started.
+//! A world of stand-ins the master's binary is started over, as a process on a free port: the node service,
+//! the console answering each node's shell out of files the test writes (the node arbiter's install among
+//! them), the arbiter's own tree, and a service's adapter. The master is asked through its own API, as a
+//! reader and a person ask it, and taken down with everything it started.
 
 #![allow(dead_code)]
 
@@ -10,16 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
+use bmo_arbiter_client::ArbiterClient;
+use bmo_arbiter_client::events::{Event, EventsQuery};
 use futures_util::StreamExt;
-use http_body_util::{BodyExt, Empty};
-use hyper::Request;
-use hyper::body::Incoming;
-use hyper::header::HOST;
-use hyper_util::rt::TokioIo;
+use reqwest::Method;
 use serde_json::{Value, json};
-use sse_stream::SseStream;
-use tokio::net::TcpStream;
 
 pub const RULES: &str = r#"
 nodes:
@@ -39,27 +34,39 @@ rules:
     restore: true
 "#;
 
-// The node registry's command, standing in: the listing with lines that name no node among those that
-// do, one node's connection as the last line of its answer, and a role set the way the registry sets it.
+// The node service, standing in on a port of its own choosing, which it names as it starts: the nodes in the
+// list's order, each one's target as a hub node, and a role written the way the node service writes it.
 const NODES: &str = r#"
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const dir = process.env.STANDIN_DIR;
-const nodes = JSON.parse(readFileSync(`${dir}/nodes.json`, "utf8"));
-const args = process.argv.slice(2);
-if (args[0] === "--target") {
-  console.log("reading the node list");
-  console.log(JSON.stringify({ kind: "hub", hubUrl: "http://127.0.0.1:1", tokenFile: "~/none", agent: args[1], role: nodes[args[1]] ?? null }));
-} else if (args[0] === "--set") {
-  nodes[args[1]] = args[3] === "none" ? null : args[3];
-  writeFileSync(`${dir}/nodes.json`, JSON.stringify(nodes));
-  appendFileSync(`${dir}/commands.log`, `nodes: --set ${args[1]} --role ${args[3]}\n`);
-} else {
-  for (const name of Object.keys(nodes)) {
-    console.log(`${name} [hub] ${name} — ${name} @ http://127.0.0.1:1`);
-    console.log("    connected · checked");
+const read = () => JSON.parse(readFileSync(`${dir}/nodes.json`, "utf8"));
+const node = (name, nodes) => ({ name, label: name, kind: "hub", hubId: 1, agentName: name,
+  address: `${name} @ http://127.0.0.1:1`, credential: "~/none", role: nodes[name] ?? null, state: "connected",
+  tone: "good", detail: null, checkedAt: null, connectedAt: null, up: true, thisMachine: false });
+const answer = (body, status = 200) => Response.json(body, { status });
+const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+  const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  const nodes = read();
+  if (parts[0] !== "nodes") return answer({ code: "no-route", error: "no route answers this method and path" }, 404);
+  if (request.method === "GET" && parts.length === 1) {
+    return answer({ items: Object.keys(nodes).map((name) => node(name, nodes)), more: false });
   }
-  console.log("\nhubs:\nhub http://127.0.0.1:1");
-}
+  if (!(parts[1] in nodes)) return answer({ code: "not-found", error: `no node ${parts[1]}` }, 404);
+  if (request.method === "GET" && parts[2] === "target") {
+    return answer({ nodeName: parts[1], kind: "hub", role: nodes[parts[1]] ?? null, host: null, port: null, user: null,
+      keyPath: null, shell: null, sshOptions: [], sshArgs: [], hubId: 1, hubAddress: "http://127.0.0.1:1",
+      hubTokenFile: "~/none", agentName: parts[1] });
+  }
+  if (request.method === "PATCH" && parts.length === 2) {
+    const role = (await request.json()).role ?? null;
+    nodes[parts[1]] = role;
+    writeFileSync(`${dir}/nodes.json`, JSON.stringify(nodes));
+    appendFileSync(`${dir}/commands.log`, `nodes: --set ${parts[1]} --role ${role ?? "none"}\n`);
+    return answer(node(parts[1], nodes));
+  }
+  return answer({ code: "no-route", error: "no route answers this method and path" }, 404);
+} });
+console.log(`listening ${server.port}`);
 "#;
 
 // The console, standing in: every command written down; a file carried kept under the node's own folder;
@@ -83,8 +90,8 @@ appendFileSync(`${dir}/commands.log`, `${agent}: ${command}\n`);
 const kept = (name) => `${dir}/files/${agent}/${name}`;
 if (command.startsWith("echo HOME")) {
   process.stdout.write("HOME=/home/stand\n");
-} else if (command.includes("/units/")) {
-  process.stdout.write('{"results":[]}\n200');
+} else if (command.includes("/card-units/")) {
+  process.stdout.write('{}\n200');
 } else if (command.includes("MACHINE_WSL")) {
   process.stdout.write("MACHINE_WSL=0\nMACHINE_CARD_MIB=11875\nMACHINE_CARD_NAME=RTX 4070\n");
 } else if (command.includes("units.store")) {
@@ -137,38 +144,70 @@ if (verb === "uninstall") writeFileSync(own, JSON.stringify(placed.filter((one) 
 answer({ ok: true, node, state: verb === "uninstall" || verb === "stop" ? "stopped" : "running", detail: "" });
 "#;
 
+/// A unit of the card as its slave answers it.
+pub fn unit(name: &str, state: &str, vram_mib: f64, reason: Option<&str>) -> Value {
+  let (service, part) = name.split_once('/').unwrap();
+  json!({ "name": name, "holderName": service, "part": part, "state": state, "evictable": true, "sinceAt": 1000,
+    "vramMiB": vram_mib, "ramMiB": 0, "reason": reason, "buffers": [], "lastUnload": null, "lastLoad": null,
+    "lastLower": null, "door": null })
+}
+
+/// A slave's card, as `GET /card` answers it, with what the test sets: `free`, `processes`, `store`, `claim`
+/// and `queue`.
 pub fn slave(over: Value) -> Value {
   let free = over.get("free").and_then(Value::as_f64).unwrap_or(1300.0);
-  let mut card =
-    json!({ "name": "RTX 4070", "totalMiB": 11875, "usedMiB": 11875.0 - free, "freeMiB": free });
-  if let Some(processes) = over.get("processes") {
-    card["processes"] = processes.clone();
-  }
-  let store = over.get("store").cloned().unwrap_or_else(
-    || json!({ "name": "model/store", "service": "model", "part": "store", "evictable": true, "state": "resident", "vramMiB": 4608, "since": 1 }),
-  );
+  let store = over
+    .get("store")
+    .cloned()
+    .unwrap_or_else(|| unit("model/store", "resident", 4608.0, None));
+  let claim = over.get("claim").and_then(Value::as_str);
   json!({
-    "version": "abc123", "desktop": false, "occupants": ["tester", "*"],
-    "card": card,
-    "units": [
-      { "name": "model/weights", "service": "model", "part": "weights", "evictable": true, "state": "resident", "vramMiB": 4000, "since": 1 },
-      store,
-    ],
-    "stage": { "waiting": false, "waitingS": 0 },
-    "claim": { "by": over.get("claim").cloned().unwrap_or(Value::Null), "since": null },
-    "queue": over.get("queue").cloned().unwrap_or_else(|| json!([])),
+    "version": "abc123", "desktop": false, "occupants": ["tester", "*"], "ranks": [["tester"], ["*"]],
+    "claim": claim.map(|name| json!({ "claimantName": name, "claimedAt": null })),
+    "lockHeldBy": [], "busy": false, "queue": over.get("queue").cloned().unwrap_or_else(|| json!([])),
+    "typicalHoldMs": {},
+    "units": [unit("model/weights", "resident", 4000.0, None), store],
+    "device": { "name": "RTX 4070", "totalMiB": 11875, "usedMiB": 11875.0 - free, "freeMiB": free,
+      "processes": over.get("processes").cloned().unwrap_or(Value::Null) },
+    "stage": { "waiting": false, "waitingMs": 0, "graphs": 0, "waits": 0, "waitedMs": 0 },
+    "store": null,
+    "ram": { "dumpsMiB": 0, "availableMiB": null, "maxMiB": null, "floorMiB": null, "dump": "disk" },
     "rules": { "loadedAt": null, "error": null },
   })
+}
+
+/// A ticket waiting first in a card's line for a unit, as its slave answers it.
+pub fn waiting(id: i64, service: &str, unit: &str) -> Value {
+  json!({ "id": id, "serviceName": service, "turn": false, "inUse": false, "resting": false, "giveWay": false,
+    "giveWayFor": null, "position": 1, "waitMs": 1000, "claimantName": null, "waitedMs": 1000,
+    "need": { "unitName": unit }, "ref": null, "rest": false, "keep": null })
 }
 
 pub struct World {
   dir: tempfile::TempDir,
   master: Option<Child>,
+  nodes: Child,
+  node_port: u16,
+  token: Option<String>,
   pub port: u16,
 }
 
 pub fn binary() -> &'static str {
-  env!("CARGO_BIN_EXE_card-master")
+  env!("CARGO_BIN_EXE_bmo-arbiter")
+}
+
+/// The port a stand-in names in the first line of its log that `prefix` begins, within a bound.
+fn named_port(log: &Path, prefix: &str) -> u16 {
+  let ready = Instant::now() + Duration::from_secs(30);
+  loop {
+    let said = std::fs::read_to_string(log).unwrap_or_default();
+    if let Some(port) = said.lines().find_map(|line| line.strip_prefix(prefix)?.trim().parse::<u16>().ok())
+    {
+      return port;
+    }
+    assert!(Instant::now() < ready, "{} never named its port; it said {said}", log.display());
+    std::thread::sleep(Duration::from_millis(20));
+  }
 }
 
 impl World {
@@ -188,9 +227,22 @@ impl World {
     std::fs::write(root.join("console.ts"), CONSOLE).unwrap();
     std::fs::write(root.join("nodes.json"), nodes.to_string()).unwrap();
     std::fs::write(root.join("commands.log"), "").unwrap();
+    let log = std::fs::File::create(root.join("nodes.log")).unwrap();
+    let nodes = Command::new(bmo_arbiter::reach::bun())
+      .arg(root.join("nodes.ts"))
+      .env("STANDIN_DIR", root)
+      .stdin(Stdio::null())
+      .stdout(log)
+      .stderr(Stdio::null())
+      .spawn()
+      .expect("the node service stands in");
+    let node_port = named_port(&root.join("nodes.log"), "listening ");
     let world = World {
       dir,
       master: None,
+      nodes,
+      node_port,
+      token: None,
       port: 0,
     };
     for (name, state) in slaves {
@@ -213,6 +265,12 @@ impl World {
     };
     git(&["init", "-q"]);
     git(&["add", "svc/demo.card.toml", "svc/adapter.ts"]);
+    self
+  }
+
+  /// The master standing behind a token every route takes.
+  pub fn with_token(mut self, token: &str) -> World {
+    self.token = Some(token.to_owned());
     self
   }
 
@@ -257,10 +315,9 @@ impl World {
       .env("BMO_DATA_DIR", root.join("data"))
       .env("BMO_CODE_ROOT", &tree)
       .env("CARD_DECLARATIONS", &tree)
-      .env(
-        "CARD_NODES_COMMAND",
-        format!("'{}' '{}'", bmo_arbiter::reach::bun(), root.join("nodes.ts").display()),
-      )
+      .env("CARD_NODE_URL", format!("http://127.0.0.1:{}", self.node_port))
+      .env("CARD_NODE_TOKEN", "node-token")
+      .env("CARD_MASTER_TOKEN", self.token.as_deref().unwrap_or_default())
       .env("BMO_HUB_CONSOLE", root.join("console.ts"))
       .env("CARD_INSTALL_POLL_MS", "10")
       .env_remove("CARD_RIVAL_UNITS")
@@ -285,18 +342,7 @@ impl World {
         .spawn()
         .expect("the master starts"),
     );
-    let ready = Instant::now() + Duration::from_secs(30);
-    self.port = loop {
-      let said = self.read("master.log");
-      let heard = said.lines().find_map(|line| {
-        line.strip_prefix("card-master: answering on 127.0.0.1:")?.trim().parse::<u16>().ok()
-      });
-      if let Some(port) = heard {
-        break port;
-      }
-      assert!(Instant::now() < ready, "the master never answered; it said {said}");
-      std::thread::sleep(Duration::from_millis(20));
-    };
+    self.port = named_port(&self.root().join("master.log"), "bmo-arbiter: answering on 127.0.0.1:");
     self
   }
 
@@ -342,59 +388,49 @@ impl World {
     self.root().join("files").join(node).join(name)
   }
 
-  async fn ask(&self, path: &str) -> Option<(u16, hyper::Response<Incoming>)> {
-    let stream = TcpStream::connect(("127.0.0.1", self.port)).await.ok()?;
-    let (mut sender, connection) =
-      hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.ok()?;
-    tokio::spawn(connection);
-    let request = Request::get(path).header(HOST, "127.0.0.1").body(Empty::<Bytes>::new()).ok()?;
-    let answer = sender.send_request(request).await.ok()?;
-    Some((answer.status().as_u16(), answer))
+  /// The master's base address.
+  pub fn base(&self) -> String {
+    format!("http://127.0.0.1:{}", self.port)
+  }
+
+  /// A request sent once, the answer's status and its whole body.
+  pub async fn send(&self, method: Method, path: &str, body: Option<&str>) -> Option<(u16, String)> {
+    let mut request = reqwest::Client::new().request(method, format!("{}{path}", self.base()));
+    if let Some(body) = body {
+      request = request.header("content-type", "application/json").body(body.to_owned());
+    }
+    let answer = request.send().await.ok()?;
+    let status = answer.status().as_u16();
+    Some((status, answer.text().await.ok()?))
   }
 
   /// A path asked once, its status and its whole body.
   pub async fn get(&self, path: &str) -> Option<(u16, String)> {
-    let (status, answer) = self.ask(path).await?;
-    let body = answer.into_body().collect().await.ok()?.to_bytes();
-    Some((status, String::from_utf8_lossy(&body).into_owned()))
+    self.send(Method::GET, path, None).await
   }
 
   /// A body put to a path once, the answer's status and its whole body.
   pub async fn put(&self, path: &str, body: &str) -> Option<(u16, String)> {
-    let stream = TcpStream::connect(("127.0.0.1", self.port)).await.ok()?;
-    let (mut sender, connection) =
-      hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.ok()?;
-    tokio::spawn(connection);
-    let request = Request::put(path)
-      .header(HOST, "127.0.0.1")
-      .header(hyper::header::CONTENT_TYPE, "application/json")
-      .body(http_body_util::Full::new(Bytes::from(body.to_owned())))
-      .ok()?;
-    let answer = sender.send_request(request).await.ok()?;
-    let status = answer.status().as_u16();
-    let said = answer.into_body().collect().await.ok()?.to_bytes();
-    Some((status, String::from_utf8_lossy(&said).into_owned()))
+    self.send(Method::PUT, path, Some(body)).await
   }
 
-  /// The first event of the event stream, its name, its data, and the stream's content type.
-  pub async fn first_event(&self) -> (String, Option<String>, Value) {
-    let (_, answer) = self.ask("/events").await.expect("the stream answers");
-    let kind = answer
-      .headers()
-      .get("content-type")
-      .map(|value| value.to_str().unwrap().to_owned())
-      .unwrap_or_default();
-    let mut events = SseStream::new(answer.into_body());
-    let first = tokio::time::timeout(Duration::from_secs(10), events.next())
+  /// The first event of the stream of the kinds named, as the master's client reads it.
+  pub async fn first_event(&self, kinds: &str) -> Event {
+    let master = ArbiterClient::new(&self.base(), None).unwrap();
+    let query = EventsQuery {
+      kinds: Some(kinds.to_owned()),
+      ..EventsQuery::default()
+    };
+    let mut events = Box::pin(master.events(&query).await.expect("the stream answers"));
+    tokio::time::timeout(Duration::from_secs(10), events.next())
       .await
       .unwrap()
       .unwrap()
-      .unwrap();
-    (kind, first.event, serde_json::from_str(first.data.as_deref().unwrap()).unwrap())
+      .unwrap()
   }
 
   pub async fn state(&self) -> Option<Value> {
-    let (status, body) = self.get("/state").await?;
+    let (status, body) = self.get("/cluster").await?;
     if status != 200 {
       return None;
     }
@@ -432,6 +468,8 @@ impl World {
 
 impl Drop for World {
   fn drop(&mut self) {
+    let _ = self.nodes.kill();
+    let _ = self.nodes.wait();
     // The master and every console call it started, as one process group.
     if let Some(master) = &mut self.master {
       unsafe {

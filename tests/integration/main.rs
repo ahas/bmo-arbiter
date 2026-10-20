@@ -3,6 +3,8 @@
 //! keeps.
 
 mod common;
+#[path = "../support/contract.rs"]
+mod contract_check;
 
 mod contract;
 mod placement;

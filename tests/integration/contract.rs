@@ -1,12 +1,24 @@
-//! The card master's wire contract: started as a process on a free port over a world of stand-ins
-//! (`common`), and asked through its state API as the console asks it.
+//! The master's wire contract: started as a process on a free port over a world of stand-ins (`common`), and
+//! asked through its API as a reader asks it, every answer held to docs/openapi.json.
 
 use crate::common;
 
 use std::time::Duration;
 
-use common::{World, card, codes, connected, events, nodes, slave};
+use bmo_arbiter_client::events::EventKind;
+use common::{World, card, codes, connected, events, nodes, slave, unit, waiting};
+use reqwest::Method;
 use serde_json::{Value, json};
+
+use crate::contract_check::holds_to_contract;
+
+/// A route asked once, its answer held to the document, its status and its JSON.
+async fn asked(world: &World, method: Method, path: &str, body: Option<&str>) -> (u16, Value) {
+  let (status, said) = world.send(method.clone(), path, body).await.expect("the master answers");
+  let said: Value = if said.is_empty() { Value::Null } else { serde_json::from_str(&said).unwrap() };
+  holds_to_contract(method.as_str(), path, status, &said);
+  (status, said)
+}
 
 #[tokio::test]
 async fn reads_the_nodes_its_groups_choose_and_shows_each_card() {
@@ -14,7 +26,7 @@ async fn reads_the_nodes_its_groups_choose_and_shows_each_card() {
   let state = world.state_where("node a read", |state| connected(state, "a")).await;
   assert_eq!(
     state["groups"],
-    json!([{ "name": "compute", "pool": true, "nodes": ["a"], "totalMiB": 11875, "freeMiB": 1300 }])
+    json!([{ "name": "compute", "pool": true, "nodeNames": ["a"], "totalMiB": 11875.0, "freeMiB": 1300.0 }])
   );
   assert_eq!(nodes(&state).iter().map(|node| node["name"].clone()).collect::<Vec<_>>(), [json!("a")]);
   let units: Vec<(Value, Value)> = card(&state)["units"]
@@ -33,33 +45,56 @@ async fn reads_the_nodes_its_groups_choose_and_shows_each_card() {
   assert_eq!(
     state["declared"],
     json!([
-      { "unit": "model/*", "service": "model", "kind": "resident", "vramMiB": null },
-      { "unit": "voice/*", "service": "voice", "kind": "on-demand", "vramMiB": 6000 },
+      { "unit": "model/*", "serviceName": "model", "kind": "resident", "vramMiB": null },
+      { "unit": "voice/*", "serviceName": "voice", "kind": "on-demand", "vramMiB": 6000.0 },
     ])
   );
   assert_eq!(nodes(&state)[0]["version"], "abc123");
 
-  let (status, body) = world.get("/nowhere").await.unwrap();
+  assert_eq!(asked(&world, Method::GET, "/cluster", None).await.0, 200);
+  let (status, health) = asked(&world, Method::GET, "/health", None).await;
   assert_eq!(
-    (status, serde_json::from_str::<Value>(&body).unwrap()),
-    (404, json!({ "error": "no such path" }))
+    (status, health["ready"].clone(), health["reason"].clone()),
+    (200, json!(true), Value::Null)
   );
+  for (method, path) in [(Method::GET, "/nowhere"), (Method::GET, "/state"), (Method::POST, "/cluster")] {
+    let (status, body) = asked(&world, method, path, None).await;
+    assert_eq!((status, body["code"].as_str()), (404, Some("no-route")), "{path}: {body}");
+  }
 }
 
 #[tokio::test]
-async fn the_picture_streams_as_server_sent_events() {
+async fn the_cluster_streams_as_numbered_events_resumed_within_the_window_or_read_as_a_page() {
   let world = World::new(json!({ "a": "model" }), &[("a", slave(json!({})))]).start();
   world.state_where("node a read", |state| connected(state, "a")).await;
-  let (kind, event, picture) = world.first_event().await;
-  assert_eq!(kind, "text/event-stream");
-  assert_eq!(event.as_deref(), Some("state"));
-  assert_eq!(picture["nodes"][0]["name"], "a");
+  let event = world.first_event("cluster.changed").await;
+  assert_eq!(
+    (event.kind, event.data["nodes"][0]["name"].clone()),
+    (EventKind::ClusterChanged, json!("a"))
+  );
+  holds_to_contract("get", "/cluster", 200, &event.data);
+
+  // the same events as a page to a reader that polls, resumed after the one read
+  let polled = reqwest::Client::new()
+    .get(format!("{}/events?after={}&limit=1", world.base(), event.id - 1))
+    .header("accept", "application/json")
+    .send()
+    .await
+    .unwrap();
+  let polled: Value = polled.json().await.unwrap();
+  holds_to_contract("get", "/events", 200, &polled);
+  assert_eq!(polled["items"][0]["id"], event.id);
+  // a number this run never gave is outside the window
+  let (status, gone) = asked(&world, Method::GET, "/events?after=1", None).await;
+  assert_eq!((status, gone["code"].as_str()), (410, Some("gone")));
+  let (status, wrong) = asked(&world, Method::GET, "/events?kinds=nothing.changed", None).await;
+  assert_eq!((status, wrong["code"].as_str()), (400, Some("bad-request")));
 }
 
 #[tokio::test]
 async fn a_cards_processes_come_through_as_its_slave_read_them_and_none_from_a_slave_that_does_not_say_them()
  {
-  let processes = json!([{ "pid": 41, "name": "rpc-server", "service": "model", "usedMiB": 9100 }, { "pid": 7, "name": "Xorg", "service": null, "usedMiB": 120 }]);
+  let processes = json!([{ "pid": 41, "name": "rpc-server", "serviceName": "model", "usedMiB": 9100.0 }, { "pid": 7, "name": "Xorg", "serviceName": null, "usedMiB": 120.0 }]);
   let world =
     World::new(json!({ "a": "model" }), &[("a", slave(json!({ "processes": processes })))]).start();
   let state = world
@@ -135,25 +170,33 @@ async fn a_slave_that_stops_answering_is_lost_and_coming_back_is_an_event() {
   let said = events(&state);
   assert_eq!(said[0], "the master reaches the node again");
   assert!(said[1].contains("lost the node"), "{said:?}");
-  assert_eq!(codes(&state)[..2], ["node_reconnected", "node_lost"]);
+  assert_eq!(codes(&state)[..2], ["node-reconnected", "node-lost"]);
 }
 
 #[tokio::test]
 async fn a_ticket_asking_for_a_unit_has_the_cheapest_units_unloaded_and_loaded_back_once_it_is_gone() {
-  let queue = json!([{ "ticket": "t1", "service": "voice", "turn": false, "position": 1, "waitedS": 1, "need": { "unit": "voice/large" } }]);
+  let queue = json!([waiting(1, "voice", "voice/large")]);
   // 6,000 MiB asked with 1,500 free: the store (4,608) alone makes room, the weights (4,000) do not.
   let world =
     World::new(json!({ "a": "model" }), &[("a", slave(json!({ "queue": queue, "free": 1500 })))]).start();
-  let evicted = world.command_where("an unload", |command| command.contains("/units/evict")).await;
-  assert!(evicted.contains(r#""units":["model/store"]"#), "{evicted}");
+  let evicted = world
+    .command_where("an unload", |command| {
+      command.contains("/card-units/") && command.contains(r#""evicted""#)
+    })
+    .await;
+  assert!(evicted.contains("/card-units/model%2Fstore"), "{evicted}");
 
   // The slave unloads it as asked, keeping the reason it was given, and the ticket goes.
   let body = evicted.split_once("-d '").unwrap().1.split_once("' http").unwrap().0;
   let reason = serde_json::from_str::<Value>(body).unwrap()["reason"].clone();
-  let store = json!({ "name": "model/store", "service": "model", "part": "store", "evictable": true, "state": "evicted", "vramMiB": 4608, "since": 2, "reason": reason });
+  let store = unit("model/store", "evicted", 4608.0, reason.as_str());
   world.set_slave("a", Some(slave(json!({ "store": store, "free": 6108 }))));
-  let restored = world.command_where("a restore", |command| command.contains("/units/restore")).await;
-  assert!(restored.contains(r#""units":["model/store"]"#), "{restored}");
+  let restored = world
+    .command_where("a restore", |command| {
+      command.contains("/card-units/") && command.contains(r#""resident""#)
+    })
+    .await;
+  assert!(restored.contains("/card-units/model%2Fstore"), "{restored}");
   world
     .state_where("the restore said", |state| {
       events(state).iter().any(|text| text.contains("loaded back"))
@@ -166,9 +209,11 @@ async fn a_claimant_taking_the_card_is_shown_and_said_by_its_own_name() {
   let world = World::new(json!({ "a": "model" }), &[("a", slave(json!({})))]).start();
   world.state_where("node a read", |state| connected(state, "a")).await;
   world.set_slave("a", Some(slave(json!({ "claim": "tester" }))));
-  let state = world.state_where("the claim", |state| card(state)["claim"]["by"] == "tester").await;
+  let state = world
+    .state_where("the claim", |state| card(state)["claim"]["claimantName"] == "tester")
+    .await;
   assert_eq!(events(&state)[0], "tester claimed the card");
-  assert_eq!(codes(&state)[0], "card_claimed");
+  assert_eq!(codes(&state)[0], "card-claimed");
 }
 
 #[tokio::test]
@@ -178,30 +223,36 @@ async fn a_service_hands_in_its_units_description_which_the_master_keeps_and_sho
   world.state_where("node a read", |state| connected(state, "a")).await;
   let description = json!({ "units": { "model/weights@a": { "blocks": { "from": 0, "to": 17 }, "output": true, "mtp": false, "fullAttention": null } } });
 
-  let (status, body) = world.put("/descriptions/model", &description.to_string()).await.unwrap();
+  let (status, body) =
+    asked(&world, Method::PUT, "/descriptions/model", Some(&description.to_string())).await;
 
-  assert_eq!(status, 204, "{body}");
+  assert_eq!((status, &body), (201, &description));
   let kept: Value = serde_json::from_str(&world.read("data/placements/card-units/model.json")).unwrap();
   assert_eq!(kept, description);
+  assert_eq!(
+    asked(&world, Method::PUT, "/descriptions/model", Some(&description.to_string()))
+      .await
+      .0,
+    200
+  );
   world
     .state_where("the weights' detail", |state| {
       card(state)["units"][0]["detail"]["blocks"] == json!({ "from": 0, "to": 17 })
     })
     .await;
-  for (path, body, code) in [
-    ("/descriptions/Bad_Name", description.to_string(), "service_name_invalid"),
-    ("/descriptions/model", "{ not json".to_owned(), "description_invalid"),
-    ("/descriptions/voice", description.to_string(), "description_invalid"),
+  for (path, body, answer) in [
+    ("/descriptions/Bad_Name", description.to_string(), (422, "name-rule")),
+    ("/descriptions/model", "{ not json".to_owned(), (400, "bad-request")),
+    ("/descriptions/voice", description.to_string(), (422, "bad-field")),
   ] {
-    let (status, said) = world.put(path, &body).await.unwrap();
-    let said: Value = serde_json::from_str(&said).unwrap();
-    assert_eq!((status, said["code"].as_str()), (400, Some(code)), "{path}: {said}");
+    let (status, said) = asked(&world, Method::PUT, path, Some(&body)).await;
+    assert_eq!((status, said["code"].as_str().unwrap()), answer, "{path}: {said}");
   }
   assert!(!world.root().join("data/placements/card-units/voice.json").exists());
 }
 
 #[tokio::test]
-async fn the_node_lists_names_are_read_from_its_listing() {
+async fn the_node_services_nodes_are_read_in_its_lists_order() {
   let world =
     World::new(json!({ "a": "model", "b": null }), &[("a", slave(json!({}))), ("b", slave(json!({})))])
       .start();
@@ -210,4 +261,55 @@ async fn the_node_lists_names_are_read_from_its_listing() {
     .await;
   let names: Vec<Value> = nodes(&state).iter().map(|node| node["name"].clone()).collect();
   assert_eq!(names, [json!("a"), json!("b")]);
+}
+
+#[tokio::test]
+async fn a_placement_is_answered_as_queued_and_followed_on_the_member_and_the_stream() {
+  let world = World::new(json!({ "a": "model" }), &[("a", slave(json!({})))]).start();
+  world.state_where("node a read", |state| connected(state, "a")).await;
+  let ask = json!({ "kind": "place", "serviceName": "absent", "nodeName": "a" }).to_string();
+
+  let (status, made) = asked(&world, Method::POST, "/placements", Some(&ask)).await;
+
+  assert_eq!(
+    (status, made["state"].clone(), made["lines"].clone()),
+    (201, json!("queued"), json!([]))
+  );
+  let id = made["id"].as_i64().unwrap();
+  let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+  let ended = loop {
+    let (status, now) = asked(&world, Method::GET, &format!("/placements/{id}"), None).await;
+    assert_eq!(status, 200);
+    if now["state"] == "failed" || now["state"] == "done" {
+      break now;
+    }
+    assert!(std::time::Instant::now() < until, "the placement never ended: {now}");
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+  };
+  // no service is declared in this world, so the placement fails and says why
+  assert_eq!(ended["state"], "failed");
+  assert!(ended["failure"].as_str().is_some_and(|why| !why.is_empty()), "{ended}");
+  assert!(ended["endedAt"].as_i64().is_some(), "{ended}");
+  let (status, missing) = asked(&world, Method::GET, &format!("/placements/{}", id + 1000), None).await;
+  assert_eq!((status, missing["code"].as_str()), (404, Some("not-found")));
+  let (status, wrong) = asked(&world, Method::POST, "/placements", Some(r#"{"kind":"move"}"#)).await;
+  assert_eq!((status, wrong["code"].as_str()), (400, Some("bad-request")));
+}
+
+#[tokio::test]
+async fn a_master_with_a_token_answers_every_route_only_to_a_caller_holding_it() {
+  let world = World::new(json!({ "a": "model" }), &[("a", slave(json!({})))])
+    .with_token("secret")
+    .start();
+  for path in ["/health", "/cluster"] {
+    let (status, said) = asked(&world, Method::GET, path, None).await;
+    assert_eq!((status, said["code"].as_str()), (401, Some("unauthorized")), "{path}");
+  }
+  let held = reqwest::Client::new()
+    .get(format!("{}/cluster", world.base()))
+    .bearer_auth("secret")
+    .send()
+    .await
+    .unwrap();
+  assert_eq!(held.status(), 200);
 }

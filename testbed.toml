@@ -11,15 +11,34 @@ languages = ["cargo"]
 quick = ["layout", "dependencies", "korean"]
 # No code file holds Korean, so the ledger allows none anywhere.
 korean_ledger = "korean-ledger.json"
-# The base libraries every unit may build on. The arbiter reaches other units only through commands and
-# HTTP (docs/api.md) and uses none of them today.
-base_libraries = ["bmo-chat", "bmo-chat-client", "bmo-ui"]
+# The crates of other repositories the arbiter may build on: the base libraries every unit may, and the
+# published client of the node service it calls (docs/api.md, 「The node service」).
+base_libraries = ["bmo-chat", "bmo-chat-client", "bmo-ui", "bmo-node-client"]
+
+[[check.step]]
+id = "check"
+command = "cargo check --workspace --all-targets"
+lane = "wide"
+
+[[check.step]]
+id = "clippy"
+command = "cargo clippy --workspace --all-targets -- -D warnings"
+lane = "wide"
+
+[[check.step]]
+id = "fmt"
+command = "cargo fmt --all --check"
+
+# The TypeScript client: its types as docs/openapi.json generates them now, and its typecheck.
+[[check.step]]
+id = "arbiter-client"
+command = "bun install --cwd packages/arbiter-client --frozen-lockfile && bun run --cwd packages/arbiter-client check"
 
 [build]
-binaries = ["card-master"]
+binaries = ["bmo-arbiter"]
 
 # The master runs from its own deploy tree. A release is a worktree of the commit, so the `card/` package
-# the master's install uploads to every node stands in it beside `bin/card-master`, and the master reads
+# the master's install uploads to every node stands in it beside `bin/bmo-arbiter`, and the master reads
 # both through the deploy link (docs/api.md, 「Settings」, `BMO_CODE_ROOT`). Its unit is a `binary` one,
 # restarted only where its binary changed so no placement under way is cut, so no health is waited on.
 [deploy]

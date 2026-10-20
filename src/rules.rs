@@ -125,6 +125,16 @@ pub enum UnitKind {
   Fill,
 }
 
+impl From<UnitKind> for bmo_arbiter_client::cluster::UnitKind {
+  fn from(kind: UnitKind) -> Self {
+    match kind {
+      UnitKind::Resident => Self::Resident,
+      UnitKind::OnDemand => Self::OnDemand,
+      UnitKind::Fill => Self::Fill,
+    }
+  }
+}
+
 impl UnitKind {
   pub fn word(self) -> &'static str {
     match self {
@@ -624,7 +634,7 @@ pub struct NodeFacts {
   pub desktop: bool,
 }
 
-/// The services a node's role names: one, or several joined by `+` (docs/api.md, 「The node registry」).
+/// The services a node's role names: one, or several joined by `+` (docs/api.md, 「The node service」).
 pub fn role_services(role: Option<&str>) -> Vec<&str> {
   role.map(|one| one.split('+').collect()).unwrap_or_default()
 }

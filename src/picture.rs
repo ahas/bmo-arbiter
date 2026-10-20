@@ -1,86 +1,65 @@
-//! The picture of every card the master keeps and its state API answers (docs/placement.md,
-//! 「The console」): one node per slave read, its card, the units on it and where those out are, the
-//! host memory their dumps take, whose turn it is, the queue, the claim standing and a stage waiting, as
-//! the slave's `GET /units` said them. The field names and their order are the console's contract.
+//! The picture of every card the master keeps (docs/placement.md, 「The console」): one node per slave read,
+//! its card, the units on it and where those out are, the host memory their dumps take, whose turn it is,
+//! the queue, the claim standing and a stage waiting, as the slave's `GET /card` said them; and what changed
+//! between two readings, said among the notes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Serialize;
+pub use bmo_arbiter_client::card::UnitState as UnitPlace;
+use bmo_arbiter_client::card::{Card, Claim, Process, Ram, Store};
+pub use bmo_arbiter_client::cluster::LinkState;
+pub use bmo_arbiter_client::descriptions::{Blocks, UnitDetail};
 use serde_json::Value;
 
 use crate::plan::{PictureNode, PictureUnit, UnitState};
 use crate::rules::{NodeFacts, Num};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UnitPlace {
-  Resident,
-  Ram,
-  Evicted,
-  Mixed,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// A unit as its slave said it, named with its node.
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnitView {
+  /// `<service>/<part>@<node>`.
   pub name: String,
   pub service: String,
   pub part: String,
-  #[serde(rename = "vramMiB")]
   pub vram_mib: Num,
   /// On the card, out in its owner's host memory, out in the dump store, or some of each.
   pub state: UnitPlace,
   /// The host memory it takes while kept there.
-  #[serde(rename = "ramMiB")]
   pub ram_mib: Num,
-  pub since: Option<Num>,
+  /// When it came into its state, in epoch milliseconds.
+  pub since_at: Option<i64>,
   pub evictable: bool,
   pub reason: Option<String>,
-  pub load_ms: Option<Num>,
-  pub unload_ms: Option<Num>,
+  pub load_ms: Option<i64>,
+  pub unload_ms: Option<i64>,
 }
 
-/// A process using a card, its memory as the driver counts it, and the service its slave knows it as.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessView {
-  pub pid: Num,
-  pub name: String,
-  pub service: Option<String>,
-  #[serde(rename = "usedMiB")]
-  pub used_mib: Num,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// A ticket in a card's line, its id as the master's reasons write it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TicketView {
   pub ticket: String,
   pub service: String,
   pub turn: bool,
-  pub position: Option<Num>,
-  pub waited_s: Num,
-  pub wait_s: Option<Num>,
+  pub position: Option<i64>,
+  pub waited_ms: i64,
+  pub wait_ms: Option<i64>,
   pub unit: Option<String>,
-  #[serde(rename = "vramMiB")]
   pub vram_mib: Option<Num>,
-  /// A turn's: whether it is in use, where the slave says, and the service it gives way to now, if any.
-  #[serde(skip)]
+  /// A turn's: whether it is in use, and the service it gives way to now, if any.
   pub in_use: Option<bool>,
-  #[serde(skip)]
   pub gives_way_to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// The turn standing on a card.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Turn {
   pub service: String,
   pub ticket: String,
-  pub waited_s: Num,
-  /// Whether the turn is in use (given and not resting); none from a slave that does not say.
+  pub waited_ms: i64,
+  /// Whether the turn is in use (given and not resting).
   pub in_use: Option<bool>,
   /// The service the turn gives way to now, where it does.
-  #[serde(skip)]
   pub gives_way_to: Option<String>,
 }
 
@@ -93,75 +72,34 @@ impl Turn {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Claim {
-  pub by: Option<String>,
-  pub since: Option<Num>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Ram {
-  #[serde(rename = "dumpsMiB")]
-  pub dumps_mib: Num,
-  #[serde(rename = "availableMiB")]
-  pub available_mib: Option<Num>,
-  #[serde(rename = "maxMiB")]
-  pub max_mib: Option<Num>,
-  #[serde(rename = "floorMiB")]
-  pub floor_mib: Option<Num>,
-  pub dump: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Stage {
   pub waiting: bool,
-  pub waiting_s: Num,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Store {
-  pub path: String,
-  pub bytes: Num,
-  pub extents: Option<Num>,
-  pub slots_used: Num,
-  pub error: Option<String>,
+  pub waiting_ms: i64,
 }
 
 /// One card's view; a unit's own fields carry what the master adds to it (`U`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CardView<U = UnitView> {
   pub index: u32,
   pub name: Option<String>,
-  #[serde(rename = "totalMiB")]
   pub total_mib: Option<Num>,
-  #[serde(rename = "usedMiB")]
   pub used_mib: Option<Num>,
-  #[serde(rename = "freeMiB")]
   pub free_mib: Option<Num>,
   pub units: Vec<U>,
   pub turn: Option<Turn>,
   pub queue: Vec<TicketView>,
   /// The occupant whose claim on the card stands, and since when.
-  pub claim: Claim,
+  pub claim: Option<Claim>,
   pub ram: Ram,
   pub stage: Stage,
   pub store: Option<Store>,
   /// Every process using the card, or none where the slave cannot read them.
-  pub processes: Option<Vec<ProcessView>>,
+  pub processes: Option<Vec<Process>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LinkState {
-  Connected,
-  Lost,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// When the master's link to a slave came into its state and was last read, in the master's clock's seconds.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Link {
   pub state: LinkState,
   pub since: Option<Num>,
@@ -170,14 +108,13 @@ pub struct Link {
   pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SlaveRules {
-  pub loaded_at: Option<Value>,
-  pub error: Option<Value>,
+  pub loaded_at: Option<i64>,
+  pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeView<U = UnitView> {
   pub name: String,
   pub role: Option<String>,
@@ -189,120 +126,69 @@ pub struct NodeView<U = UnitView> {
   pub link: Link,
 }
 
-fn number(value: Option<&Value>) -> Option<Num> {
-  value.and_then(Value::as_f64).filter(|one| one.is_finite()).map(Num)
-}
-
-fn text(value: Option<&Value>) -> Option<String> {
-  value.and_then(Value::as_str).map(str::to_owned)
-}
-
-fn items(value: Option<&Value>) -> &[Value] {
-  value.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()
-}
-
-/// The slave's answer read into one card's view; whatever is missing is shown as unknown.
-pub fn card_from(answer: &Value, node: &str) -> CardView {
-  let card = answer.get("card");
-  let at = |value: Option<&Value>, key: &str| value.and_then(|one| one.get(key)).cloned();
-  let units = items(answer.get("units"))
+/// The slave's card read into one card's view.
+pub fn card_from(card: &Card, node: &str) -> CardView {
+  let units = card
+    .units
     .iter()
-    .map(|unit| {
-      let state = match unit.get("state").and_then(Value::as_str) {
-        Some("evicted") => UnitPlace::Evicted,
-        Some("ram") => UnitPlace::Ram,
-        Some("mixed") => UnitPlace::Mixed,
-        _ => UnitPlace::Resident,
-      };
-      UnitView {
-        name: format!("{}@{node}", text(unit.get("name")).unwrap_or_else(|| "?".into())),
-        service: text(unit.get("service")).unwrap_or_else(|| "?".into()),
-        part: text(unit.get("part")).unwrap_or_default(),
-        vram_mib: number(unit.get("vramMiB")).unwrap_or(Num(0.0)),
-        state,
-        ram_mib: number(unit.get("ramMiB")).unwrap_or(Num(0.0)),
-        since: number(unit.get("since")),
-        evictable: unit.get("evictable") == Some(&Value::Bool(true)),
-        reason: text(unit.get("reason")),
-        load_ms: number(at(unit.get("lastLoad"), "ms").as_ref()),
-        unload_ms: number(at(unit.get("lastUnload"), "ms").as_ref()),
-      }
+    .map(|unit| UnitView {
+      name: format!("{}@{node}", unit.name),
+      service: unit.holder_name.clone(),
+      part: unit.part.clone(),
+      vram_mib: Num(unit.vram_mib),
+      state: unit.state,
+      ram_mib: Num(unit.ram_mib),
+      since_at: unit.since_at,
+      evictable: unit.evictable,
+      reason: unit.reason.clone(),
+      load_ms: unit.last_load.as_ref().map(|load| load.took_ms),
+      unload_ms: unit.last_unload.as_ref().map(|unload| unload.took_ms),
     })
     .collect();
-  let queue: Vec<TicketView> = items(answer.get("queue"))
+  let queue: Vec<TicketView> = card
+    .queue
     .iter()
     .map(|ticket| {
-      let need = ticket.get("need");
+      let need = ticket.need.as_ref();
       TicketView {
-        ticket: text(ticket.get("ticket")).unwrap_or_else(|| "?".into()),
-        service: text(ticket.get("service")).unwrap_or_else(|| "?".into()),
-        turn: ticket.get("turn") == Some(&Value::Bool(true)),
-        position: number(ticket.get("position")),
-        waited_s: number(ticket.get("waitedS")).unwrap_or(Num(0.0)),
-        wait_s: number(ticket.get("waitS")),
-        unit: text(at(need, "unit").as_ref()),
-        vram_mib: number(at(need, "vramMiB").as_ref()),
-        in_use: ticket.get("inUse").and_then(Value::as_bool),
-        gives_way_to: (ticket.get("giveWay") == Some(&Value::Bool(true)))
-          .then(|| text(ticket.get("for")))
-          .flatten(),
+        ticket: ticket.id.to_string(),
+        service: ticket.service_name.clone(),
+        turn: ticket.turn,
+        position: ticket.position,
+        waited_ms: ticket.waited_ms,
+        wait_ms: ticket.wait_ms,
+        unit: need.and_then(|need| need.unit_name.clone()),
+        vram_mib: need.and_then(|need| need.vram_mib).map(|mib| Num(mib as f64)),
+        in_use: Some(ticket.in_use),
+        gives_way_to: ticket.give_way.then(|| ticket.give_way_for.clone()).flatten(),
       }
     })
     .collect();
   let turn = queue.iter().find(|ticket| ticket.turn).map(|holder| Turn {
     service: holder.service.clone(),
     ticket: holder.ticket.clone(),
-    waited_s: holder.waited_s,
+    waited_ms: holder.waited_ms,
     in_use: holder.in_use,
     gives_way_to: holder.gives_way_to.clone(),
   });
-  let claim = answer.get("claim");
-  let ram = answer.get("ram");
-  let stage = answer.get("stage");
-  let store = answer.get("store").filter(|one| !one.is_null()).map(|store| Store {
-    path: text(store.get("path")).unwrap_or_default(),
-    bytes: number(store.get("bytes")).unwrap_or(Num(0.0)),
-    extents: number(store.get("extents")),
-    slots_used: number(store.get("slotsUsed")).unwrap_or(Num(0.0)),
-    error: text(store.get("error")),
-  });
-  let processes = card.and_then(|one| one.get("processes")).and_then(Value::as_array).map(|processes| {
-    processes
-      .iter()
-      .map(|process| ProcessView {
-        pid: number(process.get("pid")).unwrap_or(Num(0.0)),
-        name: text(process.get("name")).unwrap_or_else(|| "?".into()),
-        service: text(process.get("service")),
-        used_mib: number(process.get("usedMiB")).unwrap_or(Num(0.0)),
-      })
-      .collect()
-  });
+  let device = card.device.as_ref();
   CardView {
     index: 0,
-    name: text(at(card, "name").as_ref()),
-    total_mib: number(at(card, "totalMiB").as_ref()),
-    used_mib: number(at(card, "usedMiB").as_ref()),
-    free_mib: number(at(card, "freeMiB").as_ref()),
+    name: device.map(|device| device.name.clone()),
+    total_mib: device.map(|device| Num(device.total_mib)),
+    used_mib: device.map(|device| Num(device.used_mib)),
+    free_mib: device.map(|device| Num(device.free_mib)),
     units,
     turn,
     queue: queue.into_iter().filter(|ticket| !ticket.turn).collect(),
-    claim: Claim {
-      by: text(at(claim, "by").as_ref()),
-      since: number(at(claim, "since").as_ref()),
-    },
-    ram: Ram {
-      dumps_mib: number(at(ram, "dumpsMiB").as_ref()).unwrap_or(Num(0.0)),
-      available_mib: number(at(ram, "availableMiB").as_ref()),
-      max_mib: number(at(ram, "maxMiB").as_ref()),
-      floor_mib: number(at(ram, "floorMiB").as_ref()),
-      dump: text(at(ram, "dump").as_ref()),
-    },
+    claim: card.claim.clone(),
+    ram: card.ram.clone(),
     stage: Stage {
-      waiting: at(stage, "waiting") == Some(Value::Bool(true)),
-      waiting_s: number(at(stage, "waitingS").as_ref()).unwrap_or(Num(0.0)),
+      waiting: card.stage.waiting,
+      waiting_ms: card.stage.waiting_ms,
     },
-    store,
-    processes,
+    store: card.store.clone(),
+    processes: device.and_then(|device| device.processes.clone()),
   }
 }
 
@@ -317,7 +203,7 @@ pub fn plannable(node: &NodeView) -> Option<PictureNode> {
     },
     free_mib: card.free_mib?.0,
     total_mib: card.total_mib?.0,
-    claimed_by: card.claim.by.clone(),
+    claimed_by: card.claim.as_ref().map(|claim| claim.claimant_name.clone()),
     units: card
       .units
       .iter()
@@ -332,14 +218,14 @@ pub fn plannable(node: &NodeView) -> Option<PictureNode> {
           UnitPlace::Mixed => UnitState::Mixed,
         },
         evictable: unit.evictable,
-        load_s: unit.load_ms.map(|ms| ms.0 / 1000.0),
-        unload_s: unit.unload_ms.map(|ms| ms.0 / 1000.0),
+        load_s: unit.load_ms.map(|ms| ms as f64 / 1000.0),
+        unload_s: unit.unload_ms.map(|ms| ms as f64 / 1000.0),
       })
       .collect(),
   })
 }
 
-/// One change of a node for the events: the code a console reads it by, and the English text a person
+/// One change of a node for the notes: the code a reader translates by, and the English text a person
 /// reads (docs/api.md, 「Messages and codes」).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
@@ -356,16 +242,20 @@ impl Change {
   }
 }
 
-/// What changed between two views of a node, each said once for the events.
+fn claimant(card: &CardView) -> Option<&str> {
+  card.claim.as_ref().map(|claim| claim.claimant_name.as_str())
+}
+
+/// What changed between two views of a node, each said once for the notes.
 pub fn changes(before: Option<&NodeView>, after: &NodeView) -> Vec<Change> {
   let mut said = Vec::new();
   let Some(before) = before else { return said };
   if before.link.state != after.link.state {
     said.push(match after.link.state {
-      LinkState::Connected => Change::new("node_reconnected", "the master reaches the node again"),
+      LinkState::Connected => Change::new("node-reconnected", "the master reaches the node again"),
       LinkState::Lost => match after.link.error.as_deref().filter(|error| !error.is_empty()) {
-        Some(error) => Change::new("node_lost", format!("the master lost the node ({error})")),
-        None => Change::new("node_lost", "the master lost the node"),
+        Some(error) => Change::new("node-lost", format!("the master lost the node ({error})")),
+        None => Change::new("node-lost", "the master lost the node"),
       },
     });
   }
@@ -375,22 +265,22 @@ pub fn changes(before: Option<&NodeView>, after: &NodeView) -> Vec<Change> {
   if after.link.state != LinkState::Connected {
     return said;
   }
-  if was.claim.by != now.claim.by {
-    said.push(match (&now.claim.by, &was.claim.by) {
-      (Some(by), _) => Change::new("card_claimed", format!("{by} claimed the card")),
-      (None, Some(was_by)) => Change::new("card_given_back", format!("{was_by} gave the card back")),
+  if claimant(was) != claimant(now) {
+    said.push(match (claimant(now), claimant(was)) {
+      (Some(by), _) => Change::new("card-claimed", format!("{by} claimed the card")),
+      (None, Some(was_by)) => Change::new("card-given-back", format!("{was_by} gave the card back")),
       (None, None) => unreachable!("the claims differ"),
     });
   }
   if was.stage.waiting != now.stage.waiting {
     said.push(if now.stage.waiting {
-      Change::new("stage_waiting", "the engine waits at this card's stage")
+      Change::new("stage-waiting", "the engine waits at this card's stage")
     } else {
       Change::new(
-        "stage_resumed",
+        "stage-resumed",
         format!(
           "the engine goes on after waiting {} s at this card's stage",
-          crate::yaml::js_number(was.stage.waiting_s.0.round())
+          crate::yaml::js_number((was.stage.waiting_ms as f64 / 1000.0).round())
         ),
       )
     });
@@ -409,35 +299,18 @@ pub fn changes(before: Option<&NodeView>, after: &NodeView) -> Vec<Change> {
       .map(|reason| format!(" ({reason})"))
       .unwrap_or_default();
     let (code, moved) = if old == UnitPlace::Ram && unit.state == UnitPlace::Evicted {
-      ("unit_lowered", "moved from RAM to NVMe".to_owned())
+      ("unit-lowered", "moved from RAM to NVMe".to_owned())
     } else {
       match unit.state {
-        UnitPlace::Evicted => ("unit_unloaded_to_disk", format!("unloaded to NVMe{why}")),
-        UnitPlace::Ram => ("unit_unloaded_to_ram", format!("unloaded to RAM{why}")),
-        UnitPlace::Resident => ("unit_loaded", "loaded".to_owned()),
-        UnitPlace::Mixed => ("unit_partly_unloaded", "partly unloaded".to_owned()),
+        UnitPlace::Evicted => ("unit-unloaded-to-disk", format!("unloaded to NVMe{why}")),
+        UnitPlace::Ram => ("unit-unloaded-to-ram", format!("unloaded to RAM{why}")),
+        UnitPlace::Resident => ("unit-loaded", "loaded".to_owned()),
+        UnitPlace::Mixed => ("unit-partly-unloaded", "partly unloaded".to_owned()),
       }
     };
     said.push(Change::new(code, format!("{} {moved}", unit.name)));
   }
   said
-}
-
-/// What a unit of a layered model holds on its card (docs/placement.md, 「What a service says of
-/// its units」).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnitDetail {
-  pub blocks: Option<Blocks>,
-  pub output: bool,
-  pub mtp: bool,
-  pub full_attention: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Blocks {
-  pub from: u64,
-  pub to: u64,
 }
 
 /// The folder's name beside the placement rules.
@@ -447,7 +320,7 @@ fn count(value: Option<&Value>) -> Option<u64> {
   value.and_then(Value::as_u64)
 }
 
-/// One unit's detail as a file gives it, or why it cannot be taken.
+/// One unit's detail as a file or a body gives it, or why it cannot be taken.
 pub fn detail_from(value: &Value) -> Result<UnitDetail, String> {
   if !value.is_object() {
     return Err("a unit's description is not an object".into());

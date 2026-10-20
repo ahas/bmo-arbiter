@@ -120,7 +120,7 @@ pub fn store_bytes(machine: &Machine, gib: Option<f64>) -> u64 {
 
 /// The arbiter's own account of its units, which says what lies out in the store.
 pub fn units_ask_command() -> String {
-  "curl -s -m 3 http://127.0.0.1:7439/units || true".to_owned()
+  "curl -s -m 3 http://127.0.0.1:7439/card || true".to_owned()
 }
 
 /// The units out in the store, wholly or in part, out of the units' answer; none where no arbiter
@@ -167,7 +167,7 @@ pub fn parse_store(text: &str) -> Option<u64> {
   line.captures(text)?.get(1)?.as_str().parse().ok()
 }
 
-/// The version the node arbiter shows (docs/api.md, 「Versioning」): this repository's `VERSION`, then the
+/// The version the node arbiter shows (docs/api.md, 「Versions」): this repository's `VERSION`, then the
 /// commit the tree stands at, marked where the arbiter's files differ from it.
 pub fn version(code_root: &Path) -> String {
   let git = |args: &[&str]| {
@@ -554,7 +554,7 @@ pub async fn lend(
   let installed = calls.exec(&installed_command()).await;
   if !installed.stdout.contains("CARD-INSTALLED") {
     return Err(format!(
-      "{node} has no arbiter; card-master place puts a service on the node, which stands the arbiter first"
+      "{node} has no arbiter; bmo-arbiter place puts a service on the node, which stands the arbiter first"
     ));
   }
   let Some(home) = parse_home(&calls.exec(&home_command()).await.stdout) else {

@@ -81,7 +81,7 @@ impl Node {
       answer(changes.rival.unwrap_or("inactive\n"), 0)
     } else if command.contains("setup.log") {
       answer("CARD-SETUP-DONE ok\n", 0)
-    } else if command.contains("7439/units") {
+    } else if command.contains("7439/card") {
       answer(changes.units.as_deref().unwrap_or(""), 0)
     } else if command.contains("units.store") {
       changes.store.clone().unwrap_or_else(|| answer("STORE 3\n", 0))
@@ -322,7 +322,7 @@ async fn the_lend_step_takes_its_settings_off_and_refuses_a_node_with_no_arbiter
     ..Changes::default()
   });
   let fault = lend("node-b", &bare, None, &[], &Timing::default(), &|_| {}).await.unwrap_err();
-  assert!(fault.contains("card-master place"), "{fault}");
+  assert!(fault.contains("bmo-arbiter place"), "{fault}");
   assert!(!bare.ran("restart"));
 }
 

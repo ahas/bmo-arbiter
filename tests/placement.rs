@@ -303,7 +303,7 @@ async fn drift_is_named_and_not_followed() {
   assert!(
     found
       .iter()
-      .any(|line| line.starts_with("k: the node registry's role is none, the placement gives model")),
+      .any(|line| line.starts_with("k: the node service's role is none, the placement gives model")),
     "{found:#?}"
   );
   assert!(

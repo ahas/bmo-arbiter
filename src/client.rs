@@ -1,52 +1,52 @@
-//! `card-master place` and `card-master remove` as a person runs them: the request handed to the running
-//! master on its loopback port, and what the master does said here as it does it
-//! (docs/placement.md, 「A request」).
+//! `bmo-arbiter place` and `bmo-arbiter remove` as a person runs them: the placement asked of the running
+//! master through the arbiter's client, and its lines said here as the master says them (docs/placement.md,
+//! 「A request」).
 
-use axum::body::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::Request;
-use hyper::header::{CONTENT_TYPE, HOST};
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
+use std::time::Duration;
 
-use crate::placement::Verb;
-use crate::serve::{DONE_LINE, FAILED_LINE};
+use bmo_arbiter_client::placements::{PlacementAsk, PlacementKind, PlacementState};
+use bmo_arbiter_client::{ArbiterClient, CallError};
 
-/// The request sent and its lines printed as they come; whether it ended done, or why it could not ask.
-pub async fn ask_master(port: u16, verb: Verb, service: &str, node: &str) -> Result<bool, String> {
-  let stream = TcpStream::connect(("127.0.0.1", port))
-    .await
-    .map_err(|fault| format!("the card master does not answer on 127.0.0.1:{port}: {fault}"))?;
-  let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-    .await
-    .map_err(|fault| fault.to_string())?;
-  tokio::spawn(connection);
-  let body = serde_json::json!({ "service": service, "node": node }).to_string();
-  let request = Request::post(format!("/{}", verb.word()))
-    .header(HOST, format!("127.0.0.1:{port}"))
-    .header(CONTENT_TYPE, "application/json")
-    .body(Full::new(Bytes::from(body)))
-    .map_err(|fault| fault.to_string())?;
-  let mut answer = sender.send_request(request).await.map_err(|fault| fault.to_string())?;
-  if !answer.status().is_success() {
-    return Err(format!("the card master answered {}", answer.status()));
-  }
-  let mut pending = String::new();
-  let mut last = String::new();
-  while let Some(frame) = answer.body_mut().frame().await {
-    let Ok(data) = frame.map_err(|fault| fault.to_string())?.into_data() else { continue };
-    pending.push_str(&String::from_utf8_lossy(&data));
-    while let Some((line, rest)) = pending.split_once('\n') {
+// How often the placement is read again while it runs.
+const FOLLOW_EVERY: Duration = Duration::from_millis(500);
+
+/// The placement asked and its lines printed as they come; whether it ended done, or why it could not ask.
+pub async fn ask_master(
+  port: u16,
+  token: Option<String>,
+  kind: PlacementKind,
+  service: &str,
+  node: &str,
+) -> Result<bool, String> {
+  let address = format!("http://127.0.0.1:{port}");
+  let master = ArbiterClient::new(&address, token)?;
+  let ask = PlacementAsk {
+    kind,
+    service_name: service.to_owned(),
+    node_name: node.to_owned(),
+  };
+  let mut placement = master.create_placement(&ask).await.map_err(|fault| match fault {
+    CallError::Transport(why) => format!("the master does not answer on 127.0.0.1:{port}: {why}"),
+    fault => fault.to_string(),
+  })?;
+  let mut said = 0;
+  loop {
+    for line in &placement.lines[said..] {
       println!("{line}");
-      last = line.to_owned();
-      pending = rest.to_owned();
     }
+    said = placement.lines.len();
+    match placement.state {
+      PlacementState::Done => {
+        println!("done");
+        return Ok(true);
+      }
+      PlacementState::Failed => {
+        println!("failed: {}", placement.failure.as_deref().unwrap_or("the master gave no reason"));
+        return Ok(false);
+      }
+      PlacementState::Queued | PlacementState::Running => {}
+    }
+    tokio::time::sleep(FOLLOW_EVERY).await;
+    placement = master.placement(placement.id).await.map_err(|fault| fault.to_string())?;
   }
-  if last.starts_with(DONE_LINE) {
-    return Ok(true);
-  }
-  if last.starts_with(FAILED_LINE) {
-    return Ok(false);
-  }
-  Err("the card master hung up before the request ended".into())
 }

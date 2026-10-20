@@ -167,8 +167,8 @@ class CardProcessesTest(unittest.TestCase):
 
     def test_each_process_named_with_its_memory_and_the_service_it_is_known_as(self) -> None:
         shown = units.processes_shown([(41, 9100 * 2**20), (7, 120 * 2**20)], {41: "model"}.get, lambda pid: {41: "rpc-server", 7: "Xorg"}[pid])
-        self.assertEqual(shown, [{"pid": 41, "name": "rpc-server", "service": "model", "usedMiB": 9100},
-                                 {"pid": 7, "name": "Xorg", "service": None, "usedMiB": 120}])
+        self.assertEqual(shown, [{"pid": 41, "name": "rpc-server", "serviceName": "model", "usedMiB": 9100},
+                                 {"pid": 7, "name": "Xorg", "serviceName": None, "usedMiB": 120}])
         self.assertIsNone(units.processes_shown(None, {}.get))
 
     def test_the_rpc_server_and_a_local_holds_group_are_the_lend_services_and_nothing_else_is(self) -> None:
@@ -184,7 +184,7 @@ class CardProcessesTest(unittest.TestCase):
                 lent.uses = os.getpgid(0)
                 self.assertEqual(lent.service_of(os.getpid()), "model")
             api = card.UnitsApi(lent, None, None, Path(root) / "rules.json", "v", memory=self.Memory([(gone, 2**30)]))
-            self.assertEqual(api.card_shown()["processes"], [{"pid": gone, "name": str(gone), "service": "model", "usedMiB": 1024}])
+            self.assertEqual(api.card_shown()["processes"], [{"pid": gone, "name": str(gone), "serviceName": "model", "usedMiB": 1024}])
             self.assertIsNone(card.UnitsApi(lent, None, None, Path(root) / "rules.json", "v", memory=self.Memory(None)).card_shown()["processes"])
 
 
@@ -350,23 +350,23 @@ class TurnsTest(unittest.TestCase):
         self.held = [99]
         voice = self.turns.ask("voice")
         self.assertEqual((voice["turn"], voice["position"]), (False, 2))
-        self.assertGreaterEqual(voice["waitS"], 1.0)
+        self.assertGreaterEqual(voice["waitMs"], 1000)
 
     def test_the_head_by_the_occupants_order_then_by_who_asked_first(self) -> None:
         self.held = [99]
         router = self.turns.ask("router")
         voice = self.turns.ask("voice")
-        self.assertEqual([one["service"] for one in self.turns.state()["queue"]], ["voice", "router"])
+        self.assertEqual([one["serviceName"] for one in self.turns.state()["queue"]], ["voice", "router"])
         self.held = []
-        self.assertTrue(self.turns.again(voice["ticket"])["turn"])
-        self.assertFalse(self.turns.again(router["ticket"])["turn"])
-        self.assertTrue(self.turns.done(voice["ticket"]))
-        self.assertTrue(self.turns.again(router["ticket"])["turn"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
+        self.assertFalse(self.turns.again(router["id"])["turn"])
+        self.assertTrue(self.turns.done(voice["id"]))
+        self.assertTrue(self.turns.again(router["id"])["turn"])
 
     def test_nothing_is_given_while_a_claim_stands(self) -> None:
         self.claim = "tester"
         answered = self.turns.ask("voice")
-        self.assertEqual((answered["turn"], answered["claim"]), (False, "tester"))
+        self.assertEqual((answered["turn"], answered["claimantName"]), (False, "tester"))
         self.assertIsNone(self.turns.ask("model"))
 
     def test_a_claimants_ticket_waits_until_the_card_is_the_claims_and_nobody_else_is_given_it(self) -> None:
@@ -375,17 +375,17 @@ class TurnsTest(unittest.TestCase):
         self.held = [99]
         claim = self.turns.ask("tester", need={"gpus": 1}, ref="task-1")
         self.assertEqual((claim["turn"], claim["position"]), (False, 1))
-        self.assertLessEqual(claim["waitS"], self.turns.claim_wait_s)
+        self.assertLessEqual(claim["waitMs"], self.turns.claim_wait_s * 1000)
         self.held = []
         voice = self.turns.ask("voice")
         self.assertFalse(voice["turn"])
-        self.assertFalse(self.turns.again(claim["ticket"])["turn"])
+        self.assertFalse(self.turns.again(claim["id"])["turn"])
         self.holds = True
         other = self.turns.ask("tester")
         self.assertTrue(other["turn"])
-        self.assertTrue(self.turns.again(claim["ticket"])["turn"])
-        self.assertFalse(self.turns.again(voice["ticket"])["turn"])
-        shown = next(one for one in self.turns.state()["queue"] if one["ticket"] == claim["ticket"])
+        self.assertTrue(self.turns.again(claim["id"])["turn"])
+        self.assertFalse(self.turns.again(voice["id"])["turn"])
+        shown = next(one for one in self.turns.state()["queue"] if one["id"] == claim["id"])
         self.assertEqual((shown["need"], shown["ref"]), ({"gpus": 1}, "task-1"))
 
     def test_a_granted_claimants_ticket_never_passes_on_and_is_dropped_for_silence_while_the_lock_is_held(self) -> None:
@@ -394,24 +394,24 @@ class TurnsTest(unittest.TestCase):
         claim = self.turns.ask("tester")
         self.assertTrue(claim["turn"])
         self.now = 25.0
-        self.assertTrue(self.turns.again(claim["ticket"])["turn"])
+        self.assertTrue(self.turns.again(claim["id"])["turn"])
         self.assertTrue(self.turns.claim_asked("tester"))
         self.assertFalse(self.turns.claim_asked("voice"))
         self.now = 56.0
         self.assertFalse(self.turns.claim_asked("tester"))
-        self.assertIsNone(self.turns.again(claim["ticket"]))
+        self.assertIsNone(self.turns.again(claim["id"]))
 
     def test_a_silent_ticket_is_dropped_and_a_turn_not_taken_passes_on(self) -> None:
         self.held = [99]
         voice = self.turns.ask("voice")
         router = self.turns.ask("router")
         self.held = []
-        self.assertTrue(self.turns.again(voice["ticket"])["turn"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
         self.now = 6.0
-        self.assertFalse(self.turns.again(voice["ticket"])["turn"])
-        self.assertTrue(self.turns.again(router["ticket"])["turn"])
+        self.assertFalse(self.turns.again(voice["id"])["turn"])
+        self.assertTrue(self.turns.again(router["id"])["turn"])
         self.now = 40.0
-        self.assertIsNone(self.turns.again(voice["ticket"]))
+        self.assertIsNone(self.turns.again(voice["id"]))
 
     def test_a_turn_nobody_else_waits_for_stays_untaken_until_its_ticket_asks(self) -> None:
         # The Router engine asks only as a call comes: held behind another holder, its ticket is granted
@@ -422,113 +422,113 @@ class TurnsTest(unittest.TestCase):
         router = self.turns.ask("router")
         self.assertFalse(router["turn"])
         self.held = []
-        self.turns.done(voice["ticket"])
+        self.turns.done(voice["id"])
         for second in range(1, 21):
             self.now = float(second)
             self.assertEqual(self.turns.state()["lockHeldBy"], [])
-        self.assertTrue(self.turns.again(router["ticket"])["turn"])
+        self.assertTrue(self.turns.again(router["id"])["turn"])
 
     def test_a_turn_that_passed_is_given_again_once_nobody_ready_stands_before_it(self) -> None:
         self.held = [99]
         voice = self.turns.ask("voice")
         router = self.turns.ask("router")
         self.held = []
-        self.assertTrue(self.turns.again(voice["ticket"])["turn"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
         self.now = 6.0
-        self.assertTrue(self.turns.again(router["ticket"])["turn"])
+        self.assertTrue(self.turns.again(router["id"])["turn"])
         self.now = 8.0
-        self.turns.done(router["ticket"])
-        self.assertTrue(self.turns.again(voice["ticket"])["turn"])
+        self.turns.done(router["id"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
 
     def test_a_turn_in_use_stays_however_long_it_is_silent(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
         self.now = 600.0
-        self.assertEqual(self.turns.state()["queue"][0]["ticket"], voice["ticket"])
+        self.assertEqual(self.turns.state()["queue"][0]["id"], voice["id"])
         self.held = []
-        self.turns.done(voice["ticket"])
+        self.turns.done(voice["id"])
         self.assertEqual(self.turns.typical["voice"], 600.0)
 
     def test_a_wait_is_counted_from_how_long_each_service_held_the_card(self) -> None:
         voice = self.turns.ask("voice")
         self.now = 12.0
-        self.turns.done(voice["ticket"])
+        self.turns.done(voice["id"])
         self.held = [99]
         self.turns.ask("voice")
         router = self.turns.ask("router")
-        self.assertEqual(router["waitS"], 22.0)
+        self.assertEqual(router["waitMs"], 22000)
 
     def test_a_turn_that_gives_way_is_told_to_while_an_occupant_above_it_waits_or_a_claim_stands(self) -> None:
         router = self.turns.ask("router", gives_way_s=6.0)
-        self.assertNotIn("giveWay", router)
+        self.assertFalse(router["giveWay"])
         self.held = [99]
         alike = self.turns.ask("router")
-        self.assertNotIn("giveWay", self.turns.again(router["ticket"]))
-        self.turns.done(alike["ticket"])
+        self.assertFalse(self.turns.again(router["id"])["giveWay"])
+        self.turns.done(alike["id"])
         voice = self.turns.ask("voice")
-        self.assertEqual((voice["turn"], voice["waitS"]), (False, 6.0))
-        told = self.turns.again(router["ticket"])
-        self.assertEqual((told["turn"], told["giveWay"], told["for"]), (True, True, "voice"))
+        self.assertEqual((voice["turn"], voice["waitMs"]), (False, 6000))
+        told = self.turns.again(router["id"])
+        self.assertEqual((told["turn"], told["giveWay"], told["giveWayFor"]), (True, True, "voice"))
         self.held = []
-        self.turns.done(router["ticket"])
-        self.assertTrue(self.turns.again(voice["ticket"])["turn"])
-        self.turns.done(voice["ticket"])
+        self.turns.done(router["id"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
+        self.turns.done(voice["id"])
         held_to_its_end = self.turns.ask("router")
         self.assertTrue(held_to_its_end["turn"])
         self.claim = "tester"
-        self.assertNotIn("giveWay", self.turns.again(held_to_its_end["ticket"]))
-        self.turns.done(held_to_its_end["ticket"])
+        self.assertFalse(self.turns.again(held_to_its_end["id"])["giveWay"])
+        self.turns.done(held_to_its_end["id"])
         self.claim = None
         giving = self.turns.ask("router", gives_way_s=6.0)
         self.assertTrue(giving["turn"])
         self.claim = "tester"
-        self.assertEqual(self.turns.again(giving["ticket"])["for"], "tester")
+        self.assertEqual(self.turns.again(giving["id"])["giveWayFor"], "tester")
 
     def test_a_resting_turn_gives_way_to_any_occupant_that_asks_whatever_its_rank(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
-        rests = self.turns.again(voice["ticket"], rest=True)
-        self.assertEqual((rests["turn"], rests["resting"], "giveWay" in rests), (True, True, False))
+        rests = self.turns.again(voice["id"], rest=True)
+        self.assertEqual((rests["turn"], rests["resting"], rests["giveWay"]), (True, True, False))
         self.assertFalse(self.turns.state()["busy"])
         # router stands below voice here, and a resting voice gives way to it all the same.
         router = self.turns.ask("router")
-        self.assertEqual((router["turn"], router["waitS"]), (False, 1.0))
-        told = self.turns.again(voice["ticket"])
-        self.assertEqual((told["resting"], told["giveWay"], told["for"]), (True, True, "router"))
+        self.assertEqual((router["turn"], router["waitMs"]), (False, 1000))
+        told = self.turns.again(voice["id"])
+        self.assertEqual((told["resting"], told["giveWay"], told["giveWayFor"]), (True, True, "router"))
         self.assertTrue(self.turns.state()["busy"])
         self.held = []
-        self.turns.done(voice["ticket"])
-        self.assertTrue(self.turns.again(router["ticket"])["turn"])
+        self.turns.done(voice["id"])
+        self.assertTrue(self.turns.again(router["id"])["turn"])
 
     def test_a_resting_turn_gives_way_to_a_claim(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
-        self.turns.again(voice["ticket"], rest=True)
+        self.turns.again(voice["id"], rest=True)
         self.claim = "tester"
-        self.assertEqual(self.turns.again(voice["ticket"])["for"], "tester")
+        self.assertEqual(self.turns.again(voice["id"])["giveWayFor"], "tester")
 
     def test_a_request_while_resting_carries_on_where_it_stands_first_and_its_use_counts_from_then(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
         self.now = 2.0
-        self.turns.again(voice["ticket"], rest=True)
+        self.turns.again(voice["id"], rest=True)
         self.now = 50.0
         self.turns.ask("router")
-        kept = self.turns.again(voice["ticket"], next_waited_s=0.0)
-        self.assertEqual((kept["keep"], "resting" in kept, "giveWay" in kept), (True, False, False))
+        kept = self.turns.again(voice["id"], next_waited_s=0.0)
+        self.assertEqual((kept["keep"], kept["resting"], kept["giveWay"]), (True, False, False))
         self.now = 59.0
-        self.assertTrue(self.turns.again(voice["ticket"], next_waited_s=0.0)["keep"])
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
         self.now = 60.0
-        self.assertFalse(self.turns.again(voice["ticket"], next_waited_s=0.0)["keep"])
+        self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
 
     def test_a_rest_is_left_out_of_how_long_a_service_holds_the_card(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
         self.now = 3.0
-        self.turns.again(voice["ticket"], rest=True)
+        self.turns.again(voice["id"], rest=True)
         self.now = 500.0
         self.held = []
-        self.turns.done(voice["ticket"])
+        self.turns.done(voice["id"])
         self.assertEqual(self.turns.typical["voice"], 3.0)
 
     def test_a_ticket_asked_only_to_rest_waits_behind_every_request_and_makes_nobody_give_way(self) -> None:
@@ -536,23 +536,23 @@ class TurnsTest(unittest.TestCase):
         self.held = [99]
         voice = self.turns.ask("voice", rest=True)
         self.assertFalse(voice["turn"])
-        self.assertNotIn("giveWay", self.turns.again(router["ticket"]))
-        self.assertTrue(self.turns.again(router["ticket"], next_waited_s=0.0)["keep"])
+        self.assertFalse(self.turns.again(router["id"])["giveWay"])
+        self.assertTrue(self.turns.again(router["id"], next_waited_s=0.0)["keep"])
         self.assertTrue(self.turns.state()["busy"])
         later = self.turns.ask("router")
-        self.assertEqual([one["ticket"] for one in self.turns.state()["queue"]],
-                         [router["ticket"], later["ticket"], voice["ticket"]])
+        self.assertEqual([one["id"] for one in self.turns.state()["queue"]],
+                         [router["id"], later["id"], voice["id"]])
         self.held = []
-        self.turns.done(router["ticket"])
-        self.assertFalse(self.turns.again(voice["ticket"])["turn"])
-        self.assertTrue(self.turns.again(later["ticket"])["turn"])
-        self.turns.done(later["ticket"])
-        back = self.turns.again(voice["ticket"])
+        self.turns.done(router["id"])
+        self.assertFalse(self.turns.again(voice["id"])["turn"])
+        self.assertTrue(self.turns.again(later["id"])["turn"])
+        self.turns.done(later["id"])
+        back = self.turns.again(voice["id"])
         self.assertEqual((back["turn"], back["resting"]), (True, True))
         self.held = [99]
         self.assertFalse(self.turns.state()["busy"])
         self.turns.ask("router")
-        self.assertEqual(self.turns.again(voice["ticket"])["for"], "router")
+        self.assertEqual(self.turns.again(voice["id"])["giveWayFor"], "router")
 
     def test_occupants_of_one_rank_wait_their_turn_by_arrival_and_never_push_each_other_out(self) -> None:
         self.occupants.path.write_text("song=voice router\n")
@@ -564,20 +564,20 @@ class TurnsTest(unittest.TestCase):
         voice = self.turns.ask("voice")
         self.assertEqual((voice["turn"], voice["position"]), (False, 2))
         # Neither stands above the other: a turn of one rank is never told to give way for the other.
-        self.assertNotIn("giveWay", self.turns.again(song["ticket"]))
+        self.assertFalse(self.turns.again(song["id"])["giveWay"])
         self.now = 2.0
         later_song = self.turns.ask("song")
-        self.assertEqual([one["service"] for one in self.turns.state()["queue"]], ["song", "voice", "song"])
+        self.assertEqual([one["serviceName"] for one in self.turns.state()["queue"]], ["song", "voice", "song"])
         self.assertEqual(self.turns.state()["ranks"], [["tester"], ["song", "voice"], ["router"]])
         self.held = []
-        self.turns.done(song["ticket"])
-        self.assertTrue(self.turns.again(voice["ticket"])["turn"])
-        self.assertFalse(self.turns.again(later_song["ticket"])["turn"])
+        self.turns.done(song["id"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
+        self.assertFalse(self.turns.again(later_song["id"])["turn"])
         self.held = [99]
         self.now = 3.0
         # The voice's next line arrived after the song's waiting piece: the card goes to the song.
-        self.assertFalse(self.turns.again(voice["ticket"], next_waited_s=0.5)["keep"])
-        self.assertTrue(self.turns.again(voice["ticket"], next_waited_s=1.5)["keep"])
+        self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.5)["keep"])
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=1.5)["keep"])
 
     def one_rank(self, values: dict[str, units.Turn]) -> None:
         """song and voice at one rank, each with the turn values given and a bound long enough to stand aside."""
@@ -593,12 +593,12 @@ class TurnsTest(unittest.TestCase):
         self.now = 1.0
         self.turns.ask("song")
         self.now = 9.9
-        self.assertNotIn("giveWay", self.turns.again(voice["ticket"]))
+        self.assertFalse(self.turns.again(voice["id"])["giveWay"])
         self.now = 10.0
-        told = self.turns.again(voice["ticket"])
-        self.assertEqual((told["giveWay"], told["for"]), (True, "song"))
+        told = self.turns.again(voice["id"])
+        self.assertEqual((told["giveWay"], told["giveWayFor"]), (True, "song"))
         # It is told in the middle of its request: no boundary, and nothing passed there.
-        self.assertIsNone(self.turns.passes_to(voice["ticket"]))
+        self.assertIsNone(self.turns.passes_to(voice["id"]))
 
     def test_a_turn_that_may_not_pause_lets_go_to_its_rank_only_at_its_request_boundary(self) -> None:
         self.one_rank({"voice": units.Turn(10.0, False)})
@@ -608,18 +608,18 @@ class TurnsTest(unittest.TestCase):
         self.turns.ask("song")
         # Its next request arrived long before the song's: only its turn values make it let go.
         self.now = 9.0
-        self.assertTrue(self.turns.again(voice["ticket"], next_waited_s=100.0)["keep"])
-        self.assertIsNone(self.turns.passes_to(voice["ticket"]))
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=100.0)["keep"])
+        self.assertIsNone(self.turns.passes_to(voice["id"]))
         self.now = 10.0
-        told = self.turns.again(voice["ticket"], next_waited_s=100.0)
-        self.assertEqual((told["keep"], "giveWay" in told), (False, False))
-        self.assertEqual(self.turns.passes_to(voice["ticket"]), "song")
+        told = self.turns.again(voice["id"], next_waited_s=100.0)
+        self.assertEqual((told["keep"], told["giveWay"]), (False, False))
+        self.assertEqual(self.turns.passes_to(voice["id"]), "song")
         # Its time counts from the request that ended its rest.
-        self.turns.again(voice["ticket"], rest=True)
-        self.assertIsNone(self.turns.passes_to(voice["ticket"]))
+        self.turns.again(voice["id"], rest=True)
+        self.assertIsNone(self.turns.passes_to(voice["id"]))
         self.now = 11.0
-        self.assertTrue(self.turns.again(voice["ticket"], next_waited_s=100.0)["keep"])
-        self.assertIsNone(self.turns.passes_to(voice["ticket"]))
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=100.0)["keep"])
+        self.assertIsNone(self.turns.passes_to(voice["id"]))
 
     def test_one_rank_arriving_without_end_on_both_sides_takes_the_card_in_turn_by_each_ones_values(self) -> None:
         self.one_rank({"song": units.Turn(5.0, False), "voice": units.Turn(8.0, False)})
@@ -629,16 +629,16 @@ class TurnsTest(unittest.TestCase):
         turns: list[tuple[str, float]] = [("song", 0.0)]
         for second in range(1, 101):
             self.now = float(second)
-            self.turns.again(waiter["ticket"])
+            self.turns.again(waiter["id"])
             # Each holder's next request always arrived long before the waiter's.
-            if self.turns.again(holder["ticket"], next_waited_s=100.0)["keep"]:
+            if self.turns.again(holder["id"], next_waited_s=100.0)["keep"]:
                 continue
             self.held = []
-            self.turns.done(holder["ticket"])
-            self.assertTrue(self.turns.again(waiter["ticket"])["turn"])
+            self.turns.done(holder["id"])
+            self.assertTrue(self.turns.again(waiter["id"])["turn"])
             self.held = [99]
-            turns.append((waiter["service"], self.now))
-            holder, waiter = waiter, self.turns.ask(holder["service"], waited_s=50.0)
+            turns.append((waiter["serviceName"], self.now))
+            holder, waiter = waiter, self.turns.ask(holder["serviceName"], waited_s=50.0)
         held_for = [(service, after - since) for (service, since), (_, after) in zip(turns, turns[1:])]
         self.assertEqual({service for service, _ in turns}, {"song", "voice"})
         self.assertGreater(len(turns), 10)
@@ -654,15 +654,15 @@ class TurnsTest(unittest.TestCase):
         self.now = 1.0
         self.turns.ask("voice")
         self.now = 9.0
-        self.assertNotIn("giveWay", self.turns.again(song["ticket"]))
-        self.assertTrue(self.turns.again(song["ticket"], next_waited_s=100.0)["keep"])
+        self.assertFalse(self.turns.again(song["id"])["giveWay"])
+        self.assertTrue(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
         self.now = 500.0
         # The voice asks again, as a waiter does; its first ticket was dropped for silence long ago.
         self.turns.ask("voice")
-        self.assertNotIn("giveWay", self.turns.again(song["ticket"]))
-        self.assertIsNone(self.turns.passes_to(song["ticket"]))
+        self.assertFalse(self.turns.again(song["id"])["giveWay"])
+        self.assertIsNone(self.turns.passes_to(song["id"]))
         # Only the bound a holder is kept to hands it on at its boundary.
-        self.assertFalse(self.turns.again(song["ticket"], next_waited_s=1000.0)["keep"])
+        self.assertFalse(self.turns.again(song["id"], next_waited_s=1000.0)["keep"])
 
     def test_turn_values_are_read_off_the_rules_and_an_entry_not_understood_is_passed_over(self) -> None:
         rules = {"turns": {"model": {"yieldAfterS": 30, "canPause": False}, "coder": {"yieldAfterS": 12.5, "canPause": True},
@@ -676,29 +676,29 @@ class TurnsTest(unittest.TestCase):
         router_late = self.turns.ask("router")
         self.now = 5.0
         router_early = self.turns.ask("router", waited_s=8.0)
-        self.assertEqual([one["ticket"] for one in self.turns.state()["queue"]], [router_early["ticket"], router_late["ticket"]])
+        self.assertEqual([one["id"] for one in self.turns.state()["queue"]], [router_early["id"], router_late["id"]])
 
     def test_a_holder_with_nobody_waiting_keeps_the_card(self) -> None:
         router = self.turns.ask("router")
         self.held = [99]
         self.now = 60.0
-        self.assertTrue(self.turns.again(router["ticket"], next_waited_s=0.0)["keep"])
+        self.assertTrue(self.turns.again(router["id"], next_waited_s=0.0)["keep"])
 
     def test_a_holder_lets_go_for_an_occupant_above_it_waiting(self) -> None:
         # The order here is desktop, voice, router: voice stands above router.
         router = self.turns.ask("router")
         self.held = [99]
         self.turns.ask("voice")
-        self.assertFalse(self.turns.again(router["ticket"], next_waited_s=5.0)["keep"])
+        self.assertFalse(self.turns.again(router["id"], next_waited_s=5.0)["keep"])
 
     def test_a_holder_above_the_waiter_carries_on_until_its_bound(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
         self.turns.ask("router")
         self.now = 9.0
-        self.assertTrue(self.turns.again(voice["ticket"], next_waited_s=0.0)["keep"])
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
         self.now = 10.0
-        self.assertFalse(self.turns.again(voice["ticket"], next_waited_s=0.0)["keep"])
+        self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
 
     def test_a_holder_lets_go_where_its_own_rank_asked_first_or_a_claim_stands(self) -> None:
         voice = self.turns.ask("voice")
@@ -706,10 +706,10 @@ class TurnsTest(unittest.TestCase):
         self.now = 3.0
         self.turns.ask("voice", waited_s=2.0)
         # The other request arrived at 1.0; this holder's next has waited one second, arriving at 2.0.
-        self.assertFalse(self.turns.again(voice["ticket"], next_waited_s=1.0)["keep"])
-        self.assertTrue(self.turns.again(voice["ticket"], next_waited_s=2.5)["keep"])
+        self.assertFalse(self.turns.again(voice["id"], next_waited_s=1.0)["keep"])
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=2.5)["keep"])
         self.claim = "tester"
-        self.assertFalse(self.turns.again(voice["ticket"], next_waited_s=2.5)["keep"])
+        self.assertFalse(self.turns.again(voice["id"], next_waited_s=2.5)["keep"])
 
     def test_a_held_answer_goes_out_the_moment_the_holder_gives_its_ticket_back(self) -> None:
         router = self.turns.ask("router")
@@ -725,7 +725,7 @@ class TurnsTest(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(answered, [])
         self.held = []
-        self.turns.done(router["ticket"])
+        self.turns.done(router["id"])
         waiting.join(5.0)
         self.assertTrue(answered and answered[0]["turn"])
         self.assertLess(time.monotonic() - started, 2.0)
@@ -744,10 +744,10 @@ class TurnsTest(unittest.TestCase):
         self.held = [99]
         voice = self.turns.ask("voice")
         answered: list = []
-        waiting = threading.Thread(target=lambda: answered.append(self.turns.again(voice["ticket"], wait_s=10.0)))
+        waiting = threading.Thread(target=lambda: answered.append(self.turns.again(voice["id"], wait_s=10.0)))
         waiting.start()
         time.sleep(0.2)
-        self.turns.done(voice["ticket"])
+        self.turns.done(voice["id"])
         waiting.join(5.0)
         self.assertEqual(answered, [None])
 
@@ -758,7 +758,7 @@ class TurnsTest(unittest.TestCase):
         self.assertFalse(answered["turn"])
         self.assertGreaterEqual(time.monotonic() - started, 0.25)
 
-    def test_the_api_answers_202_with_retry_after_and_the_turn_with_200(self) -> None:
+    def test_the_api_answers_the_turn_with_201_a_wait_with_202_and_every_refusal_with_its_code(self) -> None:
         import json
         import threading
         import urllib.request
@@ -780,30 +780,44 @@ class TurnsTest(unittest.TestCase):
             except urllib.error.HTTPError as refused:
                 return refused.code, dict(refused.headers), json.loads(refused.read() or b"{}")
 
+        def refused(answered: tuple[int, dict, dict]) -> tuple[int, str]:
+            status, _, body = answered
+            self.assertEqual(set(body), {"code", "error"})
+            return status, body["code"]
+
         self.held = [99]
-        status, headers, body = call("POST", "/turns", {"service": "voice"})
+        status, headers, body = call("POST", "/tickets", {"serviceName": "voice"})
         self.assertEqual((status, body["turn"], body["position"]), (202, False, 1))
-        self.assertEqual(headers["retry-after"], str(round(body["waitS"])))
+        self.assertEqual(headers["retry-after"], str(max(1, -(-body["waitMs"] // 1000))))
         self.held = []
-        status, _, body = call("GET", f"/turns/{body['ticket']}")
-        self.assertEqual((status, body["turn"]), (200, True))
-        self.assertEqual(call("GET", "/turns")[2]["queue"][0]["service"], "voice")
-        self.assertEqual(call("DELETE", f"/turns/{body['ticket']}")[0], 204)
-        self.assertEqual(call("GET", f"/turns/{body['ticket']}")[0], 404)
-        self.assertEqual(call("POST", "/turns", {"service": "model"})[0], 403)
-        self.assertEqual(call("POST", "/turns", {"service": "tester", "need": "much"})[0], 400)
-        status, headers, body = call("POST", "/turns", {"service": "tester", "need": {"gpus": None, "vramMiB": 8192}, "ref": "t"})
+        status, _, body = call("GET", f"/tickets/{body['id']}")
+        self.assertEqual((status, body["turn"], body["position"], body["waitMs"]), (200, True, None, None))
+        self.assertEqual(call("GET", "/card")[2]["queue"][0]["serviceName"], "voice")
+        status, _, kept = call("GET", f"/tickets/{body['id']}?nextWaitedMs=0")
+        self.assertEqual((status, kept["keep"]), (200, True))
+        status, _, rested = call("PATCH", f"/tickets/{body['id']}", {"resting": True})
+        self.assertEqual((status, rested["resting"], rested["inUse"]), (200, True, False))
+        self.assertEqual(refused(call("PATCH", f"/tickets/{body['id']}", {"resting": False})), (409, "conflict"))
+        self.assertEqual(refused(call("PATCH", f"/tickets/{body['id']}", {"rest": 1})), (400, "bad-request"))
+        self.assertEqual(call("DELETE", f"/tickets/{body['id']}")[0], 204)
+        self.assertEqual(refused(call("GET", f"/tickets/{body['id']}")), (404, "not-found"))
+        self.assertEqual(refused(call("DELETE", f"/tickets/{body['id']}")), (404, "not-found"))
+        self.assertEqual(refused(call("GET", "/tickets/soon")), (400, "bad-request"))
+        self.assertEqual(refused(call("POST", "/tickets", {"serviceName": "model"})), (422, "no-place"))
+        self.assertEqual(refused(call("POST", "/tickets", {"serviceName": "tester", "need": "much"})), (400, "bad-request"))
+        status, headers, body = call("POST", "/tickets", {"serviceName": "tester", "need": {"gpus": None, "vramMiB": 8192}, "ref": "t"})
         self.assertEqual((status, body["turn"], "retry-after" in headers), (202, False, True))
-        self.assertEqual(call("GET", "/turns")[2]["queue"][0]["need"], {"vramMiB": 8192})
-        self.assertEqual(call("POST", "/turns", {"service": "router", "givesWayS": "soon"})[0], 400)
-        self.assertEqual(call("POST", "/turns", {"service": "router", "givesWayS": 0})[0], 400)
-        status, _, body = call("POST", "/turns", {"service": "router", "givesWayS": 6})
-        self.assertEqual((status, self.turns.tickets[body["ticket"]].gives_way_s), (202, 6.0))
-        self.assertEqual(call("POST", "/turns", {"service": "router", "rest": "yes"})[0], 400)
-        status, _, body = call("POST", "/turns", {"service": "voice", "rest": True})
-        self.assertEqual((status, self.turns.tickets[body["ticket"]].rest), (202, True))
-        self.assertTrue(next(one for one in call("GET", "/turns")[2]["queue"] if one["ticket"] == body["ticket"])["rest"])
-        self.assertEqual(call("GET", f"/turns/{body['ticket']}?rest=2")[0], 400)
+        self.assertEqual(call("GET", "/card")[2]["queue"][0]["need"], {"vramMiB": 8192})
+        self.assertEqual(refused(call("POST", "/tickets", {"serviceName": "router", "givesWayMs": "soon"})), (400, "bad-request"))
+        self.assertEqual(refused(call("POST", "/tickets", {"serviceName": "router", "givesWayMs": 0})), (400, "bad-request"))
+        status, _, body = call("POST", "/tickets", {"serviceName": "router", "givesWayMs": 6000})
+        self.assertEqual((status, self.turns.tickets[body["id"]].gives_way_s), (202, 6.0))
+        self.assertEqual(refused(call("POST", "/tickets", {"serviceName": "router", "rest": "yes"})), (400, "bad-request"))
+        status, _, body = call("POST", "/tickets", {"serviceName": "voice", "rest": True})
+        self.assertEqual((status, self.turns.tickets[body["id"]].rest), (202, True))
+        self.assertTrue(next(one for one in call("GET", "/card")[2]["queue"] if one["id"] == body["id"])["rest"])
+        self.assertEqual(refused(call("GET", f"/tickets/{body['id']}?waitMs=soon")), (400, "bad-request"))
+        self.assertEqual(refused(call("GET", "/turns")), (404, "no-route"))
 
     def test_a_ticket_whose_asker_left_before_its_held_answer_is_given_back(self) -> None:
         import socket
@@ -815,9 +829,9 @@ class TurnsTest(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         self.held = [99]
-        body = b'{"service": "voice", "waitS": 10}'
+        body = b'{"serviceName": "voice", "waitMs": 10000}'
         asker = socket.create_connection(server.server_address)
-        asker.sendall(b"POST /turns HTTP/1.1\r\nhost: card\r\ncontent-type: application/json\r\n"
+        asker.sendall(b"POST /tickets HTTP/1.1\r\nhost: card\r\ncontent-type: application/json\r\n"
                       + f"content-length: {len(body)}\r\n\r\n".encode() + body)
         deadline = time.monotonic() + 5
         while not self.turns.tickets and time.monotonic() < deadline:
@@ -932,7 +946,7 @@ class TurnsTest(unittest.TestCase):
 
         clock = Clock()
         states = iter([{"lockHeldBy": [9], "queue": []}, {"lockHeldBy": [], "queue": []},
-                       {"lockHeldBy": [], "queue": [{"service": "voice"}]}] + [{"lockHeldBy": [], "queue": []}] * 40)
+                       {"lockHeldBy": [], "queue": [{"serviceName": "voice"}]}] + [{"lockHeldBy": [], "queue": []}] * 40)
 
         class Asked:
             def state(self) -> dict | None:
@@ -952,8 +966,8 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(clock.now, 12.0)
 
         # A holder resting on the card keeps the lock, and the card stands quiet all the same.
-        resting = iter([{"busy": True, "lockHeldBy": [9], "queue": [{"service": "router"}]}] * 2
-                       + [{"busy": False, "lockHeldBy": [9], "queue": [{"service": "router", "resting": True}]}] * 40)
+        resting = iter([{"busy": True, "lockHeldBy": [9], "queue": [{"serviceName": "router"}]}] * 2
+                       + [{"busy": False, "lockHeldBy": [9], "queue": [{"serviceName": "router", "resting": True}]}] * 40)
 
         class Resting:
             def state(self) -> dict | None:
@@ -1259,9 +1273,9 @@ class OwnersTest(unittest.IsolatedAsyncioTestCase):
         api = card.UnitsApi(self.broker, turns, self.store, self.root / "rules.json", "v", owners=self.owners)
         shown = api.state()
         # the stage's use waiting is never read as the lent owner's
-        self.assertEqual(shown["stage"], {"waiting": False, "waitingS": 0.0, "graphs": 5, "waits": 0, "waitedS": 0.0})
+        self.assertEqual(shown["stage"], {"waiting": False, "waitingMs": 0, "graphs": 5, "waits": 0, "waitedMs": 0})
         doors = {one["name"]: one.get("door") for one in shown["units"]}
-        self.assertEqual(doors["coder/stage"], {"waiting": True, "waitingS": 0.0, "graphs": 9, "waits": 0, "waitedS": 0.0})
+        self.assertEqual(doors["coder/stage"], {"waiting": True, "waitingMs": 0, "graphs": 9, "waits": 0, "waitedMs": 0})
         self.assertEqual((doors["model/weights"], doors["model/store"]), (None, None))
 
     async def test_the_masters_unload_of_its_unit_goes_to_its_own_socket_and_the_lent_units_stay(self) -> None:
@@ -1323,7 +1337,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
     def lent_turn(self) -> str:
         answered = self.turns.ask("model", local=True, gives_way_s=card.LEND_GIVES_WAY_S)
         self.held = [99]
-        return answered["ticket"]
+        return answered["id"]
 
     def answer_of(self, ticket: str) -> dict:
         return self.turns.again(ticket)
@@ -1332,21 +1346,21 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         model = self.lent_turn()
         self.turns.ask("coder")
         said = self.answer_of(model)
-        self.assertEqual((said["inUse"], said.get("giveWay")), (True, None))
+        self.assertEqual((said["inUse"], said["giveWay"]), (True, False))
         self.turns.follow_use(model, False)
         said = self.answer_of(model)
-        self.assertEqual((said["inUse"], said["giveWay"], said["for"]), (False, True, "coder"))
+        self.assertEqual((said["inUse"], said["giveWay"], said["giveWayFor"]), (False, True, "coder"))
         self.turns.follow_use(model, True)
-        self.assertIsNone(self.answer_of(model).get("giveWay"))
+        self.assertFalse(self.answer_of(model)["giveWay"])
         self.turns.ask("voice")
-        self.assertEqual(self.answer_of(model)["for"], "voice")
+        self.assertEqual(self.answer_of(model)["giveWayFor"], "voice")
 
     async def test_a_turn_taken_back_stands_by_the_request_waiting_at_its_door(self) -> None:
         self.held = [99]
         self.turns.ask("coder")
         self.now += 2
         self.turns.ask("model", local=True, gives_way_s=card.LEND_GIVES_WAY_S, waited_s=5)
-        self.assertEqual([one["service"] for one in self.turns.state()["queue"]], ["model", "coder"])
+        self.assertEqual([one["serviceName"] for one in self.turns.state()["queue"]], ["model", "coder"])
 
     async def lent_broker(self) -> tuple[card.Card, StandInOwner]:
         """A broker whose standing hold holds the lent turn, its owner read once, coder asking behind it."""
@@ -1381,7 +1395,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         broker.follow_use(now=0.0)
         broker.follow_use(now=card.LEND_QUIET_S - 0.1)
         self.assertTrue(self.answer_of(broker.ticket)["inUse"])
-        self.assertIsNone(self.answer_of(broker.ticket).get("giveWay"))
+        self.assertFalse(self.answer_of(broker.ticket)["giveWay"])
         broker.follow_use(now=card.LEND_QUIET_S)
         said = self.answer_of(broker.ticket)
         self.assertEqual((said["inUse"], said.get("resting", False)), (False, True))
@@ -1424,10 +1438,10 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_quieted_turn_gives_way_to_a_ticket_asking_at_its_rank(self) -> None:
         broker, owner = await self.lent_broker()
         broker.follow_use(now=0.0)
-        self.assertIsNone(self.answer_of(broker.ticket).get("giveWay"))
+        self.assertFalse(self.answer_of(broker.ticket)["giveWay"])
         await broker.quiet(now=1.0)
         said = self.answer_of(broker.ticket)
-        self.assertEqual((said["inUse"], said["giveWay"], said["for"]), (False, True, "coder"))
+        self.assertEqual((said["inUse"], said["giveWay"], said["giveWayFor"]), (False, True, "coder"))
 
     async def test_a_lent_turn_past_its_values_is_told_pass_once_at_its_boundary_or_unloaded_where_it_may_pause(self) -> None:
         broker, owner = await self.lent_broker()
@@ -1446,13 +1460,13 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         broker.follow_use(now=2.0)
         broker.follow_use(now=3.0)
         self.assertEqual(told, [b"PASS coder\n"])
-        self.assertIsNone(self.answer_of(broker.ticket).get("giveWay"))
+        self.assertFalse(self.answer_of(broker.ticket)["giveWay"])
         # A lend service that may pause gives way in the middle of a use instead, unloaded by the master.
         self.turns.turn_values = {"model": units.Turn(30.0, True)}.get
         broker.passed = None
         broker.follow_use(now=4.0)
         self.assertEqual(told, [b"PASS coder\n"])
-        self.assertEqual(self.answer_of(broker.ticket)["for"], "coder")
+        self.assertEqual(self.answer_of(broker.ticket)["giveWayFor"], "coder")
 
     async def out_broker(self) -> tuple[card.Card, list[bytes], str]:
         """A broker whose standing hold's units went out for coder, which now holds the turn, and the
@@ -1474,7 +1488,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         broker.holder = Hold()  # type: ignore[assignment]
         broker.ticket = self.lent_turn()
         await broker.units.refresh()
-        coder = self.turns.ask("coder")["ticket"]
+        coder = self.turns.ask("coder")["id"]
         await broker.evict(None, "coder asked")
         self.held = []
         self.assertTrue(self.turns.again(coder)["turn"])
@@ -1491,7 +1505,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         self.fail("not met within five seconds")
 
     def model_tickets(self) -> list[dict]:
-        return [one for one in self.turns.state()["queue"] if one["service"] == "model"]
+        return [one for one in self.turns.state()["queue"] if one["serviceName"] == "model"]
 
     async def test_want_puts_a_hold_whose_units_are_out_in_the_queue_by_its_seconds_and_loads_them_on_its_turn(self) -> None:
         broker, told, coder = await self.out_broker()
@@ -1500,7 +1514,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: bool(told))
         # It stands by its request's seconds, before the ticket coder asked just now.
         self.assertEqual(told[0].split()[:2], [b"QUEUED", b"2"])
-        self.assertGreaterEqual(self.model_tickets()[0]["waitedS"], 5.0)
+        self.assertGreaterEqual(self.model_tickets()[0]["waitedMs"], 5000)
         self.held = []
         self.turns.done(coder)
         await self.until(lambda: told[-1] == b"RESTORED\n")
@@ -1536,7 +1550,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         returning = broker.coming_back
         self.assertIsNotNone(returning)
         await self.until(lambda: bool(self.model_tickets()))
-        self.assertGreaterEqual(self.model_tickets()[0]["waitedS"], 5.0)
+        self.assertGreaterEqual(self.model_tickets()[0]["waitedMs"], 5000)
         # A WANT while the units come back after the claim leaves that return to them.
         broker.want(8.0)
         self.assertIsNone(broker.wanting)
@@ -1551,8 +1565,8 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         broker, owner = await self.lent_broker()
         api = card.UnitsApi(broker, self.turns, None, broker.pieces / "rules.json", "v")
         await broker.units.refresh()
-        self.assertEqual(api.state()["stage"], {"waiting": False, "waitingS": 0.0, "graphs": owner.graphs,
-                                                "waits": 0, "waitedS": 0.0})
+        self.assertEqual(api.state()["stage"], {"waiting": False, "waitingMs": 0, "graphs": owner.graphs,
+                                                "waits": 0, "waitedMs": 0})
         owner.graphs += 2
         await broker.units.refresh()
         self.assertEqual(api.state()["stage"]["graphs"], owner.graphs)
@@ -1576,11 +1590,12 @@ class HandOnTest(unittest.IsolatedAsyncioTestCase):
         self.broker = card.Card("k", "127.0.0.1", root / ".gpu.lock", [], root)
         self.broker.units = units.Units("model", self.owner, units.Store(root / "units.store"))
         self.broker.turns = self.turns
-        self.broker.ticket = self.turns.ask("model", local=True)["ticket"]
+        self.broker.ticket = self.turns.ask("model", local=True)["id"]
         self.broker.hold_lock = os.open(root / ".gpu.lock", os.O_RDWR | os.O_CREAT, 0o666)
         self.addCleanup(lambda: self.broker.hold_lock is not None and os.close(self.broker.hold_lock))
         self.api = card.UnitsApi(self.broker, self.turns, self.broker.units.store, root / "rules.json", "v")
         self.api.loop = asyncio.get_running_loop()
+        await self.broker.units.refresh()
 
     async def test_a_unit_left_on_the_card_keeps_the_lock_and_the_turn_and_the_master_hears_why(self) -> None:
         original = self.owner.ask
@@ -1589,18 +1604,23 @@ class HandOnTest(unittest.IsolatedAsyncioTestCase):
             return ["ERROR out of host memory"] if line.startswith("EVICT 1 ") else await original(line, until_end)
 
         self.owner.ask = weights_refused  # type: ignore[method-assign]
-        status, answer = await asyncio.to_thread(self.api.act, "evict", {"units": None, "reason": "coder asked"})
-        self.assertEqual(status, card.HTTPStatus.CONFLICT)
+        # the first of two units asked out goes, the master saying more follow: the hold keeps the card
+        status, answer = await asyncio.to_thread(self.api.move_one, "model/compute", units.EVICTED, "coder asked", True)
+        self.assertEqual((status, answer["name"], answer["state"] != units.RESIDENT), (card.HTTPStatus.OK, "model/compute", True))
+        self.assertIsNotNone(self.broker.hold_lock)
+        status, answer = await asyncio.to_thread(self.api.move_one, "model/weights", units.EVICTED, "coder asked")
+        self.assertEqual((status, answer["code"]), (card.HTTPStatus.CONFLICT, "conflict"))
         self.assertIn("model/weights: ERROR out of host memory", answer["error"])
-        self.assertEqual([(one["name"], one["ok"]) for one in answer["results"]], [("model/weights", False), ("model/compute", True)])
         self.assertIsNotNone(self.broker.hold_lock)
         self.assertIn(self.broker.ticket, self.turns.tickets)
-        # tried again with the owner answering: the rest goes out and the card is handed on
+        # tried again with the owner answering: the last goes out and the card is handed on
         self.owner.ask = original  # type: ignore[method-assign]
-        status, _ = await asyncio.to_thread(self.api.act, "evict", {"units": None, "reason": "coder asked"})
-        self.assertEqual(status, card.HTTPStatus.OK)
+        status, answer = await asyncio.to_thread(self.api.move_one, "model/weights", units.EVICTED, "coder asked")
+        self.assertEqual((status, answer["state"] != units.RESIDENT), (card.HTTPStatus.OK, True))
         self.assertIsNone(self.broker.hold_lock)
         self.assertEqual(self.turns.tickets, {})
+        self.assertEqual(await asyncio.to_thread(self.api.move_one, "model/nothing", units.EVICTED, "coder asked"),
+                         (card.HTTPStatus.NOT_FOUND, {"code": "not-found", "error": "no unit model/nothing stands on this card"}))
 
 
 class ClaimLowersTest(unittest.IsolatedAsyncioTestCase):
@@ -1687,6 +1707,51 @@ class LendingTest(unittest.TestCase):
                                                                         "CARD_STORE": f"{root}/units.store", "CARD_RULES": str(Path(root) / "no-rules.json")})]
             self.assertEqual(plain[0], f"occupants * from {root}/none")
             self.assertEqual(plain[4:], ["claims of the claimants the rules will declare"])
+
+
+class PiecesTest(unittest.IsolatedAsyncioTestCase):
+    """The saved slot pieces the head reads over the lending protocol (docs/api.md, 「The lending protocol」):
+    one slot file's pieces sent with `FETCH`, and the room on their filesystem said with `SPACE`."""
+
+    async def asyncSetUp(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root))
+        self.pieces = root / "pieces"
+        self.pieces.mkdir()
+        (self.pieces / "slot-a.0").write_bytes(b"first piece")
+        (self.pieces / "slot-a.1").write_bytes(b"second")
+        (self.pieces / "slot-b.0").write_bytes(b"another slot")
+        broker = card.Card("k", "127.0.0.1", None, [], self.pieces)
+        server = await asyncio.start_server(broker.serve, "127.0.0.1", 0)
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        self.port = server.sockets[0].getsockname()[1]
+
+    async def ask(self, line: str) -> asyncio.StreamReader:
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        self.addCleanup(writer.close)
+        writer.write(f"{line}\n".encode())
+        await writer.drain()
+        return reader
+
+    async def test_fetch_sends_each_piece_of_one_slot_file_with_its_size_then_end(self) -> None:
+        reader = await self.ask("FETCH k slot-a")
+        sent: list[tuple[str, bytes]] = []
+        while (line := (await asyncio.wait_for(reader.readline(), 5)).decode().strip()) != "END":
+            word, name, size = line.split(" ")
+            self.assertEqual(word, "PIECE")
+            sent.append((name, await reader.readexactly(int(size))))
+        self.assertEqual(sent, [("slot-a.0", b"first piece"), ("slot-a.1", b"second")])
+        # a name that is not a plain file name sends nothing but its end
+        self.assertEqual(await asyncio.wait_for((await self.ask("FETCH k ../slot-a")).readline(), 5), b"END\n")
+
+    async def test_space_says_the_room_on_the_pieces_filesystem_and_what_one_slot_file_takes(self) -> None:
+        said = (await asyncio.wait_for((await self.ask("SPACE k slot-a")).readline(), 5)).decode().split()
+        usage = __import__("shutil").disk_usage(self.pieces)
+        self.assertEqual((said[0], int(said[2]), int(said[3])), ("SPACE", usage.total, len(b"first piece") + len(b"second")))
+        self.assertGreater(int(said[1]), 0)
+        self.assertEqual((await asyncio.wait_for((await self.ask("SPACE k .hidden")).readline(), 5)).split()[3], b"0")
+        self.assertEqual(await asyncio.wait_for((await self.ask("SPACE wrong slot-a")).readline(), 5), b"REFUSED\n")
 
 
 class DeskLockTest(unittest.TestCase):

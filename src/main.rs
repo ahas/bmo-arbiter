@@ -1,8 +1,8 @@
-//! `card-master` (docs/api.md, 「The master's command line」): with no verb it stands as the master,
-//! answering on its loopback port; `--once` reads every slave once and prints the picture; `check` says
-//! what the placement rules would place where; `push` writes each node the part of them that reaches it;
-//! `rules --node <node> --json` prints one node's part; `place` and `remove` ask the running master to
-//! move a service; `install`, `uninstall`, `lend` and `occupants` reach the node arbiter on a node.
+//! `bmo-arbiter` (docs/api.md, 「The command line」): with no verb it stands as the master, answering on its
+//! loopback port; `--once` reads every slave once and prints the cluster; `mcp` is the harness plugin's MCP
+//! server; `check` says what the placement rules would place where; `push` writes each node the part of them
+//! that reaches it; `rules --node <node> --json` prints one node's part; `place` and `remove` ask the running
+//! master to move a service; `install`, `uninstall`, `lend` and `occupants` reach the node arbiter on a node.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,17 +14,26 @@ use bmo_arbiter::install::{
   InstallOptions, Timing, install, lend, read_occupants, rival_units_from_env, uninstall,
 };
 use bmo_arbiter::master::Master;
-use bmo_arbiter::placement::{Board, Placer, Verb as PlaceVerb, declaration_roots_from_env};
+use bmo_arbiter::placement::{Board, Placer, declaration_roots_from_env};
 use bmo_arbiter::reach::{NodeRegistry, NodeShell, home};
 use bmo_arbiter::rules::{NodeFacts, rules_path};
-use bmo_arbiter::serve::{LiveWorld, Settings, once, serve};
+use bmo_arbiter::serve::{LiveWorld, Settings, master_port, master_token, once, serve};
 use bmo_arbiter::verbs::{
   Roots, carry_rules, check_lines, code_root, log_push, misfits, reach_nodes, standing_rules,
 };
+use bmo_arbiter_client::ArbiterClient;
+use bmo_arbiter_client::placements::PlacementKind;
+use bmo_arbiter_plugin::{ArbiterServer, Clients};
 use clap::{Parser, Subcommand};
+use rmcp::ServiceExt;
+use rmcp::transport::stdio;
 
 #[derive(Parser)]
-#[command(name = "card-master", about = "The card arbiter's master")]
+#[command(
+  name = "bmo-arbiter",
+  version,
+  about = "The card arbiter's master and its harness plugin"
+)]
 struct Cli {
   /// The data root whose placements hold the rules.
   #[arg(long, env = "BMO_DATA_DIR", global = true)]
@@ -43,6 +52,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Verb {
+  /// The harness plugin's MCP server on standard input and output.
+  Mcp {
+    /// The master's base address; `http://127.0.0.1:<CARD_MASTER_PORT>` where not named.
+    #[arg(long)]
+    master: Option<String>,
+    /// The node arbiter's base address; `http://127.0.0.1:<CARD_TURN_PORT>` where not named.
+    #[arg(long)]
+    card: Option<String>,
+    /// The master's token; `CARD_MASTER_TOKEN` where not named.
+    #[arg(long)]
+    token: Option<String>,
+  },
   /// Read the rules and say what they would place where, writing nothing.
   Check,
   /// Write each node whose arbiter answers, or each node named, the part of the rules that reaches it.
@@ -136,7 +157,7 @@ async fn shell(roots: &Roots, node: &str) -> Result<NodeShell, String> {
 async fn stand(roots: Roots, once_only: bool) -> Result<(), String> {
   let settings = Settings::from_env();
   if let Err(why) = &roots.registry {
-    eprintln!("card-master: {why}; no node is read");
+    eprintln!("bmo-arbiter: {why}; no node is read");
   }
   let world = Arc::new(LiveWorld::new(roots.registry.clone(), roots.code_root.clone()));
   let master = Master::new(world, rules_path(&roots.data_root), settings.read_every.as_secs_f64());
@@ -157,14 +178,47 @@ async fn stand(roots: Roots, once_only: bool) -> Result<(), String> {
   serve(master, settings, placer).await.map_err(|fault| fault.to_string())
 }
 
+/// The node arbiter's port on this machine: `CARD_TURN_PORT`, else 7439.
+fn card_port() -> u16 {
+  std::env::var("CARD_TURN_PORT")
+    .ok()
+    .and_then(|port| port.trim().parse().ok())
+    .unwrap_or(7439)
+}
+
+/// The harness plugin's MCP server over the master and this machine's node arbiter, until its harness
+/// closes it.
+async fn mcp(master: Option<String>, card: Option<String>, token: Option<String>) -> Result<bool, String> {
+  let master = master.unwrap_or_else(|| format!("http://127.0.0.1:{}", master_port()));
+  let card = card.unwrap_or_else(|| format!("http://127.0.0.1:{}", card_port()));
+  let clients = Clients {
+    master: ArbiterClient::new(&master, token.or_else(master_token))?,
+    node: ArbiterClient::new(&card, None)?,
+  };
+  let served = ArbiterServer::new(clients)
+    .serve(stdio())
+    .await
+    .map_err(|why| format!("the MCP session did not start: {why}"))?;
+  served
+    .waiting()
+    .await
+    .map_err(|why| format!("the MCP session ended in a failure: {why}"))?;
+  Ok(true)
+}
+
 /// A verb that reaches the nodes; whether it did all it says, or why it could not.
 async fn run(verb: Verb, roots: &Roots) -> Result<bool, String> {
   match verb {
+    Verb::Mcp {
+      master,
+      card,
+      token,
+    } => mcp(master, card, token).await,
     Verb::Place { service, to } => {
-      ask_master(Settings::from_env().port, PlaceVerb::Place, &service, &to).await
+      ask_master(master_port(), master_token(), PlacementKind::Place, &service, &to).await
     }
     Verb::Remove { service, from } => {
-      ask_master(Settings::from_env().port, PlaceVerb::Remove, &service, &from).await
+      ask_master(master_port(), master_token(), PlacementKind::Remove, &service, &from).await
     }
     Verb::Check => {
       let rules = standing_rules(roots)?;
@@ -177,7 +231,7 @@ async fn run(verb: Verb, roots: &Roots) -> Result<bool, String> {
       }
       let faults = misfits(&rules, &cards);
       for fault in &faults {
-        eprintln!("card-master: {fault}");
+        eprintln!("bmo-arbiter: {fault}");
       }
       Ok(faults.is_empty())
     }
@@ -205,7 +259,7 @@ async fn run(verb: Verb, roots: &Roots) -> Result<bool, String> {
             );
           }
           Err(fault) => {
-            eprintln!("card-master: the rules were not written to {}: {fault}", node.facts.name);
+            eprintln!("bmo-arbiter: the rules were not written to {}: {fault}", node.facts.name);
             failed = true;
           }
         }
@@ -307,7 +361,7 @@ async fn main() -> ExitCode {
     Ok(true) => ExitCode::SUCCESS,
     Ok(false) => ExitCode::FAILURE,
     Err(fault) => {
-      eprintln!("card-master: {fault}");
+      eprintln!("bmo-arbiter: {fault}");
       ExitCode::FAILURE
     }
   }

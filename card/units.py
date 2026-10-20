@@ -297,8 +297,9 @@ class Timing:
     to: str | None = None
 
     def shown(self) -> dict:
-        said = {"ms": round(self.ms, 1), "bytes": self.bytes, "at": round(self.at, 3)}
-        return said if self.to is None else {**said, "to": self.to}
+        """A move as the card shows it (docs/api.md, 「Card units」): how long it took, how much it moved, when it
+        ended in epoch milliseconds, and where an unload went."""
+        return {"tookMs": round(self.ms), "bytes": self.bytes, "at": round(self.at * 1000), "to": self.to}
 
 
 @dataclass(frozen=True)
@@ -547,9 +548,10 @@ class Units:
                 continue
             slots = self.store.slots if self.store is not None else {}
             state = self.part_state(part)
+            since = self.since.get(part)
             units.append({
-                "name": f"{self.service}/{part}", "service": self.service, "part": part,
-                "evictable": self.evictable(), "state": state, "since": self.since.get(part),
+                "name": f"{self.service}/{part}", "holderName": self.service, "part": part,
+                "evictable": self.evictable(), "state": state, "sinceAt": None if since is None else round(since * 1000),
                 "vramMiB": round(sum(buffer.bytes for buffer in buffers) / 2**20),
                 "ramMiB": round(sum(buffer.ram_bytes for buffer in buffers if buffer.state == RAM) / 2**20),
                 "buffers": [{"id": buffer.id, "bytes": buffer.bytes, "state": buffer.state, "clean": buffer.clean,
@@ -558,12 +560,14 @@ class Units:
                 "lastLoad": self.last_load[part].shown() if part in self.last_load else None,
                 "lastLower": self.last_lower[part].shown() if part in self.last_lower else None,
                 "reason": self.reason if state != RESIDENT else None,
+                "door": None,
             })
         return units
 
     def stage_shown(self) -> dict:
-        return {"waiting": self.stage.waiting, "waitingS": round(self.stage.waiting_s, 1), "graphs": self.stage.graphs,
-                "waits": self.stage.waits, "waitedS": round(self.stage.waited_s, 1)}
+        """The owner's door as the card shows it, its spans in whole milliseconds."""
+        return {"waiting": self.stage.waiting, "waitingMs": round(self.stage.waiting_s * 1000), "graphs": self.stage.graphs,
+                "waits": self.stage.waits, "waitedMs": round(self.stage.waited_s * 1000)}
 
 
 class Owners:
@@ -674,7 +678,7 @@ def processes_shown(running: list[tuple[int, int]] | None, service_of: Callable[
     None, and its memory."""
     if running is None:
         return None
-    return [{"pid": pid, "name": name_of(pid), "service": service_of(pid), "usedMiB": round(used / 2**20)} for pid, used in running]
+    return [{"pid": pid, "name": name_of(pid), "serviceName": service_of(pid), "usedMiB": round(used / 2**20)} for pid, used in running]
 
 
 def read_rules(path: Path) -> tuple[dict | None, float | None, str | None]:

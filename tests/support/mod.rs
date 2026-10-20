@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 pub const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-/// Directories no check reads: build output, git's own, and Python's byte-code caches.
-const SKIPPED: [&str; 3] = ["target", ".git", "__pycache__"];
+/// Directories no check reads: build output, git's own, Python's byte-code caches, and the TypeScript
+/// package's installed dependencies.
+const SKIPPED: [&str; 4] = ["target", ".git", "__pycache__", "node_modules"];
 
 pub fn is_skipped(name: &str) -> bool {
   SKIPPED.contains(&name)

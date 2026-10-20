@@ -1,5 +1,6 @@
-//! The repository's layout: one Cargo package at the root and no other build tool's manifest there, no
-//! directory named after its parent, and one version.
+//! The repository's layout: the master's Cargo package at the root with the crates it publishes as its
+//! workspace's members, no other build tool's manifest at the root, no directory named after its parent, and
+//! one version.
 
 mod support;
 
@@ -36,14 +37,13 @@ fn only_cargo_manifests_at_the_root() {
 }
 
 #[test]
-fn the_root_manifest_is_the_only_cargo_one() {
-  let root = Path::new(ROOT).join("Cargo.toml");
-  let others: Vec<String> = files_under(Path::new(ROOT))
+fn the_cargo_manifests_are_the_roots_and_its_published_crates() {
+  let manifests: Vec<String> = files_under(Path::new(ROOT))
     .into_iter()
-    .filter(|path| path.file_name().is_some_and(|name| name == "Cargo.toml") && *path != root)
+    .filter(|path| path.file_name().is_some_and(|name| name == "Cargo.toml"))
     .map(|path| shown(&path))
     .collect();
-  assert!(others.is_empty(), "the master is one package, yet these stand too: {others:?}");
+  assert_eq!(manifests, ["Cargo.toml", "crates/client/Cargo.toml", "crates/plugin/Cargo.toml"]);
 }
 
 fn nested_twins(dir: &Path, twins: &mut Vec<String>) {
