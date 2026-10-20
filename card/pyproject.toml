@@ -1,7 +1,8 @@
 [project]
 name = "bmo-card"
-version = "0.1.0-rev.2"
+version = "0.1.0-rev.3"
 description = "The card arbiter on a GPU node: the rules of the node's card lock (docs/node-arbiter.md)"
+license = { text = "MIT" }
 requires-python = "==3.12.*"
 dependencies = [
   # Read only where the card is a desktop's first, to see the desktop's use without starting a GPU tool.

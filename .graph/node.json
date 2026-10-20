@@ -12,7 +12,7 @@
       "node/lock",
       "node/units"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393482
   },
   {
@@ -30,7 +30,7 @@
       "node/lock",
       "node/occupants"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497544562
   },
   {
@@ -48,7 +48,7 @@
       "node/units",
       "node/claims"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393472
   },
   {
@@ -65,7 +65,7 @@
       "node/units",
       "node/lock"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393499
   },
   {
@@ -80,7 +80,7 @@
     "needs": [
       "node/occupants"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393477
   },
   {
@@ -93,7 +93,7 @@
     "symbols": [],
     "aliases": [],
     "needs": [],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497387939
   },
   {
@@ -108,7 +108,7 @@
     "needs": [
       "node/hold"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497544579
   },
   {
@@ -124,7 +124,7 @@
     "needs": [
       "node/occupants"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393492
   }
 ]

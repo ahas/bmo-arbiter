@@ -242,9 +242,7 @@ pub fn bun() -> String {
 pub fn hub_console() -> Result<String, String> {
   match std::env::var_os("BMO_HUB_CONSOLE").filter(|one| !one.is_empty()) {
     Some(named) => Ok(named.to_string_lossy().into_owned()),
-    None => {
-      Err("BMO_HUB_CONSOLE names no console script, so a node of the hub kind is not reached".into())
-    }
+    None => Err("BMO_HUB_CONSOLE names no console script, so a node of the hub kind is not reached".into()),
   }
 }
 

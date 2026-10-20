@@ -21,7 +21,7 @@
       "client/placements",
       "client/wire"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393466
   },
   {
@@ -39,7 +39,7 @@
     "needs": [
       "plugin/tools"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393461
   },
   {
@@ -61,7 +61,7 @@
       "client/card",
       "client/placements"
     ],
-    "base": "660a975937383b16c94c8be3245410efb4601816",
+    "base": "4925996f4b3513dd4c68313b4f2fd650b58f9ffe",
     "changed": 1792497393456
   }
 ]

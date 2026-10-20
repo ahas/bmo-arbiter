@@ -1,9 +1,9 @@
 {
   "name": "bmo-arbiter-client",
-  "version": "0.1.0-rev.2",
+  "version": "0.1.0-rev.3",
   "description": "The arbiter's client, generated from its OpenAPI document: every body as a type and a typed call for every route of the master and the node arbiter.",
   "type": "module",
-  "private": true,
+  "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
     "./schema": "./src/schema.ts"

@@ -26,8 +26,8 @@ the master's adapter verbs. It is an upstream unit: a harness takes a turn on a 
 | `docs/` | The canonical statements of what the arbiter does, and the OpenAPI document |
 | `deploy/` | The master's systemd user unit, which a deployment links from the deploy tree |
 
-At the root stand the Cargo manifest, the version, `testbed.toml` with its Korean ledger, `rustfmt.toml`
-and `CLAUDE.md`.
+At the root stand the Cargo manifest, the version, the MIT license, `testbed.toml` with its Korean ledger,
+`rustfmt.toml` and `CLAUDE.md`.
 
 ## Documents
 
@@ -55,3 +55,7 @@ cargo run -p bmo-arbiter-plugin --example openapi > docs/openapi.json
 bun run --cwd packages/arbiter-client generate
 bun run --cwd packages/arbiter-client check
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
