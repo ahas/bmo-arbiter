@@ -1,3 +1,7 @@
+# The card node's own arbiter, hand-installed on that machine: the master's `install` verb uploads the
+# card package, and this file is linked into the node's user units and enabled there by hand. It stands
+# outside every deployment's units glob and carries no deploy mark, so no deployment of the master's
+# repository links or restarts it (docs/node-arbiter.md).
 [Unit]
 Description=The card arbiter, keeping the rules of this node's card lock (docs/node-arbiter.md)
 After=network-online.target
