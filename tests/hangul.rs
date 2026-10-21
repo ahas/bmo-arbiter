@@ -14,7 +14,7 @@ const LEDGER: &str = "korean-ledger.json";
 
 /// The Hangul syllables block, U+AC00 to U+D7A3, named by code point so this file holds none of it.
 fn is_hangul(c: char) -> bool {
-  ('\u{AC00}'..='\u{D7A3}').contains(&c)
+  (0xAC00..=0xD7A3).contains(&u32::from(c))
 }
 
 /// How many lines of `text` hold Hangul.

@@ -2,10 +2,13 @@
 testbed = 0
 name = "bmo-arbiter"
 
-# Every test is a test of the one Cargo package: the node arbiter's Python tests under `tests/card/` are
-# run by a Cargo test of their own, so the suite gathers them with the rest.
+# The Cargo package, and the TypeScript client in `packages/arbiter-client`, a project of its own whose own
+# `check` script is its check (`docs/api.md`, 「The clients and the harness plugin」). Every test is a test
+# of the one Cargo package: the node arbiter's Python tests under `tests/card/` are run by a Cargo test of
+# their own, so the suite gathers them with the rest.
 [test]
-languages = ["cargo"]
+languages = ["cargo", "bun"]
+setup = ["bun install --cwd packages/arbiter-client --frozen-lockfile"]
 
 [check]
 quick = ["layout", "dependencies", "korean"]
@@ -28,11 +31,6 @@ lane = "wide"
 [[check.step]]
 id = "fmt"
 command = "cargo fmt --all --check"
-
-# The TypeScript client: its types as docs/openapi.json generates them now, and its typecheck.
-[[check.step]]
-id = "arbiter-client"
-command = "bun install --cwd packages/arbiter-client --frozen-lockfile && bun run --cwd packages/arbiter-client check"
 
 [build]
 binaries = ["bmo-arbiter"]
