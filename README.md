@@ -18,7 +18,7 @@ the master's adapter verbs. It is an upstream unit: a harness takes a turn on a 
 
 | Folder | Holds |
 |---|---|
-| `.graph/` | The code dependency graph: one node per feature with its files and the features it needs, and the APIs this repository exposes and calls |
+| `.graph/` | The code dependency graph: one node per feature with its files and the features it needs, and the APIs this repository exposes and calls. Its area files are generated in the checkout and untracked, so a fresh checkout builds them again, while `settings.toml` is the repository's configuration and stays tracked |
 | `src/` | The master's package: the library and the `bmo-arbiter` binary |
 | `crates/` | The crates the arbiter publishes: `client/`, every body and a call for every route, and `plugin/`, the MCP server, the `bmo-arbiter` skill and the OpenAPI document's generator |
 | `packages/` | The TypeScript client, `arbiter-client/`, generated from `docs/openapi.json` |
