@@ -322,7 +322,7 @@ impl Master {
         continue;
       };
       self.reached.insert(name.clone(), reached);
-      match asked.and_then(|asked| answer_of(&asked)) {
+      match asked.and_then(|asked| card_of(&asked).ok()) {
         None => {
           self.answering.remove(&name);
         }
@@ -358,6 +358,7 @@ impl Master {
           },
         },
         Some(before) => NodeView {
+          role,
           link: Link {
             state: LinkState::Lost,
             since: if before.link.state == LinkState::Lost { before.link.since } else { Some(now) },
@@ -417,13 +418,10 @@ impl Master {
       });
     }
     while let Some(Ok((name, asked, read_ms))) = asking.join_next().await {
-      let answer = answer_of(&asked);
-      let error = answer.is_none().then(|| {
-        let said = asked.stderr.trim();
-        let said = if said.is_empty() { format!("exit {}", asked.code) } else { said.to_owned() };
-        tail(&said, 200).to_owned()
-      });
-      self.take(&name, answer, read_ms, error);
+      match card_of(&asked) {
+        Ok(answer) => self.take(&name, Some(answer), read_ms, None),
+        Err(error) => self.take(&name, None, read_ms, Some(error)),
+      }
     }
     self.act().await;
   }
@@ -858,12 +856,21 @@ fn cluster_card(
   }
 }
 
-/// A slave's card, where the call came back whole with one.
-fn answer_of(asked: &RunResult) -> Option<Card> {
+/// The card a slave answered, or why the read gave none: the shell's error where the command failed, else
+/// what the slave said where that is no card, as an arbiter of another release answers a route it does not
+/// serve.
+fn card_of(asked: &RunResult) -> Result<Card, String> {
   if asked.code != 0 {
-    return None;
+    let said = asked.stderr.trim();
+    let said = if said.is_empty() { format!("exit {}", asked.code) } else { said.to_owned() };
+    return Err(tail(&said, 200).to_owned());
   }
-  serde_json::from_str::<Card>(&asked.stdout).ok()
+  let said = asked.stdout.trim();
+  if said.is_empty() {
+    return Err("the slave answered nothing".into());
+  }
+  serde_json::from_str::<Card>(said)
+    .map_err(|fault| format!("the slave's answer is no card ({fault}): {}", tail(said, 200)))
 }
 
 /// A ticket's plan that unloads another occupant's units held while the card's turn may not pass to it

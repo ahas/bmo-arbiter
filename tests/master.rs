@@ -10,6 +10,7 @@ use bmo_arbiter::master::{
   BoxFuture, Master, Reached, Shell, World, asker_of, awaited_ticket, unload_reason,
 };
 use bmo_arbiter::reach::RunResult;
+use bmo_arbiter_client::cluster::LinkState;
 use serde_json::{Value, json};
 
 const RULES: &str = r#"
@@ -47,6 +48,8 @@ struct Stand {
   answer: Mutex<Value>,
   /// What a node's slave answers in place of `answer`, where the test sets it.
   answers: Mutex<HashMap<String, Value>>,
+  /// A node's role in the node service in place of `model`, where the test sets it.
+  roles: Mutex<HashMap<String, String>>,
   commands: Mutex<Vec<String>>,
   nodes: Vec<String>,
   meet: Option<(&'static str, tokio::sync::Barrier)>,
@@ -96,9 +99,10 @@ impl World for StandWorld {
 
   fn reach<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Reached, String>> {
     let shell: Arc<dyn Shell> = Arc::new(StandShell(self.0.clone(), name.to_owned()));
+    let role = self.0.roles.lock().unwrap().get(name).cloned().unwrap_or_else(|| "model".into());
     Box::pin(async move {
       Ok(Reached {
-        role: Some("model".into()),
+        role: Some(role),
         shell,
       })
     })
@@ -167,6 +171,7 @@ fn master_of(
   let stand = Arc::new(Stand {
     answer: Mutex::new(answer),
     answers: Mutex::new(HashMap::new()),
+    roles: Mutex::new(HashMap::new()),
     commands: Mutex::new(Vec::new()),
     nodes: nodes.iter().map(|node| node.to_string()).collect(),
     meet,
@@ -636,4 +641,38 @@ async fn a_group_placed_on_empty_cards_unloads_every_node_at_once_once_the_other
   master.poll().await;
   let evicted = sent(&stand, "evict");
   assert_eq!(evicted.len(), 4, "{evicted:?}");
+}
+
+#[tokio::test]
+async fn a_slave_answering_no_card_is_lost_with_its_answer_and_shows_the_role_read_last() {
+  // An arbiter of another release answers the probe with a route it does not serve.
+  let (mut master, stand) = master(json!({ "error": "no such path" }));
+  master.discover().await;
+  master.poll().await;
+  let node = |master: &Master| master.state().nodes.into_iter().find(|node| node.name == "a").unwrap();
+  let lost = node(&master);
+  assert_eq!(lost.link.state, LinkState::Lost);
+  let error = lost.link.error.unwrap();
+  assert!(error.contains("is no card") && error.contains("no such path"), "{error}");
+  let said = master.state().events;
+  assert!(
+    said
+      .iter()
+      .any(|event| event.code == "node-lost" && event.node_name.as_deref() == Some("a")),
+    "a node never reached is said lost: {said:?}"
+  );
+
+  // The node service gives the node another role while its slave still gives no card.
+  stand.roles.lock().unwrap().insert("a".into(), "model+train".into());
+  master.discover().await;
+  master.poll().await;
+  assert_eq!(node(&master).role.as_deref(), Some("model+train"));
+
+  // A slave of this release stands there: the next read connects it.
+  *stand.answer.lock().unwrap() = slave(1500.0, store_resident(), None, json!([]));
+  master.poll().await;
+  let connected = node(&master);
+  assert_eq!(connected.link.state, LinkState::Connected);
+  assert_eq!(connected.role.as_deref(), Some("model+train"));
+  assert!(connected.link.error.is_none());
 }

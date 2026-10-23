@@ -249,14 +249,21 @@ fn claimant(card: &CardView) -> Option<&str> {
 /// What changed between two views of a node, each said once for the notes.
 pub fn changes(before: Option<&NodeView>, after: &NodeView) -> Vec<Change> {
   let mut said = Vec::new();
-  let Some(before) = before else { return said };
+  let lost = || match after.link.error.as_deref().filter(|error| !error.is_empty()) {
+    Some(error) => Change::new("node-lost", format!("the master lost the node ({error})")),
+    None => Change::new("node-lost", "the master lost the node"),
+  };
+  // A node first read as lost is said all the same, so one never reached since the master started is named.
+  let Some(before) = before else {
+    if after.link.state == LinkState::Lost {
+      said.push(lost());
+    }
+    return said;
+  };
   if before.link.state != after.link.state {
     said.push(match after.link.state {
       LinkState::Connected => Change::new("node-reconnected", "the master reaches the node again"),
-      LinkState::Lost => match after.link.error.as_deref().filter(|error| !error.is_empty()) {
-        Some(error) => Change::new("node-lost", format!("the master lost the node ({error})")),
-        None => Change::new("node-lost", "the master lost the node"),
-      },
+      LinkState::Lost => lost(),
     });
   }
   let (Some(was), Some(now)) = (before.cards.first(), after.cards.first()) else {

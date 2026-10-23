@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.3**.
+This document states version **0.1.0-rev.4**.
 
 ## The wire format
 
@@ -211,7 +211,7 @@ it. Any other method and path is answered `404` `no-route`.
   | --- | --- |
   | `master` | `version`, `startedAt`, `rulesFile`, `rulesLoadedAt?`, `rulesError?`, `readEveryMs` |
   | `groups` | each `name`, `pool`, `nodeNames`, `totalMiB`, `freeMiB` |
-  | `nodes` | each `name`, `role?`, `desktop`, `link` (`state` `connected` or `lost`, `sinceAt?`, `readAt?`, `lastReadMs?`, `error?`), `version?` (its slave's), `rules?` (`loadedAt?`, `error?`), `occupants`, `cards` |
+  | `nodes` | each `name`, `role?` (the node service's as last read), `desktop`, `link` (`state` `connected` or `lost`, `sinceAt?`, `readAt?`, `lastReadMs?`, `error?`: why the last read gave no card, the shell's error or the slave's answer), `version?` (its slave's), `rules?` (`loadedAt?`, `error?`), `occupants`, `cards` |
   | `nodes[].cards` | each `index`, `name?`, `totalMiB?`, `usedMiB?`, `freeMiB?`, `units`, `turn?` (`serviceName`, `ticketId`, `waitedMs`, `inUse?`), `queue`, `claim?` (`claimantName`, `claimedAt?`), `ram` (`dumpsMiB`, `availableMiB?`, `maxMiB?`, `floorMiB?`, `dump?`), `stage` (`waiting`, `waitingMs`), `store?` (`path`, `bytes`, `extents?`, `slotsUsed`, `bytesUsed`, `error?`), `processes?` |
   | `…units` | each `name` (`<service>/<part>@<node>`), `serviceName`, `part`, `vramMiB`, `state` (`resident`, `ram`, `evicted`, `mixed`), `ramMiB`, `sinceAt?`, `evictable`, `reason?`, `loadMs?`, `unloadMs?`, `kind?` (`resident`, `on-demand`, `fill`), `detail?` (「Unit descriptions」) |
   | `…queue` | each `ticketId`, `serviceName`, `position?`, `waitedMs`, `waitMs?`, `unitName?`, `vramMiB?` |
@@ -399,7 +399,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.3+<commit>` or `0.1.0-rev.3+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.4+<commit>` or `0.1.0-rev.4+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 
@@ -518,7 +518,7 @@ carried.
   | Code | What happened |
   | --- | --- |
   | `node-reconnected` | the master reaches the node again |
-  | `node-lost` | the master lost the node; the text carries the error where there is one |
+  | `node-lost` | the master lost the node, or has not reached it since it started; the text carries the error where there is one |
   | `card-claimed` | a claimant claimed the card |
   | `card-given-back` | a claimant gave the card back |
   | `stage-waiting` | the engine waits at the card's stage, its units out |

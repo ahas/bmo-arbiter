@@ -243,6 +243,12 @@ sequenceDiagram
     what brings it back, and the master tries no restore of it meanwhile.
   - **How often it reads:** every two seconds, and the node service once a minute;
     `CARD_MASTER_READ_EVERY_MS` and `CARD_MASTER_DISCOVER_EVERY_MS` set them otherwise.
+  - **A node whose slave gives no card is lost,** and read again at every round all the same, so it is
+    connected at the first read that gives one. It is said once in the notes when it is lost, a node never
+    reached since the master started among them, with why: the shell's error, or what the slave answered
+    where that answer is no card, as an arbiter of another release answers a route it does not serve.
+  - **A node's role is the node service's as last read,** lost or connected: a role changed in the node
+    service shows, and chooses the node's group, from the next discovery on.
 - **The slave hands the card on only once every unit asked for is out.** The master asks for each unit
   apart, saying with every one of a holder's but the last that more of that holder's units follow
   (`keepsTurn`); the standing hold's lock and turn are let go once the last is out. Where a unit stays on
