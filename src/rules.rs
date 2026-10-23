@@ -20,6 +20,12 @@ pub const RULES_FILE: &str = "card-rules.yaml";
 // The default rank of a unit the rules give none.
 pub const DEFAULT_PRIORITY: f64 = 50.0;
 
+/// The tier of an occupant neither the rules nor its declaration give one (docs/placement.md, 「Tiers」).
+pub const DEFAULT_TIER: f64 = 2.0;
+
+/// The tier of a claimant whose entry gives none: it takes the card outright.
+pub const CLAIMANT_TIER: f64 = 0.0;
+
 /// The rules file under a data root's placements.
 pub fn rules_path(data_root: &Path) -> PathBuf {
   data_root.join("placements").join(RULES_FILE)
@@ -120,6 +126,13 @@ pub struct Claimant {
   pub first: bool,
   pub seen_by: SeenBy,
   pub ram_free: RamFree,
+  pub tier: Num,
+}
+
+/// What one entry of the rules' `occupants` says: a claimant, or an occupant's tier alone.
+enum OccupantEntry {
+  Claimant(Claimant),
+  Tier(String, Num),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -240,6 +253,10 @@ pub struct Rules {
   /// them from the declarations, and every node is handed them whole.
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub turns: BTreeMap<String, TurnValues>,
+  /// Every occupant's tier, keyed by name (docs/placement.md, 「Tiers」): read from the file the tiers its
+  /// `occupants` give, and with the declarations every declared service's; every node is handed them whole.
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+  pub tiers: BTreeMap<String, Num>,
 }
 
 /// A rules file that will not read: the file and what is wrong where.
@@ -319,18 +336,25 @@ impl Reader<'_> {
     }
   }
 
-  fn claimant(&self, value: &Yaml, place: &str) -> Read<Claimant> {
-    self.object(value, place)?;
+  fn occupant(&self, value: &Yaml, place: &str) -> Read<OccupantEntry> {
+    let keys = self.object(value, place)?;
     let name = self.text(value.get("name"), &format!("{place}.name"))?;
     if !occupant_word(&name) {
       return self.fail(format!(
         "{place}.name must be a word an occupants file holds (lower-case letters, digits and -)"
       ));
     }
-    if value.get("claims") != Some(&Yaml::Bool(true)) {
-      return self.fail(format!(
-        "{place}.claims must be true: only occupants that take the whole card stand here"
-      ));
+    let claims = self.flag(value.get("claims"), &format!("{place}.claims"), false)?;
+    if !claims {
+      if let Some((key, _)) =
+        keys.iter().find(|(key, _)| !["name", "tier", "claims"].contains(&key.as_str()))
+      {
+        return self.fail(format!(
+          "{place}.{key} belongs to an occupant that takes the whole card (claims: true); one that does not says its tier alone"
+        ));
+      }
+      let tier = self.number(value.get("tier"), &format!("{place}.tier"), DEFAULT_TIER)?;
+      return Ok(OccupantEntry::Tier(name, tier));
     }
     let empty = Yaml::Map(Vec::new());
     let seen = match value.get("seen_by") {
@@ -354,7 +378,7 @@ impl Reader<'_> {
         given => self.text(given, &format!("{place}.seen_by.{key}")).map(Some),
       }
     };
-    Ok(Claimant {
+    Ok(OccupantEntry::Claimant(Claimant {
       name,
       claims: true,
       first: self.flag(value.get("first"), &format!("{place}.first"), true)?,
@@ -364,7 +388,8 @@ impl Reader<'_> {
         containers: optional_text("containers")?,
       },
       ram_free,
-    })
+      tier: self.number(value.get("tier"), &format!("{place}.tier"), CLAIMANT_TIER)?,
+    }))
   }
 
   fn selector(&self, value: Option<&Yaml>, place: &str) -> Read<Selector> {
@@ -448,12 +473,19 @@ pub fn parse_rules(source: &str, file: &str) -> Result<Rules, RulesError> {
   }
 
   let mut occupants: Vec<Claimant> = Vec::new();
+  let mut tiers: BTreeMap<String, Num> = BTreeMap::new();
   for (at, one) in reader.list(read.get("occupants"), "occupants")?.iter().enumerate() {
-    let claimant = reader.claimant(one, &format!("occupants[{at}]"))?;
-    if occupants.iter().any(|standing| standing.name == claimant.name) {
-      return reader.fail(format!("occupants names {} twice", claimant.name));
+    let (name, tier) = match reader.occupant(one, &format!("occupants[{at}]"))? {
+      OccupantEntry::Claimant(claimant) => {
+        let named = (claimant.name.clone(), claimant.tier);
+        occupants.push(claimant);
+        named
+      }
+      OccupantEntry::Tier(name, tier) => (name, tier),
+    };
+    if tiers.insert(name.clone(), tier).is_some() {
+      return reader.fail(format!("occupants names {name} twice"));
     }
-    occupants.push(claimant);
   }
 
   let mut groups = Vec::new();
@@ -596,6 +628,7 @@ pub fn parse_rules(source: &str, file: &str) -> Result<Rules, RulesError> {
     units,
     rules,
     turns: BTreeMap::new(),
+    tiers,
   })
 }
 
@@ -664,6 +697,12 @@ impl Rules {
     self.units.iter().find(|spec| matches(&spec.unit, name))
   }
 
+  /// An occupant's tier as the rules carry it, the default where they name none (docs/placement.md,
+  /// 「Tiers」).
+  pub fn tier_of(&self, occupant: &str) -> f64 {
+    self.tiers.get(occupant).map_or(DEFAULT_TIER, |tier| tier.0)
+  }
+
   /// The part of the rules a node's slave is pushed: the groups that choose it, the units that may stand
   /// there, and the rules that can touch it.
   pub fn for_node(&self, node: &NodeFacts) -> Rules {
@@ -683,6 +722,7 @@ impl Rules {
         .cloned()
         .collect(),
       turns: self.turns.clone(),
+      tiers: self.tiers.clone(),
     }
   }
 

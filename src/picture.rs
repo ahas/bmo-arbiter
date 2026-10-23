@@ -46,6 +46,8 @@ pub struct TicketView {
   pub wait_ms: Option<i64>,
   pub unit: Option<String>,
   pub vram_mib: Option<Num>,
+  /// Asked only to rest on the card once it is free, standing for no request.
+  pub rest: bool,
   /// A turn's: whether it is in use, and the service it gives way to now, if any.
   pub in_use: Option<bool>,
   pub gives_way_to: Option<String>,
@@ -159,6 +161,7 @@ pub fn card_from(card: &Card, node: &str) -> CardView {
         wait_ms: ticket.wait_ms,
         unit: need.and_then(|need| need.unit_name.clone()),
         vram_mib: need.and_then(|need| need.vram_mib).map(|mib| Num(mib as f64)),
+        rest: ticket.rest,
         in_use: Some(ticket.in_use),
         gives_way_to: ticket.give_way.then(|| ticket.give_way_for.clone()).flatten(),
       }

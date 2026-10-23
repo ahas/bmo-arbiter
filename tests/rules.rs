@@ -54,6 +54,7 @@ fn the_occupants_that_take_the_card_how_each_is_seen_and_the_host_memory_it_need
           containers: Some("tester-".into())
         },
         ram_free: RamFree::All,
+        tier: Num(0.0),
       },
       Claimant {
         name: "batch".into(),
@@ -65,13 +66,14 @@ fn the_occupants_that_take_the_card_how_each_is_seen_and_the_host_memory_it_need
           containers: None
         },
         ram_free: RamFree::GiB(Num(8.0)),
+        tier: Num(0.0),
       },
     ]
   );
   assert_eq!((rules.groups[0].dump, rules.groups[0].ram_max_gib), (Some(Dump::Ram), Some(Num(24.0))));
   assert_eq!((rules.groups[1].dump, rules.groups[1].ram_max_gib), (None, None));
   assert_eq!(rules.units[0].dump, Some(Dump::Disk));
-  assert!(refusal("occupants:\n  - name: x\n").contains("occupants[0].claims"));
+  assert!(refusal("occupants:\n  - name: x\n    first: true\n").contains("occupants[0].first"));
   assert!(
     refusal("occupants:\n  - { name: x, claims: true, ram_free: some }\n")
       .contains("occupants[0].ram_free")
@@ -190,4 +192,26 @@ fn every_node_is_handed_the_turns_part_whole_in_the_form_its_slave_reads() {
       "{name}"
     );
   }
+}
+
+#[test]
+fn every_occupant_entry_gives_its_tier_a_claimant_standing_at_nought_where_it_gives_none() {
+  let rules = read(
+    "occupants:\n  - name: runner\n    claims: true\n  - name: trainer\n    tier: 0.5\n  - name: speaker\n    tier: 1\n  - name: quiet\n",
+  );
+  assert_eq!(rules.occupants.len(), 1);
+  assert_eq!(rules.occupants[0].tier, Num(0.0));
+  let tiers: Vec<(&str, f64)> = rules.tiers.iter().map(|(name, tier)| (name.as_str(), tier.0)).collect();
+  assert_eq!(tiers, [("quiet", 2.0), ("runner", 0.0), ("speaker", 1.0), ("trainer", 0.5)]);
+  assert_eq!((rules.tier_of("trainer"), rules.tier_of("unnamed")), (0.5, 2.0));
+  let node = NodeFacts {
+    name: "a".into(),
+    role: None,
+    desktop: false,
+  };
+  assert_eq!(rules.for_node(&node).tiers, rules.tiers);
+  assert!(refusal("occupants:\n  - name: x\n    tier: -1\n").contains("occupants[0].tier"));
+  assert!(
+    refusal("occupants:\n  - name: x\n    tier: 1\n  - name: x\n    tier: 2\n").contains("names x twice")
+  );
 }

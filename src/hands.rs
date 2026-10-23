@@ -10,7 +10,7 @@ use crate::master::BoxFuture;
 use crate::placement::{AdapterAnswer, Declaration, Hands, NodeRow, Say, declarations};
 use crate::reach::{NodeRegistry, NodeShell, bun, run_streaming};
 use crate::rules::{NodeFacts, read_rules, rules_path};
-use crate::verbs::{SLAVE_UNITS, carry_rules, log_push, slave_desktop, with_turns};
+use crate::verbs::{SLAVE_UNITS, carry_rules, log_push, slave_desktop, with_declared};
 
 // How long each kind of call may take: an install builds environments and carries checkpoints.
 const ARBITER_LIMIT: Duration = Duration::from_secs(45 * 60);
@@ -150,7 +150,7 @@ impl Hands for LiveHands {
   fn arbiter<'a>(&'a self, node: &'a str, say: &'a Say) -> BoxFuture<'a, Result<(), String>> {
     Box::pin(async move {
       let rules = read_rules(&rules_path(&self.data_root)).map_err(|fault| fault.0)?.unwrap_or_default();
-      let rules = with_turns(rules, &self.declaration_roots)?;
+      let rules = with_declared(rules, &self.declaration_roots)?;
       let connection = self.registry()?.listed_connection(node).await?;
       let shell = NodeShell { connection };
       let desktop = slave_desktop(&shell.exec(SLAVE_UNITS).await.stdout).unwrap_or(false);

@@ -302,8 +302,11 @@ pub struct Card {
   pub desktop: bool,
   /// The names that may be on the card, highest first, the claimants standing first first.
   pub occupants: Vec<String>,
-  /// The same names grouped by rank.
+  /// The same names grouped by rank, which are the tiers where the rules carry them.
   pub ranks: Vec<Vec<String>>,
+  /// Each occupant's tier as the node's part of the rules carries it; empty where it carries none.
+  #[serde(default)]
+  pub tiers: BTreeMap<String, f64>,
   pub claim: Option<Claim>,
   /// The pids holding the card lock.
   pub lock_held_by: Vec<i64>,

@@ -28,7 +28,7 @@ fn cluster() -> Value {
   json!({
     "master": { "version": "0.1.0-rev.2", "startedAt": 1000, "rulesFile": "rules.yaml", "rulesLoadedAt": null,
       "rulesError": null, "readEveryMs": 2000 },
-    "groups": [], "nodes": [], "declared": [], "services": [], "placement": null, "events": [],
+    "groups": [], "nodes": [], "declared": [], "tiers": [], "services": [], "placement": null, "events": [],
   })
 }
 

@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.6**.
+This document states version **0.1.0-rev.7**.
 
 ## The wire format
 
@@ -217,7 +217,8 @@ it. Any other method and path is answered `404` `no-route`.
   | `…queue` | each `ticketId`, `serviceName`, `position?`, `waitedMs`, `waitMs?`, `unitName?`, `vramMiB?` |
   | `…processes` | each `pid`, `name`, `serviceName?`, `usedMiB` |
   | `declared` | the units the rules declare: each `unit` (a name or pattern), `serviceName`, `kind`, `vramMiB?` |
-  | `services` | each service the master places: `serviceName`, `cardMiB`, `priority`, `spread`, `alone`, `nodeNames`, and `unsettled?`, why its placement is unsettled |
+  | `tiers` | every occupant's tier as the nodes are handed it (`docs/placement.md`, 「Tiers」), lower first: each `name` and `tier` |
+  | `services` | each service the master places: `serviceName`, `cardMiB`, `priority`, `tier?` (its declaration's own), `yieldBy` (`turn` or `process`), `spread`, `alone`, `nodeNames`, and `unsettled?`, why its placement is unsettled |
   | `placement` | the placement under way, `kind`, `serviceName`, `nodeName` and `step?`; or null |
   | `events` | the picture's last 200 notes, newest first: each `at`, `nodeName?`, `code`, `text` |
 
@@ -273,7 +274,8 @@ answered `404` `no-route`.
   | --- | --- |
   | `version`, `desktop` | the node arbiter's version, and whether the card is a person's desktop |
   | `occupants` | the names that may be on the card, highest first, the claimants standing first first |
-  | `ranks` | the same names grouped by rank |
+  | `ranks` | the same names grouped by rank, which are the tiers where the rules carry them |
+  | `tiers` | each occupant's tier as the node's part of the rules carries it, by name; empty where it carries none |
   | `claim?` | the claim standing: `claimantName`, `claimedAt?` |
   | `lockHeldBy` | the pids holding the card lock |
   | `busy` | a claim stands, a request waits, a turn is in use, or the lock is held by anyone but a resting turn |
@@ -395,11 +397,11 @@ All in the node account's home, written by the master's verbs unless said otherw
 | --- | --- | --- |
 | `~/.config/bmo-card/occupants` | every placement that changes the order, whole, renamed over the old | words highest first, `=` joining one rank, `*` for every declared service not named, `#` a remark |
 | `~/.config/bmo-card/occupants.log` | the node arbiter, one line per change it takes up | the time, the order before, the order after |
-| `~/.config/bmo-card/rules.json` | `push`, and every placement, renamed over the old | the node's part of the rules: `occupants`, `nodes`, `units`, `rules` and `turns` (each service's `yieldAfterS` and `canPause`) |
+| `~/.config/bmo-card/rules.json` | `push`, and every placement, renamed over the old | the node's part of the rules: `occupants`, `nodes`, `units`, `rules`, `turns` (each service's `yieldAfterS` and `canPause`) and `tiers` (each occupant's tier, by name) |
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.6+<commit>` or `0.1.0-rev.6+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.7+<commit>` or `0.1.0-rev.7+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 
@@ -414,12 +416,14 @@ The node arbiter reads the occupants and rules files again within a second of a 
   - the `[card]` table of each `tools/<folder>/.placed/tool.toml`, for each folder of `tools/` whose name
     starts with neither `_` nor `.` and each folder of `tools/_shared/`, its adapter run from
     `tools/<folder>`.
-- **A declaration's keys:** `service`, `card_mib`, `priority`, `spread` (`one` or `many`), `alone`,
-  `adapter` (a list of words, not empty, or absent), and an optional `[turn]` table with `yield_after_s`
-  (seconds, zero or more) and `can_pause` (`docs/placement.md`, 「A service declares itself」).
+- **A declaration's keys:** `service`, `card_mib`, `priority`, `tier` (a number, zero or more, or absent),
+  `yield_by` (`turn` or `process`, absent for `turn`), `spread` (`one` or `many`), `alone`, `adapter` (a
+  list of words, not empty, or absent), and an optional `[turn]` table with `yield_after_s` (seconds, zero
+  or more) and `can_pause` (`docs/placement.md`, 「A service declares itself」).
 - **Refused,** said among the notes and failing the placement that read it: a file named otherwise than
   its `service`, a `service` that is not lower-case letters, digits and hyphens, an empty `adapter`, a
-  negative `yield_after_s`, and two declarations of one service across all roots.
+  negative `yield_after_s` or `tier`, `yield_by = "process"` with no `adapter`, and two declarations of one
+  service across all roots.
 
 ### Adapters
 
@@ -435,13 +439,17 @@ The node arbiter reads the occupants and rules files again within a second of a 
 
 - **`placements/card-rules.yaml`** in the master's data root, YAML, written by a person or by whoever
   keeps the deployment and read by the master alone, again whenever it changes. Its four parts —
-  `occupants`, `nodes`, `units`, `rules` — are `docs/placement.md`, 「The rules」. A file that does not
-  read leaves the last one read standing and is said in `master.rulesError`.
+  `occupants`, `nodes`, `units`, `rules` — are `docs/placement.md`, 「The rules」. An `occupants` entry is
+  `name` and `tier` (a number, zero or more), and with `claims: true` also `first`, `seen_by` and
+  `ram_free`; one without `claims: true` holds no other key. A file that does not read leaves the last one
+  read standing and is said in `master.rulesError`.
 - **`placements/card-rules.log`** — one line for every change of the file the master takes up and every
   push: the time, the file's hash, and what changed or where it went.
 - **Beside them,** the master alone writes `placements/services.json` (each service's nodes in order),
-  `placements/services-request.json` (the placement under way, journaled step by step) and the
-  descriptions folder (「Unit descriptions」).
+  `placements/services-request.json` (the placement under way, journaled step by step),
+  `placements/process-yields.json` (`stopped`, each service and node it stopped to yield the card, with
+  the reason; `docs/placement.md`, 「Yielding by the process」) and the descriptions folder (「Unit
+  descriptions」).
 
 ## What the arbiter calls
 
@@ -544,6 +552,10 @@ carried.
   | `restore-waiting` | units wait to come back until their asker's units leave the card |
   | `units-restored` | units unloaded for a ticket came back |
   | `restore-failed` | units unloaded for a ticket did not come back yet and are tried again |
+  | `occupant-stopped` | an occupant that yields by its process was stopped through its adapter; the text carries why |
+  | `occupant-started` | an occupant stopped to yield was started again through its adapter |
+  | `occupant-stop-failed` | the adapter's `stop` failed and is tried again |
+  | `occupant-start-failed` | the adapter's `start` failed and is tried again |
 - **The codes of the placement:**
 
   | Code | What happened |
@@ -584,7 +596,8 @@ the pipeline holds them is decided at these points, in order. Each service's `yi
    by arrival (`Turns._order`). The pipeline's turn is told to give way (`giveWay`, `giveWayFor`) by
    `Turns._give_way_for` only when a claim stands, when its turn rests, when an occupant above it waits, or
    — being of the same rank — once `Turns._turn_spent` finds its turn in use for its declared
-   `yield_after_s` with `can_pause` true. Its use is counted from the grant or from the request that ended
+   `yield_after_s` with `can_pause` true, which for a ticket asked after the turn began is the same least
+   turn (`docs/node-arbiter.md`, 「Priority and yielding」). Its use is counted from the grant or from the request that ended
    its rest. A turn that does not rest and has not used its `yield_after_s` does not give way to the
    engine's ticket.
    - `docs/node-arbiter.md`, 「One rank taking turns」: "Once its turn has been in use for its

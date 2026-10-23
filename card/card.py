@@ -68,6 +68,9 @@ SAME_RANK = "="
 OCCUPANT_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 # The order where a node keeps no occupants file: any service, the claimants that stand first before it.
 DEFAULT_OCCUPANTS = (ANY,)
+# The tier of an occupant the node's rules name none for, and of the desktop (docs/placement.md, 「Tiers」).
+DEFAULT_TIER = 2.0
+DESKTOP_TIER = 0.0
 # Dumps kept in host memory are looked at this often while a claim stands, and lowered where the host
 # memory the claimant needs is not available.
 LOWER_POLL_S = 2.0
@@ -287,6 +290,23 @@ def without(order: list[str], names: list[str]) -> list[str]:
     return [word for word in kept if word]
 
 
+def by_tier(words: list[str], tiers: dict[str, float], claimant: Callable[[str], bool]) -> list[str]:
+    """An order made by tier (docs/node-arbiter.md, 「The occupants」): every name with a place — those the
+    words name, and where they hold `*` every occupant the tiers name but a claimant or the desktop — by its
+    tier, lower first, those of one tier one word joined by `=`, and `*` last for a service the tiers do not
+    name."""
+    named = [name for word in words for name in rank_names(word) if name != ANY]
+    anyone = any(ANY in rank_names(word) for word in words)
+    if anyone:
+        named += [name for name in tiers if name not in named and name != DESKTOP and not claimant(name)]
+
+    def tier(name: str) -> float:
+        return tiers.get(name, DESKTOP_TIER if name == DESKTOP else DEFAULT_TIER)
+    order = [SAME_RANK.join(sorted(name for name in named if tier(name) == level))
+             for level in sorted({tier(name) for name in named})]
+    return [*order, ANY] if anyone else order
+
+
 def parse_occupants(text: str) -> list[str]:
     """The occupants file read: the words of its lines, highest first, a `#` starting a remark. Each is
     an occupant's name, several names joined by `=` standing at one rank, or `*` standing for every
@@ -315,11 +335,15 @@ class Occupants:
     the order as it stood."""
 
     def __init__(self, path: Path, history: Path, now: Callable[[], str] = lambda: time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                 claimants: Callable[[], list[units_mod.Claimant]] = lambda: []) -> None:
+                 claimants: Callable[[], list[units_mod.Claimant]] = lambda: [],
+                 tiers: Callable[[], dict[str, float]] = lambda: {}) -> None:
         self.path = path
         self.history = history
         self.now = now
         self.claimants = claimants
+        # Every occupant's tier the node's rules carry, which make the ranks where there are any.
+        self.tiers = tiers
+        self.tiered: dict[str, float] = {}
         self.order: list[str] = list(DEFAULT_OCCUPANTS)
         self.seen: tuple[int, int] | None = None
         self.written: list[str] = list(DEFAULT_OCCUPANTS)
@@ -334,7 +358,8 @@ class Occupants:
         except OSError:
             seen = None
         firsts = [claimant.name for claimant in self.claimants() if claimant.first]
-        if seen == self.seen and firsts == self.firsts:
+        tiers = dict(self.tiers())
+        if seen == self.seen and firsts == self.firsts and tiers == self.tiered:
             return False
         if seen != self.seen:
             self.seen = seen
@@ -344,11 +369,14 @@ class Occupants:
                 say(f"occupants: {self.path} cannot be read ({fault}); the order stays {' '.join(self.order)}")
                 return False
         self.firsts = firsts
+        self.tiered = tiers
         # A claimant the rules stand first comes before everyone whatever the file says: it takes the card
         # without asking, and nothing of ours can hold it back.
         if firsts and self.written[:len(firsts)] != firsts:
             say(f"occupants: {' '.join(firsts)} stand first whatever {self.path} says")
-        order = [*firsts, *without(self.written, firsts)]
+        rest = without(self.written, firsts)
+        # The tiers make the ranks of those with a place, where the rules carry them; else the file's order does.
+        order = [*firsts, *(by_tier(rest, tiers, self.is_claimant) if tiers else rest)]
         if order == self.order:
             return False
         line = f"{self.now()} {' '.join(self.order) or '(none)'} -> {' '.join(order) or '(none)'}"
@@ -604,15 +632,34 @@ class Turns:
         rank = self.occupants.rank(ticket.service)
         return len(self.occupants.order) + 1 if rank is None else rank
 
+    def _began(self, ticket: Ticket) -> float:
+        """When a turn's use began: its grant, or the request that ended its rest."""
+        return ticket.busy_since if ticket.busy_since is not None else ticket.granted
+
+    def _values(self, ticket: Ticket) -> units_mod.Turn:
+        """A turn's own turn values, or for an occupant that declares none no least turn, letting go in the
+        middle of a request where its ticket gives way."""
+        return self.turn_values(ticket.service) or units_mod.Turn(0.0, ticket.gives_way_s is not None)
+
     def _turn_spent(self, ticket: Ticket) -> units_mod.Turn | None:
-        """A turn's own turn values where it has been in use for their `yield_after_s`, counted as the bound
-        counts it (docs/node-arbiter.md, 「One rank taking turns」); None where its service declares none, it rests,
-        or its time has not come."""
-        turn = self.turn_values(ticket.service)
-        if turn is None or ticket.granted is None or ticket.resting:
+        """A turn's own turn values where it has been in use for their `yield_after_s`, its least turn, counted
+        as the bound counts it (docs/node-arbiter.md, 「One rank taking turns」); None where it rests or its time
+        has not come."""
+        if ticket.granted is None or ticket.resting:
             return None
-        used = self.clock() - (ticket.busy_since if ticket.busy_since is not None else ticket.granted)
-        return turn if used >= turn.yield_after_s else None
+        turn = self._values(ticket)
+        return turn if self.clock() - self._began(ticket) >= turn.yield_after_s else None
+
+    def _peers_due(self, ticket: Ticket) -> list[Ticket]:
+        """The waiters of a turn's own rank it gives way to now (docs/node-arbiter.md, 「Priority and yielding」,
+        「One rank taking turns」): once its least turn is used, those of another occupant asked after the turn
+        began, and every one where its service declares turn values."""
+        if self._turn_spent(ticket) is None:
+            return []
+        declared = self.turn_values(ticket.service) is not None
+        began = self._began(ticket)
+        return [other for other in self._asking() if other is not ticket and self._rank(other) == self._rank(ticket)
+                and (declared or (other.asked > began and other.service != ticket.service))]
 
     def _keeps(self, ticket: Ticket, next_waited_s: float) -> bool:
         """Whether a holder's next request still stands first in the queue: no claim stands, no waiting
@@ -626,9 +673,9 @@ class Turns:
         if not waiting:
             return True
         now = self.clock()
-        if not ticket.resting and now - (ticket.busy_since if ticket.busy_since is not None else ticket.granted) >= self.hold_s:
+        if not ticket.resting and now - self._began(ticket) >= self.hold_s:
             return False
-        if self._turn_spent(ticket) is not None and any(self._rank(other) == self._rank(ticket) for other in waiting):
+        if self._peers_due(ticket):
             return False
         mine = (self._rank(ticket), now - max(0.0, next_waited_s))
         return all((self._rank(other), other.asked) >= mine for other in waiting)
@@ -671,10 +718,9 @@ class Turns:
         claimant = self.claimed()
         if claimant is not None:
             return claimant
-        spent = self._turn_spent(ticket)
-        pauses = spent is not None and spent.can_pause
+        peers = self._peers_due(ticket) if self._values(ticket).can_pause else []
         waiting = [other for other in self._asking()
-                   if ticket.resting or self._above(other, ticket) or (pauses and self._rank(other) == self._rank(ticket))]
+                   if ticket.resting or self._above(other, ticket) or other in peers]
         return waiting[0].service if waiting else None
 
     def passes_to(self, ticket_id: int) -> str | None:
@@ -683,12 +729,9 @@ class Turns:
         for their `yield_after_s`; None where no claim, value or waiter makes it pass."""
         with self.guard:
             ticket = self.tickets.get(ticket_id)
-            if ticket is None or self.claimed() is not None:
+            if ticket is None or self.claimed() is not None or self._values(ticket).can_pause:
                 return None
-            spent = self._turn_spent(ticket)
-            if spent is None or spent.can_pause:
-                return None
-            alike = [other for other in self._asking() if self._rank(other) == self._rank(ticket)]
+            alike = self._peers_due(ticket)
             return alike[0].service if alike else None
 
     def _wait_s(self, ticket: Ticket, order: list[Ticket]) -> float:
@@ -829,6 +872,7 @@ class Turns:
             return {
                 "occupants": self.occupants.names(),
                 "ranks": [rank_names(word) for word in self.occupants.order],
+                "tiers": dict(self.occupants.tiered),
                 "claim": claim,
                 "lockHeldBy": held_by,
                 "busy": busy,
@@ -1442,6 +1486,7 @@ class Card:
         # The turn values the rules carry, by service, which the hold queue reads (docs/node-arbiter.md, 「One rank
         # taking turns」).
         self.turn_values: dict[str, units_mod.Turn] = {}
+        self.tiers: dict[str, float] = {}
         # Since when the head's longest request has waited for this card's units while it says WANT, the restore
         # its WANT started, whether a restore is loading the units already, and the turn the hold was told to
         # PASS in (docs/node-arbiter.md, 「Lending」).
@@ -1454,6 +1499,7 @@ class Card:
         self.rules = rules
         self.claimants = units_mod.claimants_of(rules)
         self.turn_values = units_mod.turns_of(rules)
+        self.tiers = units_mod.tiers_of(rules)
 
     def claimed(self) -> str | None:
         """The claimant whose claim stands, the first to have begun; None where none does. Read from the
@@ -2253,7 +2299,8 @@ def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> 
     import desktop
 
     path = occupants_path(env)
-    occupants = Occupants(path, path.with_name(f"{path.name}.log"), claimants=lambda: card.claimants)
+    occupants = Occupants(path, path.with_name(f"{path.name}.log"), claimants=lambda: card.claimants,
+                          tiers=lambda: card.tiers)
     # The service the card is lent to, which waits its turn in the queue under that name and which a claimant
     # makes yield only where it comes before it.
     lent_to = lend.service if lend is not None else None

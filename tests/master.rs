@@ -2,14 +2,17 @@
 //! rules over a world of stand-in slaves, unloads and restores asked of the slaves, holds said once, and
 //! groups planned together.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bmo_arbiter::master::{
   BoxFuture, Master, Reached, Shell, World, asker_of, awaited_ticket, unload_reason,
 };
+use bmo_arbiter::placement::{Declaration, Placements, Spread, YieldBy};
 use bmo_arbiter::reach::RunResult;
+use bmo_arbiter::rules::Num;
 use bmo_arbiter_client::cluster::LinkState;
 use serde_json::{Value, json};
 
@@ -55,6 +58,13 @@ struct Stand {
   meet: Option<(&'static str, tokio::sync::Barrier)>,
   /// Every move refused, as a slave whose owner cannot unload answers it.
   refuse_moves: AtomicBool,
+  /// Every command with the node it ran on.
+  ran_on: Mutex<Vec<(String, String)>>,
+  /// The folder the rules and the placements stand in.
+  dir: PathBuf,
+  /// The services declared, and every adapter verb run, as `<service> <verb> <node>`.
+  declared: Mutex<Vec<Declaration>>,
+  adapted: Mutex<Vec<String>>,
 }
 
 struct StandShell(Arc<Stand>, String);
@@ -63,6 +73,7 @@ impl Shell for StandShell {
   fn exec<'a>(&'a self, command: &'a str) -> BoxFuture<'a, RunResult> {
     Box::pin(async move {
       self.0.commands.lock().unwrap().push(command.to_owned());
+      self.0.ran_on.lock().unwrap().push((self.1.clone(), command.to_owned()));
       if let Some((_, meet)) = self.0.meet.as_ref().filter(|(verb, _)| moves(command, verb))
         && tokio::time::timeout(std::time::Duration::from_secs(2), meet.wait()).await.is_err()
       {
@@ -116,6 +127,21 @@ impl World for StandWorld {
 
   fn version(&self) -> String {
     "test".into()
+  }
+
+  fn declarations(&self) -> Result<Vec<Declaration>, String> {
+    Ok(self.0.declared.lock().unwrap().clone())
+  }
+
+  fn adapter<'a>(
+    &'a self,
+    declaration: &'a Declaration,
+    verb: &'a str,
+    node: &'a str,
+    _placed: &'a [String],
+  ) -> BoxFuture<'a, (bool, String)> {
+    self.0.adapted.lock().unwrap().push(format!("{} {verb} {node}", declaration.service));
+    Box::pin(async { (true, "done".to_owned()) })
   }
 }
 
@@ -176,6 +202,10 @@ fn master_of(
     nodes: nodes.iter().map(|node| node.to_string()).collect(),
     meet,
     refuse_moves: AtomicBool::new(false),
+    ran_on: Mutex::new(Vec::new()),
+    dir: dir.clone(),
+    declared: Mutex::new(Vec::new()),
+    adapted: Mutex::new(Vec::new()),
   });
   (Master::new(Arc::new(StandWorld(stand.clone())), rules_file, 2.0), stand)
 }
@@ -675,4 +705,149 @@ async fn a_slave_answering_no_card_is_lost_with_its_answer_and_shows_the_role_re
   assert_eq!(connected.link.state, LinkState::Connected);
   assert_eq!(connected.role.as_deref(), Some("model+train"));
   assert!(connected.link.error.is_none());
+}
+
+/// A service as it declares itself, at the tier given, yielding by its process where it says so.
+fn declared(service: &str, tier: f64, yield_by: YieldBy) -> Declaration {
+  Declaration {
+    service: service.into(),
+    card_mib: 1000,
+    priority: 10,
+    tier: Some(Num(tier)),
+    yield_by,
+    spread: Spread::One,
+    alone: false,
+    adapter: Some(vec!["true".into()]),
+    turn: None,
+    dir: PathBuf::from("."),
+  }
+}
+
+fn placed(stand: &Stand, services: &[(&str, &[&str])]) {
+  let placements = Placements {
+    services: services
+      .iter()
+      .map(|(service, nodes)| (service.to_string(), nodes.iter().map(|node| node.to_string()).collect()))
+      .collect(),
+    unsettled: BTreeMap::new(),
+  };
+  std::fs::write(stand.dir.join("services.json"), serde_json::to_string(&placements).unwrap()).unwrap();
+}
+
+fn waiting(id: i64, service: &str, vram_mib: Option<u64>) -> Value {
+  let mut one = ticket(id, service, false, None);
+  if let Some(vram) = vram_mib {
+    one["need"] = json!({ "vramMiB": vram });
+  }
+  one
+}
+
+#[tokio::test]
+async fn a_two_card_occupant_yields_only_the_card_a_one_card_request_asks_for_and_keeps_the_other() {
+  let (mut master, stand) = master_of(slave(1500.0, store_resident(), None, json!([])), &["a", "b"], None);
+  stand
+    .answers
+    .lock()
+    .unwrap()
+    .insert("a".into(), slave(1500.0, store_resident(), None, asking(1)));
+  master.discover().await;
+  master.poll().await;
+  let ran_on = stand.ran_on.lock().unwrap().clone();
+  let unloads: Vec<&(String, String)> =
+    ran_on.iter().filter(|(_, command)| moves(command, "evict")).collect();
+  assert_eq!(unloads.len(), 1, "{unloads:?}");
+  assert_eq!(unloads[0].0, "a");
+  assert!(unloads[0].1.contains("/card-units/model%2Fstore"), "{unloads:?}");
+}
+
+#[tokio::test]
+async fn an_occupant_of_a_later_tier_is_unloaded_by_default_and_one_of_an_earlier_tier_never() {
+  let (mut master, stand) = master(slave(
+    1500.0,
+    store_resident(),
+    None,
+    json!([ticket(1, "voice", false, Some("voice/large"))]),
+  ));
+  std::fs::write(
+    stand.dir.join("card-rules.yaml"),
+    "occupants:\n  - name: model\n    tier: 0.5\n  - name: voice\n    tier: 1\nunits:\n  - unit: \"voice/*\"\n    vram_mib: 6000\n",
+  )
+  .unwrap();
+  master.discover().await;
+  master.poll().await;
+  // The model stands at a lower tier than the voice: the voice's request waits, nothing of the model goes.
+  assert!(sent(&stand, "evict").is_empty());
+  let tiers: Vec<(String, f64)> =
+    master.state().tiers.into_iter().map(|one| (one.name, one.tier)).collect();
+  assert_eq!(tiers, [("model".to_owned(), 0.5), ("voice".to_owned(), 1.0)]);
+
+  std::fs::write(
+    stand.dir.join("card-rules.yaml"),
+    "occupants:\n  - name: model\n    tier: 2\n  - name: voice\n    tier: 1\nunits:\n  - unit: \"voice/*\"\n    vram_mib: 6000\n",
+  )
+  .unwrap();
+  // The file is read again where its time of change moved; a second's step makes sure it does.
+  std::thread::sleep(std::time::Duration::from_millis(1100));
+  master.poll().await;
+  let evicted = sent(&stand, "evict");
+  assert_eq!(evicted.len(), 1, "{evicted:?}");
+  assert!(evicted[0].contains("/card-units/model%2Fstore"), "{evicted:?}");
+}
+
+#[tokio::test]
+async fn an_occupant_that_yields_by_its_process_goes_down_for_an_earlier_tier_and_comes_back_after() {
+  let (mut master, stand) =
+    master(slave(1500.0, store_resident(), None, json!([waiting(1, "trainer", None)])));
+  *stand.declared.lock().unwrap() = vec![
+    declared("translator", 1.0, YieldBy::Process),
+    declared("trainer", 0.5, YieldBy::Turn),
+    declared("song", 2.0, YieldBy::Turn),
+  ];
+  placed(&stand, &[("translator", &["a"]), ("trainer", &["a"]), ("song", &["a"])]);
+  master.discover().await;
+  master.poll().await;
+  master.poll().await;
+  assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a"]);
+  assert!(master.state().events.iter().any(|event| event.code == "occupant-stopped"));
+  let kept = std::fs::read_to_string(stand.dir.join("process-yields.json")).unwrap();
+  assert!(kept.contains("\"serviceName\": \"translator\""), "{kept}");
+
+  // A master started meanwhile reads the stop back, and brings it back once the trainer's ticket is gone.
+  let mut again = Master::new(Arc::new(StandWorld(stand.clone())), stand.dir.join("card-rules.yaml"), 2.0);
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([]));
+  again.discover().await;
+  again.poll().await;
+  assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a", "translator start a"]);
+  assert!(again.state().events.iter().any(|event| event.code == "occupant-started"));
+  assert!(
+    !std::fs::read_to_string(stand.dir.join("process-yields.json"))
+      .unwrap()
+      .contains("translator")
+  );
+}
+
+#[tokio::test]
+async fn an_occupant_that_yields_by_its_process_stays_for_a_later_tier_and_a_request_the_card_holds() {
+  let (mut master, stand) = master(slave(
+    7000.0,
+    store_resident(),
+    None,
+    json!([waiting(1, "song", None), waiting(2, "voice", Some(6000))]),
+  ));
+  *stand.declared.lock().unwrap() = vec![
+    declared("translator", 1.0, YieldBy::Process),
+    declared("voice", 1.0, YieldBy::Turn),
+    declared("song", 2.0, YieldBy::Turn),
+  ];
+  placed(&stand, &[("translator", &["a"])]);
+  master.discover().await;
+  master.poll().await;
+  assert_eq!(master.state().nodes[0].link.state, LinkState::Connected);
+  // The song stands at a later tier; the voice's request of its own tier fits in the free memory.
+  assert!(stand.adapted.lock().unwrap().is_empty());
+  // The same request that the free memory does not hold makes it yield.
+  *stand.answer.lock().unwrap() =
+    slave(5000.0, store_resident(), None, json!([waiting(2, "voice", Some(6000))]));
+  master.poll().await;
+  assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a"]);
 }

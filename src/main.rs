@@ -159,22 +159,21 @@ async fn stand(roots: Roots, once_only: bool) -> Result<(), String> {
   if let Err(why) = &roots.registry {
     eprintln!("bmo-arbiter: {why}; no node is read");
   }
-  let world = Arc::new(LiveWorld::new(roots.registry.clone(), roots.code_root.clone()));
+  let hands = Arc::new(LiveHands {
+    registry: roots.registry.clone(),
+    declaration_roots: roots.declaration_roots.clone(),
+    code_root: roots.code_root.clone(),
+    data_root: roots.data_root.clone(),
+  });
+  let world =
+    Arc::new(LiveWorld::new(roots.registry.clone(), roots.code_root.clone()).with_hands(hands.clone()));
   let master = Master::new(world, rules_path(&roots.data_root), settings.read_every.as_secs_f64());
   if once_only {
     println!("{}", once(master).await);
     return Ok(());
   }
-  let placer = Placer::new(
-    Arc::new(LiveHands {
-      registry: roots.registry.clone(),
-      declaration_roots: roots.declaration_roots.clone(),
-      code_root: roots.code_root.clone(),
-      data_root: roots.data_root.clone(),
-    }),
-    &roots.data_root.join("placements"),
-    Arc::new(Mutex::new(Board::default())),
-  );
+  let placer =
+    Placer::new(hands, &roots.data_root.join("placements"), Arc::new(Mutex::new(Board::default())));
   serve(master, settings, placer).await.map_err(|fault| fault.to_string())
 }
 
@@ -249,13 +248,14 @@ async fn run(verb: Verb, roots: &Roots) -> Result<bool, String> {
           Ok(hash) => {
             log_push(&roots.data_root, &node.facts.name, &hash);
             println!(
-              "{}: {} occupants, {} groups, {} units, {} rules, {} turns ({hash})",
+              "{}: {} occupants, {} groups, {} units, {} rules, {} turns, {} tiers ({hash})",
               node.facts.name,
               part.occupants.len(),
               part.groups.len(),
               part.units.len(),
               part.rules.len(),
-              part.turns.len()
+              part.turns.len(),
+              part.tiers.len()
             );
           }
           Err(fault) => {

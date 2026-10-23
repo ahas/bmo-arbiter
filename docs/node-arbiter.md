@@ -12,8 +12,9 @@ over the network brings its lend settings.
 - **The node's card lock,** an exclusive `flock` on `~/.gpu.lock` in the node account's own home: the
   one lock every occupant on the node takes the card by (「The shared card lock」). The arbiter holds it
   itself only for an occupant that is not a process of the system's: a claimant, or the desktop.
-- **The occupants:** who may be on the card, highest first, from the node's own file (「The occupants」).
-- **The hold:** a queue every occupant waits in for its turn, ordered by the occupants, and the API it
+- **The occupants:** who may be on the card, from the node's own file, and their tiers, from the node's
+  part of the rules (「Priority and yielding」, 「The occupants」).
+- **The hold:** a queue every occupant waits in for its turn, ordered by tier, and the API it
   is asked through, which also serves as the arbiter side of an external job runner's resource
   negotiation protocol (「The hold」).
 - **The units and the dump store:** what lies in the card's memory, one unloadable unit at a time, where
@@ -28,6 +29,45 @@ over the network brings its lend settings.
   | The keeper | always | ends a holder with no place among the occupants, and one below a claimant or the desktop past the grace |
   | The hold | always | keeps the queue and answers its API on the node's loopback |
   | Lending | lend settings stand on the node | lends the card to a borrowing engine's head over the inner network |
+
+## Priority and yielding
+
+The owner's covenant for the card. Every rule below realises it, on each node and in the master.
+
+- **Every occupant has a tier,** a number of zero or more, and the lower number takes the card first. The
+  covenant's tiers: a claimant that takes the card outright, such as an external job runner, `0`; a
+  training run launched on the owner's word, `0.5`, between the two; the voice and the translator's
+  engine, `1`; every other occupant `2`. Where each occupant's tier is written is
+  `docs/placement.md`, 「Tiers」; the desktop stands at `0` unless the rules give it another.
+- **A higher number waits while a lower one has work.** A ticket waits behind every ticket and turn of a
+  lower tier, and a turn in use gives way to a ticket of a lower tier (「Giving way」): at once where it can
+  let go in the middle of its work, else at its next request boundary (「One queue of requests」). Tier `1`
+  waits while tier `0` runs.
+- **Within one tier the later request makes the running one yield.** A turn gives way to a ticket of
+  another occupant of its own tier asked after the turn began — its grant, or the request that ended its rest — once it has been
+  in use for its least turn, its declared `yield_after_s`, nothing where it declares none (「One rank
+  taking turns」). A ticket standing for work asked before the turn began, such as an occupant coming
+  back after it yielded, waits for the turn to end and makes nobody yield, so two occupants of one tier
+  never push each other back and forth.
+- **The line is by tier, then by when the request each ticket stands for arrived** (「The hold」).
+- **Yielding is the fastest path back, never a pause:** what the occupant keeps on that card comes down
+  whole and comes back when its turn comes again.
+  - **An owner of units** — a lent card's rpc-server, a local hold's engine, an owner on its own control
+    socket such as a pipeline stage — has its units unloaded into its host memory or the node's dump
+    store, as the rules place them, and loaded back once the ticket it yielded for is done
+    (`docs/placement.md`, 「Unloading and loading a unit」).
+  - **An occupant that asks for turns in a process of its own** takes its weights off the card and gives
+    its ticket back when told to give way or at its request boundary, and asks again for its next
+    request, loading them afresh.
+  - **An occupant with neither,** whose declaration says it yields by its process, goes down through its
+    adapter's `stop` and comes back through its `start` once nothing that made it yield stands on its node
+    (`docs/placement.md`, 「Yielding by the process」).
+- **Only what the request needs comes down.** A ticket is asked on one node's arbiter and stands for that
+  node's card; a request that needs several cards asks a ticket on each, its units one group of the rules.
+  On each card the master unloads only what the ticket's unit needs there, so an occupant spread over
+  several cards yields only the cards asked for and keeps the rest; where it may choose among the units of
+  several occupants it may make yield, it takes those whose unload and load cost least
+  (`docs/placement.md`, 「The rules」).
 
 ## The shared card lock
 
@@ -67,15 +107,19 @@ keeps its model on it until another asks for the card.
   first two itself; a service names itself in its processes' environment as `BMO_CARD_SERVICE`, and
   nothing in the code keeps a list of the services. A process of a service that lends the card is named
   by the arbiter itself, as the lend service.
-- **The order is the node's own file,** `~/.config/bmo-card/occupants`: its words, highest first, one
-  line or several, `#` starting a remark. A word is an occupant's name, several names joined by `=`
+- **Who has a place is the node's own file,** `~/.config/bmo-card/occupants`: its words, highest first,
+  one line or several, `#` starting a remark. A word is an occupant's name, several names joined by `=`
   standing at one rank (`song=voice`), or `*`, which stands for every declared service the file does not
   name, never for a claimant.
-- **Occupants of one rank never push each other out.** Neither stands above the other, so neither is
-  ended for the other; their tickets stand in line by the arrival of the request each stands for, the
-  other waiting with a `202` (「The hold」). The turn passes between them at a request boundary
-  (「One queue of requests」), when its holder rests, or where the holder's own turn values have it give
-  way (「One rank taking turns」).
+- **The ranks are the tiers** where the node's part of the rules carries them (`tiers`, 「Priority and
+  yielding」): the claimants the rules stand first, then every occupant with a place by its tier, lower
+  first, those of one tier at one rank, and `*` last for a service the tiers do not name. An occupant the
+  tiers leave out stands at `2`, the desktop at `0`. Where the rules carry no tiers, the file's own order
+  is the ranks.
+- **Occupants of one rank are never ended for each other.** Their tickets stand in line by the arrival of
+  the request each stands for, the other waiting with a `202` (「The hold」). The turn passes between them
+  at a request boundary (「One queue of requests」), when its holder rests, or where it gives way to a later
+  request of its rank or by its own turn values (「One rank taking turns」).
 - **A claimant the rules stand first comes first on every node, whatever the file says.** It waits only
   while the others give way, never behind any of them (「Claimants」); a file that names it elsewhere or
   not at all is read with it first, and one added to the rules moves first within a second, with no
@@ -87,8 +131,8 @@ keeps its model on it until another asks for the card.
   never ended for being unnamed.
 - **The order is the master's to write,** derived from the services placed on the node and written
   whole by every placement that changes it (`docs/placement.md`, 「Occupants are derived」): the desktop
-  on a person's desktop, the node's services by their declared priority, those of equal priority at one
-  rank, and `*` on a node reserved for no service. It names no claimant, since those standing first come
+  on a person's desktop, the node's services by their tier, those of one tier at one rank, and `*` on a
+  node reserved for no service. It names no claimant, since those standing first come
   before it anyway. A node with no file at all is read as `*`.
 - **Changed with no restart:** the arbiter looks at the file once a second and reads it again when it
   has changed. A file it cannot read leaves the order as it stood and says why in the journal.
@@ -99,8 +143,15 @@ keeps its model on it until another asks for the card.
 
 ### One rank taking turns
 
+- **A turn gives way to a later request of its rank:** a ticket of another occupant of its rank asked
+  after the turn began, its grant or the request that ended its rest, once the turn has been in use for
+  its least turn (`yieldAfterS`, nothing for an occupant that declares no turn values). It gives way in
+  the middle of a request where it can let go there, told `"giveWay": true` with `"giveWayFor"` as it is
+  for an occupant above it (「Giving way」) — where `canPause` is true, or for an occupant with no turn
+  values whose ticket was asked with `givesWayMs` — and at its next request boundary otherwise. A ticket
+  asked before the turn began makes it give way only by the turn values below.
 - **An occupant may give way to one of its own rank by turn values of its own:** how long its turn is in
-  use before it gives way to a waiter of its rank (`yieldAfterS`), and whether it can let go of the card
+  use before it gives way to any waiter of its rank (`yieldAfterS`), and whether it can let go of the card
   in the middle of a request (`canPause`).
   - **Once its turn has been in use for its `yieldAfterS`** while a ticket of its rank waits, it gives
     way to that ticket: in the middle of a request where `canPause` is true, told `"giveWay": true` with
@@ -117,13 +168,15 @@ keeps its model on it until another asks for the card.
     stands for, so two of one rank take the card in turn, and neither waits on the other past the
     holder's `yieldAfterS`, the boundary or the letting go it then reaches, and its own units' coming
     back.
-- **An occupant with no turn values is never made to give way to one of its rank.** Its turn passes only
-  at the request boundaries `nextWaitedMs` hands on, or when it rests.
+- **An occupant with no turn values gives way to one of its rank only for a later request,** as the first
+  point says; to a ticket asked before its turn began, its turn passes only at the request boundaries
+  `nextWaitedMs` hands on, or when it rests.
 - **The values are each service's own,** declared in a `[turn]` table of its declaration
   (`docs/placement.md`, 「A service declares itself」). The arbiter keeps no list of them and names no
   service.
 - **How they reach the arbiter:** the master writes them into the node's part of the rules,
-  `~/.config/bmo-card/rules.json`, as a part of its own beside the four the rules file names:
+  `~/.config/bmo-card/rules.json`, as a part of its own beside the four the rules file names and the
+  `tiers`:
   - `turns`, an object keyed by service name, each entry `yieldAfterS` in seconds and `canPause` true or
     false, one for every declared service whose declaration carries a `[turn]` table;
   - the same part on every node, as the claimants are, whichever services stand there;
@@ -284,9 +337,9 @@ sequenceDiagram
   gone by the time a `POST` or `GET` about a ticket is answered, a held-open answer above all, the
   arbiter gives that ticket back as a `DELETE` would. No turn is then granted, and no other owner's units
   unloaded for it, on behalf of an asker that has left.
-- **The order of the line:** the ticket whose turn it is first, then by the occupants' order, the
-  occupants of one rank together, then by who asked first, and the tickets asking only to rest after all
-  of them. A turn is given to the head only while no claim stands and no process holds the lock, and to
+- **The order of the line:** the ticket whose turn it is first, then by the occupants' ranks, which are
+  their tiers (「The occupants」), those of one rank together, then by who asked first, and the tickets
+  asking only to rest after all of them. A turn is given to the head only while no claim stands and no process holds the lock, and to
   one ticket at a time; a claimant's tickets are granted as 「Claimants」 says.
 - **A ticket not asked after for thirty seconds** (`CARD_TURN_KEEP_S`) is dropped, so a caller that died
   holds nobody up; ask again at most every few seconds while waiting. A ticket whose turn it is stays for
@@ -338,7 +391,8 @@ sequenceDiagram
   /tickets/<id>?nextWaitedMs=<ms>`, `ms` being how long its next request has waited, is answered with
   `"keep": true` while that
   request would stand first in the queue — no waiting ticket of a higher occupant, none of its own rank
-  asked earlier — and `"keep": false` otherwise.
+  asked earlier, and none of another occupant of its rank asked after the turn began once its least turn
+  is used (「One rank taking turns」) — and `"keep": false` otherwise.
   - Kept, it serves the next request with its weights still on the card: the same occupant twice in a
     row pays no move.
   - Not kept, it lets go after the request in hand and asks for a new ticket with that next request's
@@ -359,7 +413,9 @@ sequenceDiagram
   above it wants the card, so a holder that keeps the card for hours, low in the order, holds the
   occupants above it up for those seconds alone.
 - **Told to give way:** while such a turn stands and a ticket of an occupant above it waits, a ticket of
-  its own rank has waited past its turn values (「One rank taking turns」), or a claim stands, every
+  another occupant of its rank asked after the turn began waits past its least turn, a ticket of its own
+  rank has waited
+  past its turn values (「One rank taking turns」), or a claim stands, every
   answer to its ticket carries `"giveWay": true` and `"giveWayFor"`, the highest occupant waiting or the
   claimant. A holder that gives way keeps one ask after its ticket held open the whole time it holds the
   card (「Handing on」): on a turn of its own, the held answer goes out the instant it is to give way, so it
@@ -589,6 +645,8 @@ node:
   rules the settings switch on, the lent hold's turn following its engine's use and taken back by the
   request at its door or on `WANT`, its turn passed at its request boundary, two occupants of one rank
   taking turns by their turn values and those declaring none holding theirs to a boundary or a rest, and
-  units unloaded where the rules put them, every owner's dumps counted and lowered together.
+  units unloaded where the rules put them, every owner's dumps counted and lowered together; the ranks
+  made by tier from the rules' `tiers`, a lower tier waited for and given way to, and a later request of
+  one tier making the turn give way while one asked before its turn waits.
 - On a node: `systemctl --user status bmo-card` stands active, the journal's first line names the lock
   and the rules kept there, and `curl -s http://127.0.0.1:7439/card` there answers the card.

@@ -233,7 +233,7 @@
             "$ref": "#/components/schemas/Ram"
           },
           "ranks": {
-            "description": "The same names grouped by rank.",
+            "description": "The same names grouped by rank, which are the tiers where the rules carry them.",
             "items": {
               "items": {
                 "type": "string"
@@ -260,6 +260,15 @@
               }
             ]
           },
+          "tiers": {
+            "additionalProperties": {
+              "format": "double",
+              "type": "number"
+            },
+            "default": {},
+            "description": "Each occupant's tier as the node's part of the rules carries it; empty where it carries none.",
+            "type": "object"
+          },
           "typicalHoldMs": {
             "additionalProperties": {
               "format": "int64",
@@ -283,6 +292,7 @@
           "desktop",
           "occupants",
           "ranks",
+          "tiers",
           "claim",
           "lockHeldBy",
           "busy",
@@ -566,6 +576,13 @@
               "$ref": "#/components/schemas/PlacedService"
             },
             "type": "array"
+          },
+          "tiers": {
+            "description": "Every occupant's tier as the nodes are handed it, lower first.",
+            "items": {
+              "$ref": "#/components/schemas/OccupantTier"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -573,6 +590,7 @@
           "groups",
           "nodes",
           "declared",
+          "tiers",
           "services",
           "placement",
           "events"
@@ -1256,6 +1274,23 @@
         ],
         "type": "object"
       },
+      "OccupantTier": {
+        "description": "An occupant's tier: the lower takes the card first.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tier": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "tier"
+        ],
+        "type": "object"
+      },
       "PlacedService": {
         "description": "A service the master places, with its declaration and its nodes.",
         "properties": {
@@ -1282,18 +1317,31 @@
           "spread": {
             "$ref": "#/components/schemas/Spread"
           },
+          "tier": {
+            "description": "The tier its declaration gives, where it gives one.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "unsettled": {
             "description": "Why its placement is unsettled.",
             "type": [
               "string",
               "null"
             ]
+          },
+          "yieldBy": {
+            "$ref": "#/components/schemas/YieldBy"
           }
         },
         "required": [
           "serviceName",
           "cardMiB",
           "priority",
+          "tier",
+          "yieldBy",
           "spread",
           "alone",
           "nodeNames",
@@ -1967,6 +2015,14 @@
           "to"
         ],
         "type": "object"
+      },
+      "YieldBy": {
+        "description": "How a service yields its card: by its turn, or by its process going down and coming back.",
+        "enum": [
+          "turn",
+          "process"
+        ],
+        "type": "string"
       }
     },
     "securitySchemes": {
@@ -1980,7 +2036,7 @@
   "info": {
     "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.6"
+    "version": "0.1.0-rev.7"
   },
   "openapi": "3.1.0",
   "paths": {

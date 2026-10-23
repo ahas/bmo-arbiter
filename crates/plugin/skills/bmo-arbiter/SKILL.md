@@ -49,7 +49,7 @@ arbiter's `docs/node-arbiter.md` states the whole contract.
 
 ## Reading the card and the cluster
 
-- `arbiter_card`: the card's occupants and ranks, the claim standing, who holds the lock, every ticket in
+- `arbiter_card`: the card's occupants, ranks and tiers, the claim standing, who holds the lock, every ticket in
   line, how long each service typically holds the card, its units and where each one is (`resident` on the
   card, `ram` or `evicted` out of it), the driver's memory figures and the dump store.
 - `arbiter_cluster`: every node the master reads, each card with its units, turn and queue, the groups the

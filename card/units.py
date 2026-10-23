@@ -765,3 +765,15 @@ def placing_of(rules: dict | None, service: str, floor_bytes: int = 0) -> Placin
     ram_max = group.get("ramMaxGiB")
     return Placing(dump, group.get("dump") if group.get("dump") in (TO_RAM, TO_DISK) else TO_DISK,
                    None if not isinstance(ram_max, (int, float)) else int(ram_max * GIB), floor_bytes)
+
+
+def tiers_of(rules: dict | None) -> dict[str, float]:
+    """Every occupant's tier the node's rules carry, by name (docs/placement.md, 「Tiers」); an entry not
+    understood is passed over, and rules without the part carry none."""
+    found: dict[str, float] = {}
+    tiers = (rules or {}).get("tiers")
+    for name, tier in (tiers.items() if isinstance(tiers, dict) else []):
+        if isinstance(tier, bool) or not isinstance(tier, (int, float)) or tier < 0:
+            continue
+        found[name] = float(tier)
+    return found

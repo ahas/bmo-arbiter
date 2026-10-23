@@ -99,7 +99,7 @@ impl Rules {
   }
 
   /// Where an asked unit goes and what goes to make room, by the first rule its request matches, or by
-  /// priority and size where none does; a hold where nothing fits.
+  /// tier, priority and size where none does; a hold where nothing fits.
   pub fn plan(&self, picture: &[PictureNode], request: &Request) -> Decision {
     let spec = self.spec_of(&request.unit);
     let rule = self
@@ -114,6 +114,11 @@ impl Rules {
       };
     };
     let priority = spec.map_or(DEFAULT_PRIORITY, |one| one.priority.0);
+    let asker = spec.map_or_else(
+      || request.unit.split('/').next().unwrap_or_default().to_owned(),
+      |one| one.service.clone(),
+    );
+    let asker_tier = self.tier_of(&asker);
     let wait_s = spec.map_or(0.0, |one| one.hold.max_wait_s.0);
     let places: Vec<&PictureNode> = picture
       .iter()
@@ -142,11 +147,19 @@ impl Rules {
       let candidates: Vec<&PictureUnit> = match rule.and_then(|one| one.evict.as_ref()) {
         Some(Eviction::Node) => resident.clone(),
         Some(Eviction::List(patterns)) | Some(Eviction::Cheapest(patterns)) => named(patterns),
-        // A request rule never says `below` (the rules refuse it as they are read); the default stands.
+        // A request rule never says `below` (the rules refuse it as they are read); the default stands: the
+        // units of a later tier, of another occupant of the asker's own tier, which the turn gate unloads only
+        // once that turn gives way, and of the asker's own service at a lower priority.
         Some(Eviction::Below(_)) | None => resident
           .iter()
           .copied()
-          .filter(|unit| self.spec_of(&unit.name).map_or(DEFAULT_PRIORITY, |one| one.priority.0) < priority)
+          .filter(|unit| {
+            let tier = self.tier_of(&unit.service);
+            tier > asker_tier
+              || (tier == asker_tier
+                && (unit.service != asker
+                  || self.spec_of(&unit.name).map_or(DEFAULT_PRIORITY, |one| one.priority.0) < priority))
+          })
           .collect(),
       };
       let apart = spec.map(|one| one.apart.as_slice()).unwrap_or_default();

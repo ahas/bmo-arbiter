@@ -241,6 +241,8 @@ sequenceDiagram
     never restores them again; they go out again only by a rule planned anew, under the same conditions as
     any unload (「The engine's turn」). While a unit's own service stands in the card's line, its own turn is
     what brings it back, and the master tries no restore of it meanwhile.
+  - **It makes an occupant that yields by its process go down and come back** (「Yielding by the
+    process」).
   - **How often it reads:** every two seconds, and the node service once a minute;
     `CARD_MASTER_READ_EVERY_MS` and `CARD_MASTER_DISCOVER_EVERY_MS` set them otherwise.
   - **A node whose slave gives no card is lost,** and read again at every round all the same, so it is
@@ -266,6 +268,27 @@ sequenceDiagram
   door of the owner the card is lent through, every other owner's door on each of its own units, the queue
   and the arbiter's version; and the unload and restore of one unit the master asks for.
 
+### Yielding by the process
+
+- **An occupant that keeps the card with no units the arbiter can unload and asks for no turns** — a
+  server that holds its model on the card from its start — yields by its process: its declaration says
+  `yield_by = "process"` and names an adapter (「A service declares itself」).
+- **What makes it yield,** read at every round on each node it is placed on: a claim standing there whose
+  claimant's tier is lower than the occupant's, or a ticket there, waiting or holding the turn, for a
+  request of an occupant of a lower tier or of the same tier, the server having stood there before the
+  request. A ticket that names the card memory it needs (`need.vramMiB`) makes it yield only where the
+  card's free memory, less its group's `reserve_mib`, does not hold that much.
+- **Down:** the master runs the adapter's `stop` for that node alone, says `occupant-stopped`, and keeps
+  the stop in `placements/process-yields.json` beside the rules, so a master restarted meanwhile still
+  brings it back.
+- **Back:** once nothing that made it yield stands on the node — the ticket gone, the claim ended — the
+  master runs the adapter's `start` there and says `occupant-started`. A `stop` or `start` that fails is
+  said once and tried again at the next round.
+- **On that node alone:** a server placed on several nodes goes down only where a request asks for the
+  card.
+- **The slave knows nothing of it:** such a server holds no lock and asks no ticket, so a turn granted in
+  the moment before the master's next read may find the card still holding it.
+
 ### The engine's turn
 
 - **An engine is one service's units across the nodes it spans,** such as a borrowing engine's units on
@@ -276,10 +299,11 @@ sequenceDiagram
   ticket's node is in use (`inUse`, `docs/node-arbiter.md`, 「The hold」) and does not give way to the
   ticket's service, nothing of another occupant is unloaded for it: the ticket is held, its reason that
   turn. The turn's own rules decide when it passes:
-  - **a target whose turn is in use is never unloaded for one of its rank,** whatever a rule names: its
-    turn passes to that rank by its own turn values (`docs/node-arbiter.md`, 「One rank taking turns」), by
-    resting, by its holder giving its ticket back once it has emptied the card itself, or by its head
-    saying `QUIET` on a `PASS`, and the master unloads only once it has;
+  - **a target whose turn is in use is never unloaded for one of its rank before its turn gives way,**
+    whatever a rule names: its turn passes to that rank for a later request or by its own turn values
+    (`docs/node-arbiter.md`, 「One rank taking turns」), by resting, by its holder giving its ticket back
+    once it has emptied the card itself, or by its head saying `QUIET` on a `PASS`, and the master unloads
+    only once it has;
   - one above it is made room for where the turn gives way to it;
   - a slave that says nothing of `inUse` is planned for as one whose turn is never in use.
 - **A group's tickets are planned together.** A ticket naming a unit of a group (the rules' `group`, units
@@ -340,13 +364,18 @@ sequenceDiagram
   - `service` — its name, the word it declares to the arbiter as `BMO_CARD_SERVICE`: lower-case letters,
     digits and hyphens; a `<service>.card.toml` file is named after it;
   - `card_mib` — the card memory it needs on a node;
-  - `priority` — its place among the occupants of a node it shares, higher first; services of equal
-    priority stand at one rank and never push each other out (`docs/node-arbiter.md`, 「The occupants」);
+  - `priority` — its standing in a node's reservation, higher first: which services may share a reserved
+    node (`alone` below, 「A request」). The order on the card is the tier's, never the priority's;
+  - `tier` — its tier on the card where the rules name none for it, a number of zero or more, the lower
+    first (「Tiers」); absent, `2`;
+  - `yield_by` — how it yields its card: `turn`, the default, by its turn and its units
+    (`docs/node-arbiter.md`, 「Priority and yielding」), or `process`, by its adapter's `stop` and `start`
+    (「Yielding by the process」), which needs an `adapter`;
   - `spread` — `one`, standing on a single node and moved whole, or `many`, standing on several;
   - `alone` — whether a node it stands on is reserved for it in the node service. Services that stand
     alone at one priority may share a node, which is then reserved for all of them. Beside them a reserved
-    node takes only a service that does not stand alone and stands below every one of them: it gives way
-    to each of them on the card, so the node stays theirs first, and the reservation names it too, last;
+    node takes only a service that does not stand alone and stands below every one of them in priority,
+    and the reservation names it too, last; on the card each stands by its tier;
   - `adapter` — the command that carries its verbs, as a list of words, not empty; absent for a service
     the master orders on cards but never installs;
   - `[turn]` — how it takes turns with a service of its own rank, absent for a service that never gives
@@ -368,7 +397,8 @@ sequenceDiagram
     with the placed nodes, carrying what the service keeps from a node where it already stands;
   - `uninstall` — stops and disables it there and brings its own placement in step; the installation and
     its data stay on the node;
-  - `start`, `stop`, `health`;
+  - `start`, `stop`, `health` — `stop` and `start` are also how a service declaring `yield_by =
+    "process"` yields a node's card and takes it back (「Yielding by the process」);
   - `placed` — the nodes the service's own placement names, in order.
 - **An adapter touches no role and no occupants.** It writes its own placement alone.
 
@@ -416,8 +446,8 @@ sequenceDiagram
 
 - **A node's order is computed, never written by hand:**
   - the desktop, where the node's machine is a person's desktop;
-  - then the services standing on the node, by declared priority, higher first, those of equal priority
-    written as one word joined by `=`, by name (`song=voice`);
+  - then the services standing on the node, by tier (「Tiers」), lower first, those of one tier written as
+    one word joined by `=`, by name (`song=voice`);
   - then `*`, on a node reserved for no service.
   - The claimants the rules stand first come before it on every node anyway (`docs/node-arbiter.md`,
     「Claimants」), so it names none of them.
@@ -430,10 +460,12 @@ sequenceDiagram
   YAML for people, read by the master alone, through a maintained YAML crate. The master reads it again
   whenever it changes and keeps every change it takes up in `placements/card-rules.log`.
 - **Four parts:**
-  - **`occupants`** — the occupants that take the card outright, each with whether it stands `first`, how
+  - **`occupants`** — the occupants the rules say anything of, each by its `name` and its `tier`
+    (「Tiers」). One with `claims: true` takes the card outright, and says whether it stands `first`, how
     it is `seen_by` (its `tickets`, a `containers` prefix, and only where neither sees it a unit's
     `cgroup`, whose processes claim only on the card) and the host memory it needs (`ram_free`, GiB or
-    `all`); `docs/node-arbiter.md`, 「Claimants」, is what each means. Every node is pushed all of them.
+    `all`); `docs/node-arbiter.md`, 「Claimants」, is what each means. One without says its tier alone.
+    Every node is pushed all of the claimants.
   - **`nodes`** — groups of nodes chosen by their row in the node service, never by name: a `select` on
     the row's `role` or its machine (`desktop`), and whether they are one `pool` (cards counted as one);
     each with the memory every card keeps back for the driver and the CUDA context (`reserve_mib`), where
@@ -441,7 +473,8 @@ sequenceDiagram
     (`ram_max_gib`), and the size in GiB of each node's dump store (`store_gib`, 「The dump store」).
   - **`units`** — each unit, or a pattern of units: its `service`, where it may stand (a `where`
     selector), its `kind` (`resident`, placed and kept on the card until the card is wanted by another;
-    `on-demand`, placed when asked for and kept so after; `fill`, placed in what is left), its `priority`,
+    `on-demand`, placed when asked for and kept so after; `fill`, placed in what is left), its `priority`
+    among the units of its own service,
     whether it may be put on hold (`hold`, with `max_wait_s`), its `group` (units that are useless apart,
     such as one engine's), what it must never share a card with (`apart`), where it goes when unloaded over
     its group's (`dump`), and its measured `vram_mib`, `load_s` and `unload_s` with the date they were
@@ -453,17 +486,35 @@ sequenceDiagram
     - `below` is the desktop's eviction, which the slave carries: what stands below an occupant on the node
       gives way while the desktop is busy. A rule that names a unit asked for cannot say it, and a file
       whose request rule does is refused when it is read, rather than planned as the default.
-- **A fifth part a node is written, `turns`,** comes from no rules file: the master writes it from the
-  services' declarations, every declared `[turn]` keyed by its service (「A service declares itself」), and
-  `push` and `rules --node` write and print it with the rest.
+- **Two more parts a node is written** come from the file and the declarations together, and `push` and
+  `rules --node` write and print them with the rest:
+  - `turns`, every declared `[turn]` keyed by its service (「A service declares itself」);
+  - `tiers`, every occupant's tier keyed by its name (「Tiers」).
+
+### Tiers
+
+- **An occupant's tier** (`docs/node-arbiter.md`, 「Priority and yielding」) is the one its entry in the
+  rules' `occupants` gives; else, for a service, the one its declaration gives; else `2`. A claimant's entry
+  that gives none stands at `0`. The rules are the owner's word and stand over a declaration.
+- **The tiers reach every node whole** as its `tiers` part: each claimant, each occupant the rules name and
+  each declared service. The desktop, named by neither, stands at `0` on its node; the rules may give it
+  another by an entry of its name.
+- **Where tiers act:** on the node, the ranks of its queue (`docs/node-arbiter.md`, 「The occupants」); in
+  the master, what a ticket may unload by default (「The rules」) and what yields by its process
+  (「Yielding by the process」); in a placement, the order of the occupants written (「Occupants are
+  derived」). A service's `priority` acts only on the reservations.
+- **Shown** in the cluster, by occupant and beside each declared service (`docs/api.md`, 「The cluster」).
 - **The node's part** is written as JSON to `~/.config/bmo-card/rules.json`, which its slave reads again
   within a second and logs in `rules.log`; each push is a line of `placements/card-rules.log`. A rules file
   that cannot be read leaves the one read before standing on the node, its claimants with it; a node with
   no rules file keeps no claimant.
 - **With no rule for a request:** a unit asked for is placed where it fits in the free memory; where it
-  does not, units of lower priority on that card go, cheapest first; where that is not enough either, the
-  request is put on hold (`202`, `docs/node-arbiter.md`, 「The hold」). A node a claim stands on is never
-  chosen.
+  does not, the cheapest set of units on that card that makes room goes, chosen among the units of
+  occupants of a later tier than the asker's, of other occupants of its own tier — unloaded only once the
+  turn gives way to the asker (「The engine's turn」) — and of its own service at a lower unit `priority`;
+  where that is not enough either, the request is put on hold (`202`, `docs/node-arbiter.md`, 「The
+  hold」). A node a claim stands on is never chosen. Only that card's units are weighed, so an occupant
+  spread over several cards keeps the others.
 - **Two engines at one rank on a shared pool** need rules that name what goes, since the default frees
   nothing between units of one priority: a rule for the pipeline's unit unloading the cheapest of the
   borrowing engine's units that make room, restored once the pipeline's ticket is done and planned only

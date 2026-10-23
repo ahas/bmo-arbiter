@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::placement::{declarations, turns_of};
+use crate::placement::{declarations, tiers_of, turns_of};
 use crate::reach::{NodeRegistry, NodeShell};
 use crate::rules::{Dump, NodeFacts, Num, RamFree, Rules, read_rules, rules_path, selects};
 
@@ -106,22 +106,24 @@ pub async fn reach_nodes(roots: &Roots, named: &[String]) -> Result<Vec<ReachedN
   Ok(reached)
 }
 
-/// The rules as the file stands, with the turn values the services' declarations carry, or why there are
-/// none to go by.
+/// The rules as the file stands, with the turn values and the tiers the services' declarations carry, or
+/// why there are none to go by.
 pub fn standing_rules(roots: &Roots) -> Result<Rules, String> {
   let path = rules_path(&roots.data_root);
   match read_rules(&path) {
-    Ok(Some(rules)) => with_turns(rules, &roots.declaration_roots),
+    Ok(Some(rules)) => with_declared(rules, &roots.declaration_roots),
     Ok(None) => Err(format!("{} does not stand", path.display())),
     Err(fault) => Err(fault.0),
   }
 }
 
-/// The rules with the `turns` part every node is handed, read off the declarations the roots carry
-/// (docs/placement.md, 「The rules」).
-pub fn with_turns(rules: Rules, declaration_roots: &[PathBuf]) -> Result<Rules, String> {
+/// The rules with the `turns` and `tiers` parts every node is handed, read off the declarations the roots
+/// carry (docs/placement.md, 「The rules」, 「Tiers」).
+pub fn with_declared(rules: Rules, declaration_roots: &[PathBuf]) -> Result<Rules, String> {
+  let declared = declarations(declaration_roots)?;
   Ok(Rules {
-    turns: turns_of(&declarations(declaration_roots)?),
+    turns: turns_of(&declared),
+    tiers: tiers_of(&rules.tiers, &declared),
     ..rules
   })
 }
@@ -209,6 +211,11 @@ pub fn check_lines(rules: &Rules, nodes: &[NodeFacts]) -> Vec<String> {
     };
     let restore = if rule.restore { ", restored once done" } else { "" };
     lines.push(format!("rule {}: {what} → {evict}{restore}", rule.name));
+  }
+  let mut tiers: Vec<(&String, &Num)> = rules.tiers.iter().collect();
+  tiers.sort_by(|a, b| a.1.0.total_cmp(&b.1.0).then(a.0.cmp(b.0)));
+  for (name, tier) in tiers {
+    lines.push(format!("tier {name}: {tier}"));
   }
   lines
 }

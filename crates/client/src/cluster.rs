@@ -189,6 +189,22 @@ pub enum Spread {
   Many,
 }
 
+/// How a service yields its card: by its turn, or by its process going down and coming back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum YieldBy {
+  Turn,
+  Process,
+}
+
+/// An occupant's tier: the lower takes the card first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OccupantTier {
+  pub name: String,
+  pub tier: f64,
+}
+
 /// A service the master places, with its declaration and its nodes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -197,6 +213,9 @@ pub struct PlacedService {
   #[serde(rename = "cardMiB")]
   pub card_mib: f64,
   pub priority: f64,
+  /// The tier its declaration gives, where it gives one.
+  pub tier: Option<f64>,
+  pub yield_by: YieldBy,
   pub spread: Spread,
   pub alone: bool,
   pub node_names: Vec<String>,
@@ -233,6 +252,8 @@ pub struct Cluster {
   pub groups: Vec<Group>,
   pub nodes: Vec<ClusterNode>,
   pub declared: Vec<DeclaredUnit>,
+  /// Every occupant's tier as the nodes are handed it, lower first.
+  pub tiers: Vec<OccupantTier>,
   pub services: Vec<PlacedService>,
   pub placement: Option<PlacementUnderWay>,
   /// The picture's last notes, newest first.

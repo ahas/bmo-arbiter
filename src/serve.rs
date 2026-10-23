@@ -28,7 +28,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::master::{BoxFuture, Master, Reached, World};
 use crate::picture::detail_from;
-use crate::placement::{Placer, Say, write_whole};
+use crate::placement::{Declaration, Hands, Placer, Say, write_whole};
 use crate::reach::{NodeRegistry, NodeShell};
 
 /// The address the API answers on, the token it takes, and how often the rounds go.
@@ -79,6 +79,8 @@ impl Settings {
 pub struct LiveWorld {
   registry: Result<NodeRegistry, String>,
   code_root: PathBuf,
+  // The placement's hands, which read the declarations and run the adapters; none where nothing is placed.
+  hands: Option<Arc<dyn Hands>>,
   // The release the code root last named, and its version.
   release: Mutex<Option<(PathBuf, String)>>,
 }
@@ -88,7 +90,16 @@ impl LiveWorld {
     LiveWorld {
       registry,
       code_root,
+      hands: None,
       release: Mutex::default(),
+    }
+  }
+
+  /// The world reading the declarations and running the adapters through the placement's hands.
+  pub fn with_hands(self, hands: Arc<dyn Hands>) -> Self {
+    LiveWorld {
+      hands: Some(hands),
+      ..self
     }
   }
 }
@@ -117,6 +128,30 @@ impl World for LiveWorld {
 
   fn clock(&self) -> f64 {
     now_seconds()
+  }
+
+  fn declarations(&self) -> Result<Vec<Declaration>, String> {
+    match &self.hands {
+      Some(hands) => hands.declarations(),
+      None => Ok(Vec::new()),
+    }
+  }
+
+  fn adapter<'a>(
+    &'a self,
+    declaration: &'a Declaration,
+    verb: &'a str,
+    node: &'a str,
+    placed: &'a [String],
+  ) -> BoxFuture<'a, (bool, String)> {
+    Box::pin(async move {
+      let Some(hands) = &self.hands else {
+        return (false, "no adapter is run here".to_owned());
+      };
+      let say: Say = Arc::new(|line: String| println!("{line}"));
+      let answer = hands.adapter(declaration, verb, Some(node), placed, &say).await;
+      (answer.ok, answer.detail)
+    })
   }
 
   fn log(&self, line: &str) {

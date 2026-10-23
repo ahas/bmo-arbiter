@@ -13,7 +13,7 @@ use std::time::{Instant, SystemTime};
 use bmo_arbiter_client::card::{Card, CardUnitChanges, UnitMove};
 use bmo_arbiter_client::cluster::{
   CardStage, CardTurn, Cluster, ClusterCard, ClusterNode, ClusterUnit, DeclaredUnit, Group, MasterInfo,
-  NodeLink, Note, QueuedTicket,
+  NodeLink, Note, OccupantTier, QueuedTicket,
 };
 use futures_util::future::join_all;
 use serde_json::Value;
@@ -23,7 +23,7 @@ use crate::picture::{
   CardView, DESCRIPTIONS_FOLDER, Link, LinkState, NodeView, SlaveRules, TicketView, Turn, UnitDetail,
   UnitPlace, UnitView, card_from, changes, descriptions_mark, plannable, read_descriptions,
 };
-use crate::placement::Board;
+use crate::placement::{Board, Declaration, Placements, YieldBy, tiers_of, write_whole};
 use crate::plan::{Decision, Request};
 pub use crate::reach::BoxFuture;
 use crate::reach::{NodeShell, RunResult};
@@ -39,6 +39,10 @@ const REASON_PREFIX: &str = "card-master: ";
 const ASKED_FOR: &str = " asked for ";
 const BACK_ONCE: &str = " — back once ";
 const IS_DONE: &str = " is done";
+
+// The master's record of the occupants it stopped to yield their card, beside the rules
+// (docs/placement.md, 「Yielding by the process」).
+const PROCESS_YIELDS: &str = "process-yields.json";
 
 /// A node's shell, as far as the master uses it: a command run there.
 pub trait Shell: Send + Sync {
@@ -69,6 +73,37 @@ pub trait World: Send + Sync {
   fn log(&self, line: &str);
   /// The release of the arbiter's code the master installs now.
   fn version(&self) -> String;
+  /// The services' declarations as they stand now; none where the world reads none.
+  fn declarations(&self) -> Result<Vec<Declaration>, String> {
+    Ok(Vec::new())
+  }
+  /// A service's adapter run with one verb for one node, its nodes as placed: whether it answered ok, and
+  /// what it said.
+  fn adapter<'a>(
+    &'a self,
+    declaration: &'a Declaration,
+    verb: &'a str,
+    node: &'a str,
+    placed: &'a [String],
+  ) -> BoxFuture<'a, (bool, String)> {
+    let _ = (declaration, verb, node, placed);
+    Box::pin(async { (false, "no adapter is run here".to_owned()) })
+  }
+}
+
+/// What the master stopped to yield a card, kept beside the rules so a master restarted meanwhile still
+/// brings it back: each service and node, with why it went down.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessYields {
+  pub stopped: Vec<StoppedOccupant>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoppedOccupant {
+  pub service_name: String,
+  pub node_name: String,
+  pub reason: String,
 }
 
 /// One note of the picture: when, in the master's clock's seconds, on which node, the code a reader
@@ -119,6 +154,13 @@ pub struct Master {
   known: Vec<String>,
   answering: HashSet<String>,
   rules: Option<Rules>,
+  // The services' declarations as last read, whose tiers stand beside the rules' and whose adapters a
+  // yield by the process runs.
+  declared: Vec<Declaration>,
+  // The occupants stopped to yield their card, by service and node, with why; and why a stop or start
+  // that failed did, said once.
+  stopped: BTreeMap<(String, String), String>,
+  yields_failed: HashMap<(String, String, &'static str), String>,
   rules_error: Option<String>,
   rules_loaded_at: Option<f64>,
   rules_mtime: Option<Option<SystemTime>>,
@@ -159,7 +201,7 @@ impl Master {
 
   pub fn new(world: Arc<dyn World>, rules_file: PathBuf, read_every_s: f64) -> Self {
     let started_at = world.clock();
-    Master {
+    let mut master = Master {
       world,
       rules_file,
       read_every_s,
@@ -169,6 +211,9 @@ impl Master {
       known: Vec::new(),
       answering: HashSet::new(),
       rules: None,
+      declared: Vec::new(),
+      stopped: BTreeMap::new(),
+      yields_failed: HashMap::new(),
       rules_error: None,
       rules_loaded_at: None,
       rules_mtime: None,
@@ -182,6 +227,55 @@ impl Master {
       events: VecDeque::new(),
       revision: 0,
       board: None,
+    };
+    master.read_yields();
+    master
+  }
+
+  /// The rules as the file stands, with every occupant's tier the declarations add (docs/placement.md,
+  /// 「Tiers」).
+  fn rules_now(&self) -> Rules {
+    let rules = self.rules.clone().unwrap_or_default();
+    Rules {
+      tiers: tiers_of(&rules.tiers, &self.declared),
+      ..rules
+    }
+  }
+
+  fn yields_file(&self) -> PathBuf {
+    self.rules_file.parent().unwrap_or(Path::new(".")).join(PROCESS_YIELDS)
+  }
+
+  /// The occupants a master before this one stopped, read back at its start so it brings them back.
+  pub fn read_yields(&mut self) {
+    let Ok(text) = std::fs::read_to_string(self.yields_file()) else { return };
+    match serde_json::from_str::<ProcessYields>(&text) {
+      Ok(read) => {
+        self.stopped = read
+          .stopped
+          .into_iter()
+          .map(|one| ((one.service_name, one.node_name), one.reason))
+          .collect();
+      }
+      Err(fault) => self.world.log(&format!("master: {PROCESS_YIELDS} does not read: {fault}")),
+    }
+  }
+
+  fn save_yields(&self) {
+    let kept = ProcessYields {
+      stopped: self
+        .stopped
+        .iter()
+        .map(|((service, node), reason)| StoppedOccupant {
+          service_name: service.clone(),
+          node_name: node.clone(),
+          reason: reason.clone(),
+        })
+        .collect(),
+    };
+    let text = serde_json::to_string_pretty(&kept).expect("process yields serialize");
+    if let Err(fault) = write_whole(&self.yields_file(), &text) {
+      self.world.log(&format!("master: {PROCESS_YIELDS} was not written: {fault}"));
     }
   }
 
@@ -303,6 +397,15 @@ impl Master {
 
   /// The node list read again and every node asked whether its slave answers.
   pub async fn discover(&mut self) {
+    match self.world.declarations() {
+      Ok(read) => {
+        if read != self.declared {
+          self.revision += 1;
+        }
+        self.declared = read;
+      }
+      Err(fault) => self.world.log(&format!("master: the declarations were not read: {fault}")),
+    }
     self.known = self.world.list_nodes().await;
     let mut asking = JoinSet::new();
     for name in self.known.clone() {
@@ -471,6 +574,121 @@ impl Master {
   pub async fn act(&mut self) {
     self.restore_what_is_done().await;
     self.place_tickets().await;
+    self.yield_processes().await;
+  }
+
+  /// Every occupant that yields by its process stopped on a node where something of a lower tier, or a
+  /// request of its own tier, wants the card, and started again once nothing does (docs/placement.md,
+  /// 「Yielding by the process」).
+  async fn yield_processes(&mut self) {
+    let rules = self.rules_now();
+    let placements: Placements = self
+      .rules_file
+      .parent()
+      .and_then(|folder| std::fs::read_to_string(folder.join("services.json")).ok())
+      .and_then(|text| serde_json::from_str(&text).ok())
+      .unwrap_or_default();
+    let mut down: Vec<(Declaration, String, String)> = Vec::new();
+    let mut up: Vec<(Declaration, String)> = Vec::new();
+    for declaration in self.declared.iter().filter(|one| one.yield_by == YieldBy::Process) {
+      let service = declaration.service.as_str();
+      let tier = rules.tier_of(service);
+      for node in placements.nodes_of(service) {
+        let Some(view) = self.nodes.get(node).filter(|view| view.link.state == LinkState::Connected) else {
+          continue;
+        };
+        let Some(card) = view.cards.first() else { continue };
+        let stopped = self.stopped.contains_key(&(service.to_owned(), node.clone()));
+        let facts = NodeFacts {
+          name: node.clone(),
+          role: view.role.clone(),
+          desktop: view.desktop,
+        };
+        let reserve = rules.group_of(&facts).map_or(0.0, |group| group.reserve_mib.0);
+        let room = card.free_mib.map_or(0.0, |free| free.0) - reserve;
+        // what makes it yield: a claim of a lower tier, a turn of a lower or the same tier in use, and a
+        // request of either waiting that the card's free memory does not hold; kept down while any stands
+        let mut why: Option<String> = card
+          .claim
+          .as_ref()
+          .filter(|claim| rules.tier_of(&claim.claimant_name) < tier)
+          .map(|claim| format!("{} claims the card", claim.claimant_name));
+        if why.is_none()
+          && let Some(turn) = card.turn.as_ref().filter(|turn| turn.service != service)
+          && rules.tier_of(&turn.service) <= tier
+          && (stopped || turn.in_use == Some(true))
+        {
+          why = Some(format!("{}'s turn holds the card", turn.service));
+        }
+        if why.is_none() {
+          why = card
+            .queue
+            .iter()
+            .filter(|ticket| ticket.service != service && !ticket.rest)
+            .filter(|ticket| rules.tier_of(&ticket.service) <= tier)
+            .find(|ticket| stopped || ticket.vram_mib.is_none_or(|need| need.0 > room))
+            .map(|ticket| format!("{} asks for the card", ticket.service));
+        }
+        match (why, stopped) {
+          (Some(why), false) => down.push((declaration.clone(), node.clone(), why)),
+          (None, true) => up.push((declaration.clone(), node.clone())),
+          _ => {}
+        }
+      }
+    }
+    // a stop kept for a service no longer declared to yield by its process, or no longer placed there, is
+    // started all the same
+    for (service, node) in self.stopped.keys() {
+      let yields = self
+        .declared
+        .iter()
+        .find(|one| &one.service == service && one.yield_by == YieldBy::Process);
+      if let Some(declaration) = yields
+        && !placements.nodes_of(service).contains(node)
+      {
+        up.push((declaration.clone(), node.clone()));
+      }
+    }
+    for (declaration, node, why) in down {
+      let placed = placements.nodes_of(&declaration.service).to_vec();
+      let (ok, said) = self.world.adapter(&declaration, "stop", &node, &placed).await;
+      let key = (declaration.service.clone(), node.clone());
+      if ok {
+        self.yields_failed.remove(&(key.0.clone(), key.1.clone(), "stop"));
+        self.say(Some(&node), "occupant-stopped", format!("{} stopped to yield the card: {why}", key.0));
+        self.stopped.insert(key, why);
+        self.save_yields();
+      } else if self.yields_failed.get(&(key.0.clone(), key.1.clone(), "stop")) != Some(&said) {
+        self.say(
+          Some(&node),
+          "occupant-stop-failed",
+          format!("{} was not stopped ({said}); trying again", key.0),
+        );
+        self.yields_failed.insert((key.0, key.1, "stop"), said);
+      }
+    }
+    for (declaration, node) in up {
+      let placed = placements.nodes_of(&declaration.service).to_vec();
+      let (ok, said) = self.world.adapter(&declaration, "start", &node, &placed).await;
+      let key = (declaration.service.clone(), node.clone());
+      if ok {
+        self.yields_failed.remove(&(key.0.clone(), key.1.clone(), "start"));
+        self.say(
+          Some(&node),
+          "occupant-started",
+          format!("{} started again: the card is its turn", key.0),
+        );
+        self.stopped.remove(&key);
+        self.save_yields();
+      } else if self.yields_failed.get(&(key.0.clone(), key.1.clone(), "start")) != Some(&said) {
+        self.say(
+          Some(&node),
+          "occupant-start-failed",
+          format!("{} was not started ({said}); trying again", key.0),
+        );
+        self.yields_failed.insert((key.0, key.1, "start"), said);
+      }
+    }
   }
 
   async fn restore_what_is_done(&mut self) {
@@ -560,7 +778,7 @@ impl Master {
   }
 
   async fn place_tickets(&mut self) {
-    let rules = self.rules.clone().unwrap_or_default();
+    let rules = self.rules_now();
     let mut asked = Vec::new();
     let mut standing: HashSet<(String, String)> = HashSet::new();
     let mut replanned: Vec<(String, String)> = Vec::new();
@@ -733,6 +951,13 @@ impl Master {
       })
       .collect();
     let kind_of = |name: &str| rules.and_then(|rules| rules.spec_of(name)).map(|spec| spec.kind.into());
+    let mut tiers: Vec<OccupantTier> = self
+      .rules_now()
+      .tiers
+      .into_iter()
+      .map(|(name, tier)| OccupantTier { name, tier: tier.0 })
+      .collect();
+    tiers.sort_by(|a, b| a.tier.total_cmp(&b.tier).then(a.name.cmp(&b.name)));
     let board = self.board.as_ref().map(|board| board.lock().unwrap());
     Cluster {
       master: MasterInfo {
@@ -777,6 +1002,7 @@ impl Master {
           vram_mib: spec.vram_mib.map(|mib| mib.0),
         })
         .collect(),
+      tiers,
       services: board.as_ref().map(|board| board.services.clone()).unwrap_or_default(),
       placement: board.as_ref().and_then(|board| board.request.clone()),
       events: self

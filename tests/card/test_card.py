@@ -554,16 +554,16 @@ class TurnsTest(unittest.TestCase):
         self.turns.ask("router")
         self.assertEqual(self.turns.again(voice["id"])["giveWayFor"], "router")
 
-    def test_occupants_of_one_rank_wait_their_turn_by_arrival_and_never_push_each_other_out(self) -> None:
+    def test_occupants_of_one_rank_wait_their_turn_by_arrival_and_are_never_ended_for_each_other(self) -> None:
         self.occupants.path.write_text("song=voice router\n")
         self.occupants.read()
-        song = self.turns.ask("song", gives_way_s=6.0)
+        song = self.turns.ask("song")
         self.assertTrue(song["turn"])
         self.held = [99]
         self.now = 1.0
         voice = self.turns.ask("voice")
         self.assertEqual((voice["turn"], voice["position"]), (False, 2))
-        # Neither stands above the other: a turn of one rank is never told to give way for the other.
+        # Neither stands above the other: a turn held to its end is never told to give way for the other.
         self.assertFalse(self.turns.again(song["id"])["giveWay"])
         self.now = 2.0
         later_song = self.turns.ask("song")
@@ -645,24 +645,105 @@ class TurnsTest(unittest.TestCase):
         # Neither waits past the holder's own time: song gives way after 5 s, voice after 8.
         self.assertEqual({(service, length) for service, length in held_for}, {("song", 5.0), ("voice", 8.0)})
 
-    def test_one_rank_without_turn_values_never_gives_way_to_each_other_as_before(self) -> None:
+    def test_one_rank_without_turn_values_gives_way_to_a_later_request_alone(self) -> None:
         # Values of a service that is not standing here change nothing for song and voice.
         self.one_rank({"router": units.Turn(1.0, True)})
-        self.turns.hold_s = card.TURN_HOLD_S
+        song = self.turns.ask("song", gives_way_s=6.0)
+        self.held = [99]
+        self.now = 1.0
+        # A request that arrived before the song's turn began, an occupant coming back after it yielded: it waits.
+        back = self.turns.ask("voice", waited_s=5.0)
+        self.assertFalse(self.turns.again(song["id"])["giveWay"])
+        self.assertTrue(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
+        self.assertIsNone(self.turns.passes_to(song["id"]))
+        # Another request of the song's own service asked later makes it yield to nobody.
+        self.turns.done(back["id"])
+        self.turns.ask("song")
+        self.assertFalse(self.turns.again(song["id"])["giveWay"])
+        # The later request of the other occupant of its tier makes the running one yield, at once.
+        self.now = 2.0
+        self.turns.ask("voice")
+        told = self.turns.again(song["id"])
+        self.assertEqual((told["giveWay"], told["giveWayFor"]), (True, "voice"))
+        self.assertFalse(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
+
+    def test_a_later_request_of_one_tier_hands_a_turn_held_to_its_boundary_on_there(self) -> None:
+        self.one_rank({})
+        song = self.turns.ask("song")
+        self.held = [99]
+        self.now = 1.0
+        voice = self.turns.ask("voice")
+        # Held to its end, it is told nothing in the middle of its request, and lets go at its boundary.
+        self.assertFalse(self.turns.again(song["id"])["giveWay"])
+        self.assertFalse(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
+        self.assertEqual(self.turns.passes_to(song["id"]), "voice")
+        self.held = []
+        self.turns.done(song["id"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
+        # The song comes back for the request it held before the voice began: it makes the voice yield nothing,
+        # and stands in line by that request, before a request of the voice's that arrived after it.
+        self.held = [99]
+        self.now = 2.0
+        self.turns.ask("song", waited_s=1.5)
+        self.assertFalse(self.turns.again(voice["id"])["giveWay"])
+        self.assertIsNone(self.turns.passes_to(voice["id"]))
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=1.8)["keep"])
+        self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
+
+    def test_a_least_turn_declared_holds_a_later_request_of_one_tier_off_until_it_is_used(self) -> None:
+        self.one_rank({"song": units.Turn(30.0, True)})
         song = self.turns.ask("song", gives_way_s=6.0)
         self.held = [99]
         self.now = 1.0
         self.turns.ask("voice")
-        self.now = 9.0
+        self.now = 29.0
         self.assertFalse(self.turns.again(song["id"])["giveWay"])
-        self.assertTrue(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
-        self.now = 500.0
-        # The voice asks again, as a waiter does; its first ticket was dropped for silence long ago.
-        self.turns.ask("voice")
-        self.assertFalse(self.turns.again(song["id"])["giveWay"])
-        self.assertIsNone(self.turns.passes_to(song["id"]))
-        # Only the bound a holder is kept to hands it on at its boundary.
-        self.assertFalse(self.turns.again(song["id"], next_waited_s=1000.0)["keep"])
+        self.now = 30.0
+        self.assertEqual(self.turns.again(song["id"])["giveWayFor"], "voice")
+
+    def test_tiers_make_the_ranks_a_lower_tier_waited_for_and_given_way_to(self) -> None:
+        tiers = {"tester": 0.0, "trainer": 0.5, "voice": 1.0, "song": 2.0, "router": 2.0}
+        self.occupants.tiers = lambda: tiers
+        self.occupants.path.write_text("song=voice router trainer\n")
+        self.assertTrue(self.occupants.read())
+        self.assertEqual(self.occupants.order, ["tester", "trainer", "voice", "router=song"])
+        self.assertEqual(self.turns.state()["tiers"], tiers)
+        song = self.turns.ask("song", gives_way_s=6.0)
+        self.held = [99]
+        self.now = 1.0
+        router = self.turns.ask("router", waited_s=5.0)
+        voice = self.turns.ask("voice")
+        trainer = self.turns.ask("trainer")
+        # The line by tier, then by when each request arrived.
+        self.assertEqual([one["serviceName"] for one in self.turns.state()["queue"]], ["song", "trainer", "voice", "router"])
+        self.assertEqual(self.turns.again(song["id"])["giveWayFor"], "trainer")
+        self.held = []
+        self.turns.done(song["id"])
+        self.assertTrue(self.turns.again(trainer["id"])["turn"])
+        # Tier 1 waits while tier 0.5 runs, and a turn of tier 0.5 never gives way to it.
+        self.held = [99]
+        self.assertFalse(self.turns.again(voice["id"])["turn"])
+        self.assertFalse(self.turns.again(trainer["id"], next_waited_s=0.0)["giveWay"])
+        self.assertTrue(self.turns.again(trainer["id"], next_waited_s=0.0)["keep"])
+        self.assertFalse(self.turns.again(router["id"])["turn"])
+
+    def test_a_star_takes_every_declared_service_by_its_tier_and_rules_without_tiers_keep_the_files_order(self) -> None:
+        tiers: dict[str, float] = {}
+        self.occupants.tiers = lambda: tiers
+        self.occupants.path.write_text("desktop router *\n")
+        self.occupants.read()
+        self.assertEqual(self.occupants.order, ["tester", "desktop", "router", "*"])
+        tiers.update({"tester": 0.0, "trainer": 0.5, "voice": 1.0, "router": 2.0})
+        self.assertTrue(self.occupants.read())
+        # The desktop stands at nought; the claimant first, and never taken in by the star.
+        self.assertEqual(self.occupants.order, ["tester", "desktop", "trainer", "voice", "router", "*"])
+        self.assertEqual(self.occupants.rank("unnamed"), 5)
+
+    def test_tiers_are_read_off_the_rules_and_an_entry_not_understood_is_passed_over(self) -> None:
+        rules = {"tiers": {"runner": 0, "trainer": 0.5, "odd": "low", "flag": True, "below": -1}}
+        self.assertEqual(units.tiers_of(rules), {"runner": 0.0, "trainer": 0.5})
+        self.assertEqual(units.tiers_of({"tiers": []}), {})
+        self.assertEqual(units.tiers_of(None), {})
 
     def test_turn_values_are_read_off_the_rules_and_an_entry_not_understood_is_passed_over(self) -> None:
         rules = {"turns": {"model": {"yieldAfterS": 30, "canPause": False}, "coder": {"yieldAfterS": 12.5, "canPause": True},

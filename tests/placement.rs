@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use bmo_arbiter::master::BoxFuture;
 use bmo_arbiter::placement::{
   AdapterAnswer, Board, Declaration, Hands, Journal, NodeRow, Placements, Placer, Say, Spread, Step, Verb,
-  declarations, occupants_of, parse_declaration, role_of, tool_declaration, turns_of,
+  YieldBy, declarations, occupants_of, parse_declaration, role_of, tiers_of, tool_declaration, turns_of,
 };
 use bmo_arbiter::rules::{Num, TurnValues};
 
@@ -160,6 +160,8 @@ fn declaration(service: &str, priority: i64, spread: Spread, alone: bool) -> Dec
     service: service.into(),
     card_mib: 6000,
     priority,
+    tier: None,
+    yield_by: YieldBy::Turn,
     spread,
     alone,
     adapter: Some(vec!["true".into()]),
@@ -374,7 +376,11 @@ async fn a_service_below_every_reserving_one_stands_beneath_them_and_they_are_pl
   standing(dir.path(), &[("voice", &["a"]), ("song", &["a"])]);
   let stand = Arc::new(Stand::with(&[("a", Some("song+voice"))]));
   let mut declarations = equals();
-  declarations.push(declaration("router-train", 20, Spread::Many, false));
+  // Below them in priority, so the reservation takes it; ahead of them on the card by the tier it declares.
+  declarations.push(Declaration {
+    tier: Some(Num(0.5)),
+    ..declaration("router-train", 20, Spread::Many, false)
+  });
   let placer = placer_of(&stand, declarations, dir.path());
 
   placer.run(Verb::Place, "router-train", "a", &quiet()).await.unwrap();
@@ -382,7 +388,7 @@ async fn a_service_below_every_reserving_one_stands_beneath_them_and_they_are_pl
   assert_eq!(placer.state().unwrap().nodes_of("router-train"), ["a"]);
   assert_eq!(
     (stand.role("a"), stand.order("a")),
-    (Some("song+voice+router-train".into()), Some("song=voice router-train".into()))
+    (Some("song+voice+router-train".into()), Some("router-train song=voice".into()))
   );
   let level = placer.run(Verb::Place, "router", "a", &quiet()).await.unwrap_err();
   assert!(level.why.contains("song+voice+router-train"), "{}", level.why);
@@ -406,7 +412,7 @@ async fn each_request_reads_the_declarations_its_hands_give_then() {
 }
 
 #[test]
-fn services_of_one_priority_stand_at_one_rank() {
+fn services_of_one_tier_stand_at_one_rank_and_a_lower_tier_before_them() {
   let placements = Placements {
     services: BTreeMap::from([
       ("voice".into(), vec!["node-a".into()]),
@@ -416,9 +422,21 @@ fn services_of_one_priority_stand_at_one_rank() {
     ]),
     unsettled: BTreeMap::new(),
   };
-  assert_eq!(occupants_of("node-a", &placements, &equals(), false), "song=voice");
+  let declared = tiers_of(&BTreeMap::new(), &equals());
+  assert_eq!(occupants_of("node-a", &placements, &equals(), &declared, false), "song=voice");
   assert_eq!(role_of("node-a", &placements, &equals()).as_deref(), Some("song+voice"));
-  assert_eq!(occupants_of("desktop-pc", &placements, &equals(), true), "desktop router=song model");
+  assert_eq!(
+    occupants_of("desktop-pc", &placements, &equals(), &declared, true),
+    "desktop model=router=song"
+  );
+  // The rules' tiers stand over the declarations': the voice before the song, the model before both.
+  let given = BTreeMap::from([("voice".to_owned(), Num(1.0)), ("model".to_owned(), Num(0.5))]);
+  let tiers = tiers_of(&given, &equals());
+  assert_eq!(occupants_of("node-a", &placements, &equals(), &tiers, false), "voice song");
+  assert_eq!(
+    occupants_of("desktop-pc", &placements, &equals(), &tiers, true),
+    "desktop model router=song"
+  );
 }
 
 #[test]
@@ -434,15 +452,19 @@ fn occupants_come_out_for_a_reserved_a_desktop_and_a_shared_node() {
     ]),
     unsettled: BTreeMap::new(),
   };
-  assert_eq!(occupants_of("node-a", &placements, &declarations, false), "voice");
+  let tiers = tiers_of(
+    &BTreeMap::from([("router-train".to_owned(), Num(0.5)), ("voice".to_owned(), Num(1.0))]),
+    &declarations,
+  );
+  assert_eq!(occupants_of("node-a", &placements, &declarations, &tiers, false), "voice");
   assert_eq!(role_of("node-a", &placements, &declarations).as_deref(), Some("voice"));
   assert_eq!(
-    occupants_of("desktop-pc", &placements, &declarations, true),
-    "desktop router song router-train *"
+    occupants_of("desktop-pc", &placements, &declarations, &tiers, true),
+    "desktop router-train router=song *"
   );
   assert_eq!(role_of("desktop-pc", &placements, &declarations), None);
-  assert_eq!(occupants_of("host-a", &placements, &declarations, false), "router-train *");
-  assert_eq!(occupants_of("idle", &placements, &declarations, false), "*");
+  assert_eq!(occupants_of("host-a", &placements, &declarations, &tiers, false), "router-train *");
+  assert_eq!(occupants_of("idle", &placements, &declarations, &tiers, false), "*");
 }
 
 #[tokio::test]

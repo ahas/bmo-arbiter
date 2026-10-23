@@ -232,13 +232,20 @@ export interface components {
             /** @description Every ticket, in line order. */
             queue: components["schemas"]["Ticket"][];
             ram: components["schemas"]["Ram"];
-            /** @description The same names grouped by rank. */
+            /** @description The same names grouped by rank, which are the tiers where the rules carry them. */
             ranks: string[][];
             /** @description The node's part of the rules as last read. */
             rules: components["schemas"]["RulesRead"];
             /** @description The lent owner's door. */
             stage: components["schemas"]["Door"];
             store: components["schemas"]["Store"] | null;
+            /**
+             * @description Each occupant's tier as the node's part of the rules carries it; empty where it carries none.
+             * @default {}
+             */
+            tiers: {
+                [key: string]: number;
+            };
             /** @description By service, how long its turns have held the card in use. */
             typicalHoldMs: {
                 [key: string]: number;
@@ -325,6 +332,8 @@ export interface components {
             nodes: components["schemas"]["ClusterNode"][];
             placement: components["schemas"]["PlacementUnderWay"] | null;
             services: components["schemas"]["PlacedService"][];
+            /** @description Every occupant's tier as the nodes are handed it, lower first. */
+            tiers: components["schemas"]["OccupantTier"][];
         };
         /** @description One card of a node. */
         ClusterCard: {
@@ -540,6 +549,12 @@ export interface components {
             nodeName: string | null;
             text: string;
         };
+        /** @description An occupant's tier: the lower takes the card first. */
+        OccupantTier: {
+            name: string;
+            /** Format: double */
+            tier: number;
+        };
         /** @description A service the master places, with its declaration and its nodes. */
         PlacedService: {
             alone: boolean;
@@ -550,8 +565,14 @@ export interface components {
             priority: number;
             serviceName: string;
             spread: components["schemas"]["Spread"];
+            /**
+             * Format: double
+             * @description The tier its declaration gives, where it gives one.
+             */
+            tier: number | null;
             /** @description Why its placement is unsettled. */
             unsettled: string | null;
+            yieldBy: components["schemas"]["YieldBy"];
         };
         /** @description A placement as every route and event answers it. */
         Placement: {
@@ -792,6 +813,11 @@ export interface components {
             /** Format: int64 */
             tookMs: number;
         };
+        /**
+         * @description How a service yields its card: by its turn, or by its process going down and coming back.
+         * @enum {string}
+         */
+        YieldBy: "turn" | "process";
     };
     responses: {
         /** @description `bad-field`: a field breaks a rule of its own: a description's unit not of its service, or a detail that does not read; the error names it */

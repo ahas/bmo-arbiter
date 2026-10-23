@@ -12,7 +12,7 @@ use bmo_arbiter_client::placements::PlacementKind;
 use serde::{Deserialize, Serialize};
 
 use crate::reach::BoxFuture;
-use crate::rules::{Num, TurnValues, role_services};
+use crate::rules::{DEFAULT_TIER, Num, RULES_FILE, TurnValues, read_rules, role_services};
 
 /// Where a declaration stands among a root's files: `<service>.card.toml`.
 pub const DECLARATION_SUFFIX: &str = ".card.toml";
@@ -46,12 +46,25 @@ pub enum Spread {
   Many,
 }
 
+/// How a service yields its card (docs/node-arbiter.md, 「Priority and yielding」).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum YieldBy {
+  /// By its turn: giving way, its units unloaded, or letting go at its request boundary.
+  #[default]
+  Turn,
+  /// By its process: its adapter's `stop`, and its `start` once its turn comes again.
+  Process,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeclarationFile {
   service: String,
   card_mib: u64,
   priority: i64,
+  tier: Option<f64>,
+  yield_by: Option<YieldBy>,
   spread: Spread,
   alone: bool,
   adapter: Option<Vec<String>>,
@@ -71,6 +84,9 @@ pub struct Declaration {
   pub service: String,
   pub card_mib: u64,
   pub priority: i64,
+  /// Its tier where the rules name none for it (docs/placement.md, 「Tiers」); none for the default.
+  pub tier: Option<Num>,
+  pub yield_by: YieldBy,
   pub spread: Spread,
   pub alone: bool,
   pub adapter: Option<Vec<String>>,
@@ -152,10 +168,21 @@ fn held(read: DeclarationFile, path: &Path, dir: PathBuf) -> Result<Declaration,
   {
     return Err(format!("{}: [turn] yield_after_s must be zero or more seconds", path.display()));
   }
+  if read.tier.is_some_and(|tier| !tier.is_finite() || tier < 0.0) {
+    return Err(format!("{}: tier must be a number of zero or more", path.display()));
+  }
+  if read.yield_by == Some(YieldBy::Process) && read.adapter.is_none() {
+    return Err(format!(
+      "{}: yield_by = \"process\" needs an adapter to stop and start it",
+      path.display()
+    ));
+  }
   Ok(Declaration {
     service: read.service,
     card_mib: read.card_mib,
     priority: read.priority,
+    tier: read.tier.map(Num),
+    yield_by: read.yield_by.unwrap_or_default(),
     spread: read.spread,
     alone: read.alone,
     adapter: read.adapter,
@@ -170,6 +197,16 @@ fn held(read: DeclarationFile, path: &Path, dir: PathBuf) -> Result<Declaration,
 /// The `turns` part every node is handed: each declared `[turn]`, keyed by its service.
 pub fn turns_of(declarations: &[Declaration]) -> BTreeMap<String, TurnValues> {
   declarations.iter().filter_map(|one| Some((one.service.clone(), one.turn?))).collect()
+}
+
+/// Every occupant's tier (docs/placement.md, 「Tiers」): the ones the rules' `occupants` give, and for each
+/// declared service the rules name none for, its declaration's, else the default.
+pub fn tiers_of(given: &BTreeMap<String, Num>, declarations: &[Declaration]) -> BTreeMap<String, Num> {
+  let mut tiers = given.clone();
+  for one in declarations {
+    tiers.entry(one.service.clone()).or_insert(one.tier.unwrap_or(Num(DEFAULT_TIER)));
+  }
+  tiers
 }
 
 fn occupant_word(name: &str) -> bool {
@@ -333,22 +370,25 @@ pub fn role_of(node: &str, placements: &Placements, declarations: &[Declaration]
 }
 
 /// A node's occupant order as the placement gives it: the desktop where the machine is one, the services
-/// standing there by priority, those of equal priority one word joined by `=` since they stand at one
+/// standing there by tier, lower first, those of one tier one word joined by `=` since they stand at one
 /// rank, and `*` on a node reserved for no service.
 pub fn occupants_of(
   node: &str,
   placements: &Placements,
   declarations: &[Declaration],
+  tiers: &BTreeMap<String, Num>,
   desktop: bool,
 ) -> String {
-  let priority = |service: &str| priority_of(service, declarations);
+  let tier = |service: &str| tiers.get(service).map_or(DEFAULT_TIER, |tier| tier.0);
   let mut words: Vec<String> = Vec::new();
   if desktop {
     words.push("desktop".into());
   }
+  let mut standing = placements.on(node);
+  standing.sort_by(|a, b| tier(a).total_cmp(&tier(b)).then(a.cmp(b)));
   let mut rank: Vec<&str> = Vec::new();
-  for service in by_priority(&placements.on(node), declarations) {
-    if rank.last().is_some_and(|last| priority(last) != priority(service)) {
+  for service in standing {
+    if rank.last().is_some_and(|last| tier(last) != tier(service)) {
       words.push(rank.join("="));
       rank.clear();
     }
@@ -487,6 +527,15 @@ impl From<Spread> for bmo_arbiter_client::cluster::Spread {
   }
 }
 
+impl From<YieldBy> for bmo_arbiter_client::cluster::YieldBy {
+  fn from(yield_by: YieldBy) -> Self {
+    match yield_by {
+      YieldBy::Turn => Self::Turn,
+      YieldBy::Process => Self::Process,
+    }
+  }
+}
+
 impl From<Verb> for PlacementKind {
   fn from(verb: Verb) -> Self {
     match verb {
@@ -526,6 +575,7 @@ pub struct Board {
 pub struct Placer {
   hands: Arc<dyn Hands>,
   declarations: Mutex<Arc<Vec<Declaration>>>,
+  rules_file: PathBuf,
   state_file: PathBuf,
   journal_file: PathBuf,
   board: Arc<Mutex<Board>>,
@@ -556,6 +606,7 @@ impl Placer {
     Placer {
       hands,
       declarations: Mutex::default(),
+      rules_file: placements_dir.join(RULES_FILE),
       state_file: placements_dir.join("services.json"),
       journal_file: placements_dir.join("services-request.json"),
       board,
@@ -583,6 +634,13 @@ impl Placer {
 
   fn declaration(&self, service: &str) -> Option<Declaration> {
     self.declared().iter().find(|one| one.service == service).cloned()
+  }
+
+  /// Every occupant's tier, from the rules as the file stands now and the declarations the request took; a
+  /// file that does not read gives none of its own.
+  fn tiers(&self) -> BTreeMap<String, Num> {
+    let given = read_rules(&self.rules_file).ok().flatten().map(|rules| rules.tiers).unwrap_or_default();
+    tiers_of(&given, &self.declared())
   }
 
   /// The master's state as it stands; none before the first adoption.
@@ -621,6 +679,8 @@ impl Placer {
         service_name: one.service.clone(),
         card_mib: one.card_mib as f64,
         priority: one.priority as f64,
+        tier: one.tier.map(|tier| tier.0),
+        yield_by: one.yield_by.into(),
         spread: one.spread.into(),
         alone: one.alone,
         node_names: placements.nodes_of(&one.service).to_vec(),
@@ -742,8 +802,13 @@ impl Placer {
       if placements.on(&row.name).is_empty() {
         continue;
       }
-      let derived =
-        occupants_of(&row.name, &placements, &declarations, self.hands.desktop(&row.name).await);
+      let derived = occupants_of(
+        &row.name,
+        &placements,
+        &declarations,
+        &self.tiers(),
+        self.hands.desktop(&row.name).await,
+      );
       match self.hands.occupants(&row.name).await {
         Ok(standing) if standing.as_deref().map(str::trim) == Some(derived.as_str()) => {}
         Ok(standing) => found.push(format!(
@@ -979,7 +1044,8 @@ impl Placer {
         {
           say(format!("{gone}: the role was not changed: {why}"));
         }
-        let order = occupants_of(gone, &narrowed, &declarations, self.hands.desktop(gone).await);
+        let order =
+          occupants_of(gone, &narrowed, &declarations, &self.tiers(), self.hands.desktop(gone).await);
         if let Err(why) = self.hands.write_occupants(gone, Some(&order)).await {
           say(format!("{gone}: the occupants were not written: {why}"));
         }
@@ -1021,7 +1087,7 @@ impl Placer {
     }
 
     self.begin(journal, Step::Occupants, say)?;
-    let order = occupants_of(&node, after, &declarations, self.hands.desktop(&node).await);
+    let order = occupants_of(&node, after, &declarations, &self.tiers(), self.hands.desktop(&node).await);
     self.hands.write_occupants(&node, Some(&order)).await.map_err(|why| Stopped {
       step: Some(Step::Occupants),
       why,
@@ -1120,7 +1186,7 @@ impl Placer {
         })?;
       }
       self.begin(&mut journal, Step::Occupants, say)?;
-      let order = occupants_of(node, &after, &declarations, self.hands.desktop(node).await);
+      let order = occupants_of(node, &after, &declarations, &self.tiers(), self.hands.desktop(node).await);
       self.hands.write_occupants(node, Some(&order)).await.map_err(|why| Stopped {
         step: Some(Step::Occupants),
         why,
