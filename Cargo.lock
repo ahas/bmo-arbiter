@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter"
-version = "0.1.0-rev.5"
+version = "0.1.0-rev.6"
 dependencies = [
  "axum",
  "bmo-arbiter-client",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter-client"
-version = "0.1.0-rev.5"
+version = "0.1.0-rev.6"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter-plugin"
-version = "0.1.0-rev.5"
+version = "0.1.0-rev.6"
 dependencies = [
  "bmo-arbiter-client",
  "rmcp",

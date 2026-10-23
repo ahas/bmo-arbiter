@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.5**.
+This document states version **0.1.0-rev.6**.
 
 ## The wire format
 
@@ -141,9 +141,9 @@ Read from its environment, which `bmo-card.service` fills from `~/.config/bmo-ca
 | `CARD_TURN_TAKE_S` | how long a granted turn may go untaken before it passes once | 5 |
 | `CARD_TURN_HOLD_S` | how long a turn is kept in use while another ticket waits | 10 |
 | `CARD_TURN_HOLD_OPEN_S` | the longest an answer is held open | 20 |
-| `CARD_CLAIM_POLL_S` | how often a claimant's cgroup is read | 0.1 |
+| `CARD_CLAIM_POLL_S` | how often a claimant's tickets are looked at | 0.1 |
 | `CARD_CLAIM_SETTLE_S` | how long a node holds nothing of a claimant before its claim ends | 10 |
-| `CARD_CLAIM_IDLE_S` | how long a claim on tasks alone stands with nothing on the card | 600 |
+| `CARD_CLAIM_IDLE_S` | how long a claim on containers alone stands with nothing on the card | 600 |
 | `CARD_LOCK_WAIT_S` | how long a hold waits for the lock | 10 |
 | `CARD_YIELD_WAIT_S` | how long a hold told to `YIELD` has to let go | 5 |
 | `CARD_LOCK_GRACE_S` | how long a holder below a claim may keep the lock | 20 |
@@ -399,7 +399,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.5+<commit>` or `0.1.0-rev.5+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.6+<commit>` or `0.1.0-rev.6+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 

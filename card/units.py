@@ -695,9 +695,10 @@ def read_rules(path: Path) -> tuple[dict | None, float | None, str | None]:
 @dataclass(frozen=True)
 class Claimant:
     """An occupant that takes the card outright when it comes, as the rules declare it: whether it stands
-    first on every node whatever the node's order says, how it is seen — its tickets in the hold, and the
-    tasks of a unit's cgroup, a container runtime's command for one named by a prefix — and the host
-    memory it needs available while its claim stands, None for every dump kept there lowered."""
+    first on every node whatever the node's order says, how it is seen — its tickets in the hold, its
+    running containers named by a prefix, and its processes on the card, those in its containers or in a
+    unit's cgroup — and the host memory it needs available while its claim stands, None for every dump
+    kept there lowered."""
     name: str
     first: bool = True
     tickets: bool = True

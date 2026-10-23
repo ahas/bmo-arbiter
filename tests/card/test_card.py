@@ -35,7 +35,7 @@ import desktop as watch  # noqa: E402
 import units  # noqa: E402
 
 # Claimants as the rules declare them; none is known to the arbiter by its name.
-TESTER = units.Claimant("tester", cgroup="tester-agent.service", containers="tester-", ram_free_bytes=None)
+TESTER = units.Claimant("tester", containers="tester-", ram_free_bytes=None)
 BATCH = units.Claimant("batch", first=False, tickets=False, ram_free_bytes=8 << 30)
 
 IDLE = watch.Reading(percent=2, used_mib=600, total_mib=10240)
@@ -979,14 +979,16 @@ class TurnsTest(unittest.TestCase):
 
 
 class ClaimWatchTest(unittest.TestCase):
-    """The claims watched one poll at a time against a stand-in clock, cgroup and tickets."""
+    """The claims watched one poll at a time against a stand-in clock, tickets, containers and card."""
 
     def setUp(self) -> None:
         self.declared: list[units.Claimant] = [TESTER]
         self.asked: set[str] = set()
-        self.found: dict[str, list[int]] = {}
-        # What the card holds of each claimant's cgroup; None where the card cannot be read.
+        # The running containers each prefix names.
+        self.running: dict[str, list[str]] = {}
+        # What the card holds of each claimant, by its prefix or its unit; None where it cannot be read.
         self.card_holds: list[int] | None = []
+        self.asked_card: list[tuple[str | None, str | None]] = []
         self.said: list[str] = []
         root = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(root))
@@ -997,42 +999,63 @@ class ClaimWatchTest(unittest.TestCase):
             path.mkdir(exist_ok=True)
             return path
 
+        def on_card(path: Path | None, prefix: str | None) -> list[int] | None:
+            self.asked_card.append((None if path is None else path.name, prefix))
+            return self.card_holds
+
         self.watch = card.ClaimWatch(lambda: self.declared, lambda name, seen: self.said.append(f"{name}: {seen}"),
                                      lambda name: self.said.append(f"{name}: ended"), settle_s=10,
-                                     tasks=lambda path, prefix: [card.Task(pid, f"group {pid}") for pid in self.found.get(path.name, [])],
+                                     containers=lambda prefix: self.running.get(prefix, []),
                                      asked=lambda name: name in self.asked, cgroup=cgroup,
-                                     on_card=lambda path, prefix: self.card_holds, idle_s=600, card_every_s=0)
+                                     on_card=on_card, idle_s=600, card_every_s=0)
 
-    def test_a_ticket_and_a_task_make_one_claim_ended_once_neither_has_stood_the_settle(self) -> None:
+    def test_a_ticket_and_a_container_make_one_claim_ended_once_neither_has_stood_the_settle(self) -> None:
         self.asked.add("tester")
         self.watch.step(0)
         self.asked.clear()
-        self.found["tester-agent.service"] = [4242]
+        self.running["tester-"] = ["tester-1"]
         self.watch.step(1)
-        self.found.clear()
+        self.running.clear()
         self.watch.step(2)
         self.watch.step(11.9)
         self.assertEqual(self.said, ["tester: a ticket was asked for"])
         self.watch.step(12)
         self.assertEqual(self.said, ["tester: a ticket was asked for", "tester: ended"])
 
+    def test_a_container_named_for_the_claimant_claims_and_one_named_otherwise_does_not(self) -> None:
+        self.running["other-"] = ["other-1"]
+        self.watch.step(0)
+        self.assertEqual(self.said, [])
+        self.running["tester-"] = ["tester-1"]
+        self.watch.step(1)
+        self.assertEqual(self.said, ["tester: a container of it runs (tester-1)"])
+
     def test_a_claimant_added_to_the_rules_is_watched_at_the_next_poll_and_one_taken_out_claims_nothing(self) -> None:
-        added = units.Claimant("newcomer", cgroup="newcomer.service", ram_free_bytes=1 << 30)
-        self.found["newcomer.service"] = [77]
+        added = units.Claimant("newcomer", containers="newcomer-", ram_free_bytes=1 << 30)
+        self.running["newcomer-"] = ["newcomer-7"]
         self.watch.step(0)
         self.assertEqual(self.said, [])
         self.declared.append(added)
         self.watch.step(1)
-        self.assertEqual(self.said, ["newcomer: a task started (process 77)"])
+        self.assertEqual(self.said, ["newcomer: a container of it runs (newcomer-7)"])
         self.declared.remove(added)
         self.watch.step(2)
         self.assertEqual(self.said[-1], "newcomer: ended")
 
-    def test_a_claimant_seen_by_its_cgroup_alone_ignores_its_tickets(self) -> None:
+    def test_a_claimant_seen_by_its_unit_alone_ignores_its_tickets(self) -> None:
         self.declared = [BATCH]
         self.asked.add("batch")
         self.watch.step(0)
         self.assertEqual(self.said, [])
+
+    def test_a_claimant_seen_by_its_tickets_alone_never_reads_the_card(self) -> None:
+        self.declared = [units.Claimant("plain")]
+        self.card_holds = [5150]
+        self.watch.step(0)
+        self.assertEqual((self.said, self.asked_card), ([], []))
+        self.asked.add("plain")
+        self.watch.step(1)
+        self.assertEqual(self.said, ["plain: a ticket was asked for"])
 
     def test_a_process_of_the_claimant_on_the_card_claims_it(self) -> None:
         self.card_holds = [5150]
@@ -1041,18 +1064,29 @@ class ClaimWatchTest(unittest.TestCase):
         self.watch.step(1)
         self.watch.step(11)
         self.assertEqual(self.said, ["tester: a process of it is on the card (process 5150)", "tester: ended"])
+        self.assertEqual(self.asked_card[0], (None, "tester-"))
 
-    def test_tasks_that_never_reach_the_card_stop_counting_after_the_idle_time(self) -> None:
-        self.found["tester-agent.service"] = [4242]
+    def test_a_unit_claims_only_by_its_processes_on_the_card(self) -> None:
+        self.declared = [units.Claimant("agent", cgroup="agent.service")]
+        self.watch.step(0)
+        self.assertEqual(self.said, [])
+        self.card_holds = [6160]
+        self.watch.step(1)
+        self.assertEqual(self.said, ["agent: a process of it is on the card (process 6160)"])
+        self.assertEqual(self.asked_card[-1], ("agent.service", None))
+
+    def test_containers_that_never_reach_the_card_stop_counting_after_the_idle_time(self) -> None:
+        self.running["tester-"] = ["tester-1"]
         self.watch.step(0)
         self.watch.step(599)
-        self.assertEqual(self.said, ["tester: a task started (process 4242)"])
+        self.assertEqual(self.said, ["tester: a container of it runs (tester-1)"])
         self.watch.step(600)
         self.watch.step(609.9)
         self.assertEqual(len(self.said), 1)
         self.watch.step(610)
         self.assertEqual(self.said[-1], "tester: ended")
-        # The same task claims nothing more, until it comes onto the card; a new one claims as any task.
+        # The same container claims nothing more, until a process of it comes onto the card; a new one
+        # claims as any container does.
         self.watch.step(700)
         self.assertEqual(len(self.said), 2)
         self.card_holds = [4242]
@@ -1062,27 +1096,68 @@ class ClaimWatchTest(unittest.TestCase):
         self.watch.step(702)
         self.watch.step(712)
         self.assertEqual(self.said[-1], "tester: ended")
-        self.found["tester-agent.service"] = [4242, 4343]
+        self.running["tester-"] = ["tester-1", "tester-2"]
         self.watch.step(713)
-        self.assertEqual(self.said[-1], "tester: a task started (process 4343)")
+        self.assertEqual(self.said[-1], "tester: a container of it runs (tester-2)")
 
     def test_the_card_in_use_and_a_ticket_keep_a_claim_however_long(self) -> None:
-        self.found["tester-agent.service"] = [4242]
+        self.running["tester-"] = ["tester-1"]
         self.card_holds = [4242]
         for now in range(0, 3000, 100):
             self.watch.step(now)
         self.card_holds = []
+        self.running.clear()
         self.asked.add("tester")
         for now in range(3000, 6000, 100):
             self.watch.step(now)
         self.assertEqual(self.said, ["tester: a process of it is on the card (process 4242)"])
 
     def test_a_card_that_cannot_be_read_gives_nothing_back(self) -> None:
-        self.found["tester-agent.service"] = [4242]
+        self.running["tester-"] = ["tester-1"]
         self.card_holds = None
         for now in range(0, 3000, 100):
             self.watch.step(now)
-        self.assertEqual(self.said, ["tester: a task started (process 4242)"])
+        self.assertEqual(self.said, ["tester: a container of it runs (tester-1)"])
+
+
+class ClaimOnCardTest(unittest.TestCase):
+    """Which processes on the card are a claimant's, read from a stand-in /proc and container listing."""
+
+    def setUp(self) -> None:
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(root))
+        self.proc = Path(root) / "proc"
+        self.cgroups = Path(root) / "cgroup"
+        self.unit = self.cgroups / "system.slice/tester-agent.service"
+        self.mine = "a" * 64
+        self.theirs = "b" * 64
+        self.listed = {self.mine: "tester-1", self.theirs: "other-1"}
+        self.place(101, "/system.slice/tester-agent.service/run")
+        self.place(102, f"/system.slice/docker-{self.mine}.scope")
+        self.place(103, f"/system.slice/docker-{self.theirs}.scope")
+        self.place(104, "/user.slice/user-1000.slice/session-1.scope")
+
+    def place(self, pid: int, cgroup: str) -> None:
+        (self.proc / str(pid)).mkdir(parents=True)
+        (self.proc / str(pid) / "cgroup").write_text(f"0::{cgroup}\n")
+
+    def on_card(self, cgroup: Path | None, containers: str | None, running: list[int] | None) -> list[int] | None:
+        return card.claim_on_card(cgroup, containers, running, root=self.cgroups, proc=self.proc, names=lambda: self.listed)
+
+    def test_a_process_in_a_container_named_for_the_claimant_is_its_own(self) -> None:
+        self.assertEqual(self.on_card(None, "tester-", [101, 102, 103, 104]), [102])
+
+    def test_a_process_of_the_unit_is_the_claimants_only_where_the_rules_name_the_unit(self) -> None:
+        self.assertEqual(self.on_card(self.unit, None, [101, 102, 103, 104]), [101])
+        self.assertEqual(self.on_card(self.unit, "tester-", [101, 102, 103, 104]), [101, 102])
+        self.assertEqual(self.on_card(None, None, [101, 102, 103, 104]), [])
+
+    def test_a_card_that_cannot_be_read_is_none(self) -> None:
+        self.assertIsNone(self.on_card(None, "tester-", None))
+
+    def test_the_running_containers_named_for_the_claimant(self) -> None:
+        self.assertEqual(card.claim_containers("tester-", lambda: self.listed), ["tester-1"])
+        self.assertEqual(card.claim_containers("tester-", lambda: {}), [])
 
 
 class StandInOwner:

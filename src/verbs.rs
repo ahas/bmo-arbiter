@@ -141,18 +141,24 @@ pub fn check_lines(rules: &Rules, nodes: &[NodeFacts]) -> Vec<String> {
       one.seen_by.tickets.then(|| "tickets".to_owned()),
       one
         .seen_by
+        .containers
+        .as_ref()
+        .filter(|prefix| !prefix.is_empty())
+        .map(|prefix| format!("{prefix} containers")),
+      one
+        .seen_by
         .cgroup
         .as_ref()
         .filter(|cgroup| !cgroup.is_empty())
-        .map(|cgroup| format!("{cgroup} tasks")),
+        .map(|cgroup| format!("{cgroup} processes on the card")),
     ]
     .into_iter()
     .flatten()
     .collect();
-    let seen = if seen.is_empty() {
-      "seen by nothing".to_owned()
-    } else {
-      format!("seen by {}", seen.join(" and "))
+    let seen = match seen.as_slice() {
+      [] => "seen by nothing".to_owned(),
+      [one] => format!("seen by {one}"),
+      [rest @ .., last] => format!("seen by {} and {last}", rest.join(", ")),
     };
     let ram = match one.ram_free {
       RamFree::All => "every dump written out".to_owned(),

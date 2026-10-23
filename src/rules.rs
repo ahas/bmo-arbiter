@@ -81,10 +81,15 @@ pub struct NodeGroup {
   pub store_gib: Option<Num>,
 }
 
+/// How a claim of a claimant is seen: its own tickets, its running containers named by a prefix, and
+/// its processes on the card. Nothing else that runs on a node claims for it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SeenBy {
+  /// A ticket asked under its name.
   pub tickets: bool,
+  /// A unit whose processes on the card are the claimant's; for a claimant neither of the others sees.
   pub cgroup: Option<String>,
+  /// The prefix of the names of its containers.
   pub containers: Option<String>,
 }
 

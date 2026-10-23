@@ -9,7 +9,7 @@ pub const RULES: &str = r#"
 occupants:
   - name: tester
     claims: true
-    seen_by: { tickets: true, cgroup: tester-agent.service, containers: tester- }
+    seen_by: { tickets: true, containers: tester- }
     ram_free: all
   - name: batch
     claims: true

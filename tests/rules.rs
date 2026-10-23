@@ -50,7 +50,7 @@ fn the_occupants_that_take_the_card_how_each_is_seen_and_the_host_memory_it_need
         first: true,
         seen_by: SeenBy {
           tickets: true,
-          cgroup: Some("tester-agent.service".into()),
+          cgroup: None,
           containers: Some("tester-".into())
         },
         ram_free: RamFree::All,
@@ -145,7 +145,9 @@ fn what_a_node_is_pushed_is_the_json_its_slave_reads() {
   assert!(text.starts_with("{\n \"occupants\": [\n  {\n   \"name\": \"tester\""), "{text}");
   assert!(text.ends_with("}\n"));
   assert_eq!(read["occupants"][1]["ramFree"], 8);
-  assert_eq!(read["occupants"][0]["seenBy"]["cgroup"], "tester-agent.service");
+  assert_eq!(read["occupants"][0]["seenBy"]["containers"], "tester-");
+  assert_eq!(read["occupants"][0]["seenBy"]["cgroup"], serde_json::Value::Null);
+  assert_eq!(read["occupants"][1]["seenBy"]["cgroup"], "batch.service");
   assert_eq!(read["groups"][0]["ramMaxGiB"], 24);
   assert_eq!(read["units"][0]["unloadS"], 0.5);
   assert_eq!(read["units"][2]["where"]["role"], "model");

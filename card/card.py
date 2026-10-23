@@ -3,12 +3,12 @@ each switched on by what the node has, all of them under the node's occupants: w
 highest first, as the node's own occupants file lists them, read again whenever it changes.
 
 - Claims (docs/node-arbiter.md, 「Claimants」): an occupant the node's rules declare a claimant takes the card
-  outright when a ticket of its own is asked of the hold, a task of its own is found in the cgroup the
-  rules name, or a process of its own is on the card, a task that never reaches the card counting only
-  for so long; the node's card lock is taken for the claim for as long as it stands, the units of a hold
-  below it are unloaded (or the hold told to YIELD and ended if it is not let go in time), dumps kept in
-  host memory are lowered as far as the claimant needs, and its ticket is granted once the lock is held
-  for it.
+  outright when a ticket of its own is asked of the hold, a container named with its prefix runs, or a
+  process of its own is on the card, a container that never reaches the card counting only for so long,
+  and nothing else that runs on the node claims; the node's card lock is taken for the claim for as long
+  as it stands, the units of a hold below it are unloaded (or the hold told to YIELD and ended if it is
+  not let go in time), dumps kept in host memory are lowered as far as the claimant needs, and its ticket
+  is granted once the lock is held for it.
 - The desktop (`CARD_DESKTOP=1`, desktop.py): the lock held for a person's desktop while it uses the card.
 - The keeper: a holder of the lock that declares, in `BMO_CARD_SERVICE`, a service with no place among the
   occupants is ended, and one below a claimant or the desktop that has claimed the card is ended past the
@@ -56,8 +56,8 @@ RPC_PORT = 50052
 # A hold waits this long for the node's lock: a short call of another occupant lets go within it, and
 # a card whose lock stays held past it is left out of the engine's layout rather than waited on.
 LOCK_WAIT_S = float(os.environ.get("CARD_LOCK_WAIT_S", "10"))
-# Where a claimant's agent unit is looked for: a system unit on some nodes, the account's own user unit on
-# others (docs/node-arbiter.md, 「Claimants」).
+# Where a claimant's unit is looked for, where the rules name one: a system unit on some nodes, the account's
+# own user unit on others (docs/node-arbiter.md, 「Claimants」).
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 # The occupant the arbiter itself sees on a person's desktop, as the occupants file names it, and the word
 # standing for every declared service the file does not name.
@@ -96,14 +96,14 @@ LEND_QUIET_S = float(os.environ.get("CARD_LEND_QUIET_S", "10"))
 LEND_GIVES_WAY_S = float(os.environ.get("CARD_LEND_GIVES_WAY_S", "3"))
 # What a process of a service that puts work on a card declares itself by, in its own environment.
 SERVICE_VARIABLE = b"BMO_CARD_SERVICE"
-# How often a claimant is looked for, and how long it stays without a ticket or a task before the node is
-# given back: a container task's commands come one after another with gaps of milliseconds between them.
+# How often a claimant's tickets are looked at, and how long it stays without a ticket, a container or a
+# process on the card before the node is given back.
 CLAIM_POLL_S = float(os.environ.get("CARD_CLAIM_POLL_S", "0.1"))
 CLAIM_SETTLE_S = float(os.environ.get("CARD_CLAIM_SETTLE_S", "10"))
-# How long a claim kept by tasks alone stands with no process of its claimant on the card before those
-# tasks stop counting, and how often the card is read for a claimant's processes (docs/node-arbiter.md,
-# 「Claimants」): a task readying its work does so well within the first, and a process left behind in the
-# agent's cgroup never ends.
+# How long a claim kept by containers alone stands with no process of its claimant on the card before those
+# containers stop counting, and how often the card and the containers are read for a claimant
+# (docs/node-arbiter.md, 「Claimants」): a container readying its work does so well within the first, and one
+# left running idle never ends.
 CLAIM_IDLE_S = float(os.environ.get("CARD_CLAIM_IDLE_S", "600"))
 CLAIM_CARD_S = 2.0
 # How long a hold told to YIELD has to let go before its rpc-server is stopped under it: the head's
@@ -112,7 +112,7 @@ YIELD_WAIT_S = float(os.environ.get("CARD_YIELD_WAIT_S", "5"))
 # How long another occupant may keep the card lock once a claim began before it is ended: a short call
 # lets go within it; a long run does not, and is resumed by its own contract once the node is given back.
 LOCK_GRACE_S = float(os.environ.get("CARD_LOCK_GRACE_S", "20"))
-# The container runtimes whose commands a claimant's task runs, named by the claimant's container prefix.
+# The container runtimes asked for the running containers, a claimant's named by its prefix.
 RUNTIMES = frozenset({"docker", "podman"})
 # A container's full id as it stands in the cgroup path of a process inside it.
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
@@ -134,8 +134,8 @@ class Refused(Exception):
 
 @dataclass(frozen=True)
 class Stat:
-    """What the kernel says of a process that a claim is read by: its process group, whether it has a
-    controlling terminal, and the clock tick it started at."""
+    """What the kernel says of a process: its process group, whether it has a controlling terminal, and the
+    clock tick it started at."""
     group: int
     tty: int
     tick: int
@@ -158,54 +158,6 @@ def _argv(proc: Path, pid: int) -> list[str]:
         return []
 
 
-@dataclass(frozen=True)
-class Task:
-    """A process of a claimant's running task, and what the task is known as across its processes: its
-    process group, or the container it names; a runtime's command naming none is known by itself."""
-    pid: int
-    key: str
-
-
-def claim_tasks(cgroup: Path, containers: str | None = None, proc: Path = Path("/proc")) -> list[Task]:
-    """The processes of a running task in a claimant's agent cgroup: everything there but the agent, the
-    cgroup's oldest process, the short commands it runs in its own process group (its readings of the
-    card and of its containers), and every process with a controlling terminal (a shell the agent opens
-    for a person, and what is run in it), except a container runtime's command for a task, which names a
-    container with the claimant's prefix, pulls or runs one. A task process leads a process group of its
-    own."""
-    pids: set[int] = set()
-    try:
-        files = [cgroup / "cgroup.procs", *cgroup.glob("*/**/cgroup.procs")]
-        for listed in files:
-            pids.update(int(line) for line in listed.read_text().split())
-    except OSError:
-        return []
-    family = {pid: stat for pid in pids if (stat := _stat(proc, pid)) is not None}
-    if not family:
-        return []
-    agent = min(family, key=lambda pid: (family[pid].tick, pid))
-    agent_group = family[agent].group
-    # A group is known by its leader's start where the leader is there, else by its earliest process's.
-    started = {}
-    for pid, stat in sorted(family.items(), key=lambda one: (one[0] != one[1].group, one[1].tick)):
-        started.setdefault(stat.group, stat.tick)
-    tasks = []
-    for pid, stat in family.items():
-        if pid == agent or stat.tty != 0:
-            continue
-        if stat.group != agent_group:
-            tasks.append(Task(pid, f"group {stat.group}:{started[stat.group]}"))
-            continue
-        argv = _argv(proc, pid)
-        if containers and argv and Path(argv[0]).name in RUNTIMES:
-            named = next((arg for arg in argv[1:] if arg.startswith(containers)), None)
-            if named is not None:
-                tasks.append(Task(pid, f"container {named}"))
-            elif argv[1:2] in (["pull"], ["run"]) or argv[1:3] == ["image", "inspect"]:
-                tasks.append(Task(pid, f"process {pid}:{stat.tick}"))
-    return sorted(tasks, key=lambda task: task.pid)
-
-
 def container_names() -> dict[str, str]:
     """Every running container's full id and name, as each container runtime on the node lists them; a
     runtime that cannot be asked lists none."""
@@ -225,14 +177,20 @@ def container_names() -> dict[str, str]:
     return names
 
 
-def claim_on_card(cgroup: Path, containers: str | None, running: list[int] | None, root: Path = CGROUP_ROOT,
+def claim_containers(containers: str, names: Callable[[], dict[str, str]] = container_names) -> list[str]:
+    """The names of the running containers named with the claimant's prefix, as the runtimes list them."""
+    return sorted(name for name in names().values() if name.startswith(containers))
+
+
+def claim_on_card(cgroup: Path | None, containers: str | None, running: list[int] | None, root: Path = CGROUP_ROOT,
                   proc: Path = Path("/proc"), names: Callable[[], dict[str, str]] = container_names) -> list[int] | None:
-    """The claimant's processes among those on the card: each whose cgroup lies in the agent's, or in a
-    container named with the claimant's prefix, its id matched against the names the runtimes list,
-    asked only where a process on the card lies in a container. None where the card cannot be read."""
+    """The claimant's processes among those on the card: each in a container named with the claimant's
+    prefix, its id matched against the names the runtimes list, asked only where a process on the card lies
+    in a container, or, where the rules name the claimant's unit, whose cgroup lies in that unit's. Nothing
+    else in the unit is the claimant's. None where the card cannot be read."""
     if running is None:
         return None
-    agent = str(cgroup)
+    unit = None if cgroup is None else str(cgroup)
     listed: dict[str, str] | None = None
     found = []
     for pid in running:
@@ -241,7 +199,7 @@ def claim_on_card(cgroup: Path, containers: str | None, running: list[int] | Non
         except OSError:
             continue
         paths = [str(root) + line.split(":", 2)[2] for line in lines if line.count(":") >= 2]
-        if any(path == agent or path.startswith(agent + "/") for path in paths):
+        if unit is not None and any(path == unit or path.startswith(unit + "/") for path in paths):
             found.append(pid)
             continue
         ids = [id for path in paths for id in CONTAINER_ID.findall(path)]
@@ -271,8 +229,8 @@ def lock_holders(lock: Path, mine: int) -> list[int]:
 
 
 def claim_cgroup(unit: str, root: Path = CGROUP_ROOT) -> Path | None:
-    """A claimant's agent cgroup wherever its unit runs: a system unit, or a user unit in an account's own
-    manager; a path is the cgroup named outright."""
+    """A claimant's cgroup wherever its unit runs: a system unit, or a user unit in an account's own manager;
+    a path is the cgroup named outright."""
     if unit.startswith("/"):
         return Path(unit)
     system = root / "system.slice" / unit
@@ -1294,28 +1252,29 @@ def turns_handler(turns: Turns, units_api: UnitsApi | None = None, version: str 
 
 
 class ClaimWatch:
-    """Every claimant's claim on the card, read every poll from its tickets standing (`asked`), from its
-    agent's cgroup where the rules name one and it is found, and from its processes on the card, read every
-    two seconds: `started` is called, with the claimant and what was seen, when any appears, and `ended`
-    once the node has held none for the settle time. A task running under a granted ticket is the same
-    claim. A claim kept by tasks alone with nothing of its claimant on the card for the idle time has those
-    tasks stop counting, each by what it is known as, until a process of it comes onto the card. The
-    claimants are the rules' as they stand at each poll, so one added to the rules is watched within the
-    poll and needs no restart."""
+    """Every claimant's claim on the card, read every poll from its tickets standing (`asked`), and every two
+    seconds from its containers running and its processes on the card, those in its containers or, where
+    the rules name its unit, in that unit's cgroup: `started` is called, with the claimant and what was
+    seen, when any appears, and `ended` once the node has held none for the settle time. A container
+    running under a granted ticket is the same claim. A claim kept by containers alone with nothing of its
+    claimant on the card for the idle time has those containers stop counting, each by its name, until a
+    process of it comes onto the card. Nothing else that runs on the node claims. The claimants are the
+    rules' as they stand at each poll, so one added to the rules is watched within the poll and needs no
+    restart."""
 
     def __init__(self, claimants: Callable[[], list[units_mod.Claimant]], started: Callable[[str, str], None],
                  ended: Callable[[str], None], poll_s: float = CLAIM_POLL_S, settle_s: float = CLAIM_SETTLE_S,
-                 tasks: Callable[[Path, str | None], list[Task]] = claim_tasks,
+                 containers: Callable[[str], list[str]] = claim_containers,
                  asked: Callable[[str], bool] = lambda name: False,
                  cgroup: Callable[[str], Path | None] = claim_cgroup,
-                 on_card: Callable[[Path, str | None], list[int] | None] = lambda cgroup, containers: None,
+                 on_card: Callable[[Path | None, str | None], list[int] | None] = lambda cgroup, containers: None,
                  idle_s: float = CLAIM_IDLE_S, card_every_s: float = CLAIM_CARD_S) -> None:
         self.claimants = claimants
         self.started = started
         self.ended = ended
         self.poll_s = poll_s
         self.settle_s = settle_s
-        self.tasks = tasks
+        self.containers = containers
         self.asked = asked
         self.cgroup = cgroup
         self.on_card = on_card
@@ -1325,25 +1284,15 @@ class ClaimWatch:
         self.quiet_since: dict[str, float] = {}
         self.where: dict[str, Path] = {}
         self.missing: set[str] = set()
-        # The card as last read for each claimant, and when; since when a claim has had nothing on the card;
-        # and the tasks that no longer count.
-        self.card_read: dict[str, tuple[float, list[int] | None]] = {}
+        # The card and the containers as last read for each claimant, and when; since when a claim has had
+        # nothing on the card; and the containers that no longer count.
+        self.card_read: dict[str, tuple[float, list[int] | None, list[str]]] = {}
         self.card_since: dict[str, float] = {}
         self.not_counted: dict[str, set[str]] = {}
 
-    def _card(self, claimant: units_mod.Claimant, cgroup: Path, now: float) -> list[int] | None:
-        read = self.card_read.get(claimant.name)
-        if read is None or now - read[0] >= self.card_every_s:
-            read = (now, self.on_card(cgroup, claimant.containers))
-            self.card_read[claimant.name] = read
-        return read[1]
-
-    def seen(self, claimant: units_mod.Claimant, now: float) -> str | None:
-        """What of the claimant claims the card now, said for the journal, or None."""
+    def _unit(self, claimant: units_mod.Claimant) -> Path | None:
+        """The cgroup of the claimant's unit where the rules name one and it is there, said once where not."""
         name = claimant.name
-        if claimant.tickets and self.asked(name):
-            self.card_since[name] = now
-            return "a ticket was asked for"
         if claimant.cgroup is None:
             return None
         cgroup = self.where.get(name)
@@ -1352,27 +1301,48 @@ class ClaimWatch:
             if cgroup is None or not cgroup.exists():
                 if name not in self.missing:
                     self.missing.add(name)
-                    say(f"{name}: {claimant.cgroup} is not there; it is seen by its tickets alone")
+                    say(f"{name}: {claimant.cgroup} is not there; none of its processes on the card is known by it")
                 return None
             self.where[name] = cgroup
             self.missing.discard(name)
-        on_card = self._card(claimant, cgroup, now)
+        return cgroup
+
+    def _read(self, claimant: units_mod.Claimant, now: float) -> tuple[list[int] | None, list[str]]:
+        """The claimant's processes on the card, None where the card cannot be read, and its containers
+        running, as read at most every two seconds."""
+        read = self.card_read.get(claimant.name)
+        if read is None or now - read[0] >= self.card_every_s:
+            unit = self._unit(claimant)
+            if unit is None and not claimant.containers:
+                read = (now, [], [])
+            else:
+                read = (now, self.on_card(unit, claimant.containers),
+                        self.containers(claimant.containers) if claimant.containers else [])
+            self.card_read[claimant.name] = read
+        return read[1], read[2]
+
+    def seen(self, claimant: units_mod.Claimant, now: float) -> str | None:
+        """What of the claimant claims the card now, said for the journal, or None."""
+        name = claimant.name
+        if claimant.tickets and self.asked(name):
+            self.card_since[name] = now
+            return "a ticket was asked for"
+        on_card, running = self._read(claimant, now)
         if on_card:
             self.card_since[name] = now
             return f"a process of it is on the card (process {on_card[0]})"
-        found = self.tasks(cgroup, claimant.containers)
-        # A task no longer counted is forgotten once it has gone.
-        stopped = self.not_counted.setdefault(name, set()) & {task.key for task in found}
+        # A container no longer counted is forgotten once it has gone.
+        stopped = self.not_counted.setdefault(name, set()) & set(running)
         self.not_counted[name] = stopped
-        counted = [task for task in found if task.key not in stopped]
+        counted = [one for one in running if one not in stopped]
         if not counted:
             return None
         if name in self.present and on_card is not None and now - self.card_since.setdefault(name, now) >= self.idle_s:
-            stopped.update(task.key for task in counted)
-            say(f"{name}: nothing of it on the card for {now - self.card_since[name]:.0f} s; its tasks "
-                f"({', '.join(sorted({task.key for task in counted}))}) no longer count until one comes onto the card")
+            stopped.update(counted)
+            say(f"{name}: nothing of it on the card for {now - self.card_since[name]:.0f} s; its containers "
+                f"({', '.join(counted)}) no longer count until one comes onto the card")
             return None
-        return f"a task started (process {counted[0].pid})"
+        return f"a container of it runs ({counted[0]})"
 
     def step(self, now: float) -> None:
         claimants = self.claimants()
@@ -2297,7 +2267,7 @@ def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> 
     store = card.units.store if card.units is not None else store_of(env)
     memory = units_mod.CardMemory()
 
-    def on_card(cgroup: Path, containers: str | None) -> list[int] | None:
+    def on_card(cgroup: Path | None, containers: str | None) -> list[int] | None:
         running = memory.processes()
         return claim_on_card(cgroup, containers, None if running is None else [pid for pid, _ in running])
     # The other owners open their sockets in a folder of the arbiter's own, open to the node account alone.

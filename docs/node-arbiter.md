@@ -56,7 +56,7 @@ keeps its model on it until another asks for the card.
 - **What a holder may assume:** no other service that follows the lock runs on the card while it holds
   the lock, so it may use the whole card less the other services' contexts and what the desktop keeps.
 - **A claimant and the desktop take the lock first.** The arbiter takes it for as long as a claimant's
-  task runs on the node, or the desktop uses the card; a service still keeping the lock twenty seconds
+  claim stands (「Claimants」), or the desktop uses the card; a service still keeping the lock twenty seconds
   after a claim began is ended (「The keeper」).
 - **What the arbiter says:** one journal line when it takes the card and why, and one when it gives it
   back, in the journal of `bmo-card.service`.
@@ -137,44 +137,47 @@ keeps its model on it until another asks for the card.
   holds it back, and everything below it gives way. Which occupants are claimants, and everything about
   each, is the placement rules' `occupants` part (`docs/placement.md`, 「The rules」), pushed to every
   node; the arbiter's code names none of them.
-  - **A typical claimant** is an external job runner whose agent starts jobs on the node under a unit of
-    its own: it stands first, is seen by its tickets, by the tasks of its agent's cgroup and by its
-    processes on the card, its containers named by a prefix, and has every dump kept in host memory
-    written out while it claims a node. A terminal its agent opens for a person, a login shell that stays
-    open while the runner is idle, is no task.
+  - **A typical claimant** is an external job runner whose agent starts jobs on the node in containers
+    it names by a prefix: it stands first, is seen by its tickets, by its containers and by its processes
+    on the card, and has every dump kept in host memory written out while it claims a node.
   - **A claimant added to the rules alone** is kept the same way on every node within a second of the
     rules reaching it: no code, no install, no restart.
+- **A claim stands on the claimant's own word or its own work, never on what runs beside it.** It has
+  three grounds: a ticket the claimant asks, a container it names, and a process of it on the card. What
+  else runs on the node — under the claimant's unit or anywhere — claims nothing, since a unit runs
+  whatever its account starts, a person's shell, a build or a browser among them, and none of that is
+  the claimant's work on the card.
 - **What the rules say of each claimant:**
   - `first` — it stands first on every node whatever the occupants file says (「The occupants」);
-  - `seen_by.tickets` — a ticket it asks of the hold under its name is its claim (「The hold」);
-  - `seen_by.cgroup` — a task in the cgroup of this unit is its claim: the unit is looked for as a system
-    unit and as the node account's own user unit, or named outright by a cgroup's path. A task is any
-    process there but the agent itself, the oldest, that leads a process group of its own and has no
-    controlling terminal. A process with a terminal — a shell the agent opens for a person, and whatever
-    is run in it — is the agent's, never a task by itself; it claims only while it is on the card;
-  - `seen_by.containers` — a container runtime's command naming a container with this prefix, or
-    pulling, running or inspecting an image, is a task too, the agent's own short readings of the card
-    and of its containers being none; a process inside such a container is the claimant's on the card;
+  - `seen_by.tickets` — a ticket it asks of the hold under its name is its claim (「The hold」); this is
+    the ground a claimant is expected to use, and the default;
+  - `seen_by.containers` — a running container whose name starts with this prefix, as the node's
+    container runtimes list it, is its claim, and a process inside such a container is the claimant's on
+    the card;
+  - `seen_by.cgroup` — not set unless neither of the others can see the claimant: a process on the card
+    whose cgroup lies in this unit's is the claimant's on the card, and nothing else in the unit claims.
+    The unit is looked for as a system unit and as the node account's own user unit, or named outright
+    by a cgroup's path;
   - `ram_free` — the host memory, in GiB, the node keeps available while it claims, or `all`, every dump
     kept in host memory written out (`docs/placement.md`, 「Host memory」).
-- **The claim** begins when a ticket of the claimant is asked for, a task of it is found, or a process of
-  it is found on the card, and ends once the node has held none of them for ten seconds
-  (`CARD_CLAIM_SETTLE_S`); the cgroup is read ten times a second (`CARD_CLAIM_POLL_S`), the card every two
-  seconds. A task running under a granted ticket is the same claim, never a second one, and a ticket
-  asked while the claim stands joins it. A claimant with no place among the node's occupants claims
-  nothing there.
-- **A process of the claimant on the card** is a compute process the driver lists whose cgroup is the
-  agent's, or one of the claimant's containers, matched by the container's id against the names its
-  runtime lists. Where the driver cannot list the card's processes, the card is not read for claims.
-- **A claim kept by tasks that never reach the card is given back.** Where a claim stands on tasks
-  alone, and no process of the claimant has been on the card for ten minutes (`CARD_CLAIM_IDLE_S`) since
-  the claim began or since one last was, the tasks seen then stop counting, and the node is given back
-  once the settle has passed.
-  - A task stops counting by what it is known as: its process group, or the container it names, so a
-    task's later processes do not claim afresh. Any of its processes that comes onto the card claims
-    again, and a new task claims as any task does.
-  - A ticket is the claimant's own word that a task of it is held or running, and keeps its claim for as
-    long as it is asked after, whatever is on the card.
+- **The claim** begins when a ticket of the claimant is asked for, a container of it is listed, or a
+  process of it is found on the card, and ends once the node has held none of them for ten seconds
+  (`CARD_CLAIM_SETTLE_S`); the tickets are looked at ten times a second (`CARD_CLAIM_POLL_S`), the
+  containers and the card every two seconds. A container running under a granted ticket is the same
+  claim, never a second one, and a ticket asked while the claim stands joins it. A claimant with no place
+  among the node's occupants claims nothing there.
+- **A process of the claimant on the card** is a compute process the driver lists that lies in one of
+  the claimant's containers, matched by the container's id against the names its runtime lists, or, where
+  the rules name a cgroup, whose cgroup lies in that unit's. Where the driver cannot list the card's
+  processes, the card is not read for claims.
+- **A claim kept by containers that never reach the card is given back.** Where a claim stands on
+  containers alone, and no process of the claimant has been on the card for ten minutes
+  (`CARD_CLAIM_IDLE_S`) since the claim began or since one last was, the containers listed then stop
+  counting, and the node is given back once the settle has passed.
+  - A container stops counting by its name. Any of its processes that comes onto the card claims again,
+    and a new container claims as any container does.
+  - A ticket is the claimant's own word that its work is held or running, and keeps its claim for as long
+    as it is asked after, whatever is on the card.
   - Where the card is not read, nothing is given back by this rule.
 - **What the arbiter does when a claim begins:** it gives no turn to anyone else while it stands; it has
   the owner of a hold's units unload them, each where the rules put it within the host memory the
@@ -580,8 +583,9 @@ node:
   tests: the desktop rule, where a claimant's
   agent is found, the claimants and placing the rules declare, the occupants file and its history, the
   keeper, the queue and its API, resting turns and the tickets asking only to rest, a claimant's tickets
-  and the one claim they make with its cgroup and its processes on the card, a terminal that is no task,
-  tasks that never reach the card given back, one added to the rules alone, the lend settings and which
+  and the one claim they make with its containers and its processes on the card, a process of its unit
+  that claims only on the card, containers that never reach the card given back, one added to the rules
+  alone, the lend settings and which
   rules the settings switch on, the lent hold's turn following its engine's use and taken back by the
   request at its door or on `WANT`, its turn passed at its request boundary, two occupants of one rank
   taking turns by their turn values and those declaring none holding theirs to a boundary or a rest, and

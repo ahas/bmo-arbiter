@@ -28,11 +28,11 @@ fn a_check_says_each_claimant_group_unit_and_rule() {
   let lines = check_lines(&rules, &nodes);
   assert_eq!(
     lines[0],
-    "occupant tester: takes the whole card, first on every node, seen by tickets and tester-agent.service tasks, RAM every dump written out"
+    "occupant tester: takes the whole card, first on every node, seen by tickets and tester- containers, RAM every dump written out"
   );
   assert_eq!(
     lines[1],
-    "occupant batch: takes the whole card, seen by batch.service tasks, RAM 8 GiB kept free"
+    "occupant batch: takes the whole card, seen by batch.service processes on the card, RAM 8 GiB kept free"
   );
   assert_eq!(lines[2], "group compute (one pool), unloads to RAM (RAM at most 24 GiB): node-b");
   assert_eq!(lines[3], "group desk: desktop-pc");

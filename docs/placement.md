@@ -431,9 +431,9 @@ sequenceDiagram
   whenever it changes and keeps every change it takes up in `placements/card-rules.log`.
 - **Four parts:**
   - **`occupants`** — the occupants that take the card outright, each with whether it stands `first`, how
-    it is `seen_by` (its `tickets`, a unit's `cgroup`, a `containers` prefix) and the host memory it needs
-    (`ram_free`, GiB or `all`); `docs/node-arbiter.md`, 「Claimants」, is what each means. Every node is
-    pushed all of them.
+    it is `seen_by` (its `tickets`, a `containers` prefix, and only where neither sees it a unit's
+    `cgroup`, whose processes claim only on the card) and the host memory it needs (`ram_free`, GiB or
+    `all`); `docs/node-arbiter.md`, 「Claimants」, is what each means. Every node is pushed all of them.
   - **`nodes`** — groups of nodes chosen by their row in the node service, never by name: a `select` on
     the row's `role` or its machine (`desktop`), and whether they are one `pool` (cards counted as one);
     each with the memory every card keeps back for the driver and the CUDA context (`reserve_mib`), where
