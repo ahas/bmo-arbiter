@@ -32,7 +32,7 @@ This document states version **0.1.0-rev.3**.
 
 ## The wire format
 
-Both programs answer every HTTP route in the common wire format of bmo-next (bmo-chat's
+Both programs answer every HTTP route in the common wire format of bmo (bmo-chat's
 `docs/conventions.md`, 「The common wire format」 and 「API design」):
 
 - **Keys are camelCase.** A point in time is one integer of epoch milliseconds, named `…At` or `at`; a
