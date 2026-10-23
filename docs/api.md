@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.4**.
+This document states version **0.1.0-rev.5**.
 
 ## The wire format
 
@@ -399,7 +399,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.4+<commit>` or `0.1.0-rev.4+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.5+<commit>` or `0.1.0-rev.5+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 
@@ -408,7 +408,9 @@ The node arbiter reads the occupants and rules files again within a second of a 
 - **The roots** are the directories `CARD_DECLARATIONS` names. In each root the master reads, again for
   every request and every round:
   - every `<service>.card.toml` its git index holds, checked-out submodules included, its adapter run from
-    the file's directory;
+    the file's directory; in a root that is no git work tree, every `<service>.card.toml` found under it
+    instead, hidden folders left out and nothing its `.gitignore` or `.ignore` files exclude, in order of
+    path;
   - the `[card]` table of each `tools/<folder>/.placed/tool.toml`, for each folder of `tools/` whose name
     starts with neither `_` nor `.` and each folder of `tools/_shared/`, its adapter run from
     `tools/<folder>`.

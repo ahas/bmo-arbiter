@@ -535,6 +535,40 @@ fn declarations_are_found_through_the_git_index_a_submodule_s_among_them_and_not
 }
 
 #[test]
+fn a_root_that_is_no_git_tree_declares_every_file_under_it_its_ignore_files_and_hidden_folders_leave_out() {
+  let tree = tempfile::tempdir().unwrap();
+  let write = |name: &str, text: &str| {
+    let path = tree.path().join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+  };
+  write(
+    "gate/router.card.toml",
+    "service = \"router\"\ncard_mib = 7000\npriority = 60\nspread = \"one\"\nalone = false\n",
+  );
+  write(
+    "model.card.toml",
+    "service = \"model\"\ncard_mib = 1\npriority = 30\nspread = \"many\"\nalone = false\n",
+  );
+  write(".gitignore", "node_modules/\n");
+  write("node_modules/copy/router.card.toml", "not toml at all [");
+  write(".worktrees/old/model.card.toml", "not toml at all [");
+  write(
+    "tools/speaker/.placed/tool.toml",
+    "[card]\nservice = \"speaker\"\ncard_mib = 1\npriority = 70\nspread = \"one\"\nalone = true\n",
+  );
+
+  let found = declarations(&[tree.path().to_owned()]).unwrap();
+
+  assert_eq!(
+    found.iter().map(|one| one.service.as_str()).collect::<Vec<_>>(),
+    ["model", "router", "speaker"]
+  );
+  assert_eq!(found[1].dir, tree.path().join("gate"));
+  assert_eq!(found[2].dir, tree.path().join("tools/speaker"));
+}
+
+#[test]
 fn the_declarations_of_every_root_are_read_together_and_one_service_declared_in_two_roots_is_refused() {
   let root = |file: &str, text: &str| {
     let tree = tempfile::tempdir().unwrap();

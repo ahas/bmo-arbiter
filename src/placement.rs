@@ -178,9 +178,20 @@ fn occupant_word(name: &str) -> bool {
     && chars.all(|one| one.is_ascii_lowercase() || one.is_ascii_digit() || one == '-')
 }
 
-/// Every declaration of one root: each one the root's git index holds, a checked-out submodule's among
-/// them, found by its name, and each in the manifest placed for a tool folder of its `tools/`.
-fn root_declarations(root: &Path) -> Result<Vec<Declaration>, String> {
+/// Whether a root stands in a git work tree, so its declarations are the ones its index holds.
+fn in_work_tree(root: &Path) -> Result<bool, String> {
+  let asked = std::process::Command::new("git")
+    .arg("-C")
+    .arg(root)
+    .args(["rev-parse", "--is-inside-work-tree"])
+    .stdin(std::process::Stdio::null())
+    .output()
+    .map_err(|fault| format!("git rev-parse: {fault}"))?;
+  Ok(asked.status.success() && String::from_utf8_lossy(&asked.stdout).trim() == "true")
+}
+
+/// The declaration files the root's git index holds, a checked-out submodule's among them.
+fn indexed_declarations(root: &Path) -> Result<Vec<PathBuf>, String> {
   let listed = std::process::Command::new("git")
     .arg("-C")
     .arg(root)
@@ -195,9 +206,47 @@ fn root_declarations(root: &Path) -> Result<Vec<Declaration>, String> {
       String::from_utf8_lossy(&listed.stderr).trim()
     ));
   }
+  Ok(
+    String::from_utf8_lossy(&listed.stdout)
+      .split('\0')
+      .filter(|name| !name.is_empty())
+      .map(|name| root.join(name))
+      .collect(),
+  )
+}
+
+/// The declaration files found under a root that is no git tree, in order of path: hidden folders left
+/// out, and whatever the root's own `.gitignore` and `.ignore` files exclude.
+fn walked_declarations(root: &Path) -> Result<Vec<PathBuf>, String> {
+  let mut found: Vec<PathBuf> = Vec::new();
+  let walk = ignore::WalkBuilder::new(root)
+    .require_git(false)
+    .parents(false)
+    .git_global(false)
+    .git_exclude(false)
+    .build();
+  for entry in walk {
+    let entry = entry.map_err(|fault| format!("{}: {fault}", root.display()))?;
+    let named = entry.file_name().to_str().is_some_and(|name| name.ends_with(DECLARATION_SUFFIX));
+    if named && entry.file_type().is_some_and(|kind| kind.is_file()) {
+      found.push(entry.into_path());
+    }
+  }
+  found.sort();
+  Ok(found)
+}
+
+/// Every declaration of one root: each one the root's git index holds, a checked-out submodule's among
+/// them, or each found under a root that is no git tree, found by its name; and each in the manifest
+/// placed for a tool folder of its `tools/`.
+fn root_declarations(root: &Path) -> Result<Vec<Declaration>, String> {
+  let files = if in_work_tree(root)? {
+    indexed_declarations(root)?
+  } else {
+    walked_declarations(root)?
+  };
   let mut read: Vec<Declaration> = Vec::new();
-  for name in String::from_utf8_lossy(&listed.stdout).split('\0').filter(|name| !name.is_empty()) {
-    let path = root.join(name);
+  for path in files {
     let text = std::fs::read_to_string(&path).map_err(|fault| format!("{}: {fault}", path.display()))?;
     read.push(parse_declaration(&text, &path)?);
   }

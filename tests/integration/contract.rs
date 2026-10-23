@@ -167,10 +167,15 @@ async fn a_slave_that_stops_answering_is_lost_and_coming_back_is_an_event() {
     .await;
   world.set_slave("a", Some(slave(json!({}))));
   let state = world.state_where("node a back", |state| connected(state, "a")).await;
-  let said = events(&state);
-  assert_eq!(said[0], "the master reaches the node again");
-  assert!(said[1].contains("lost the node"), "{said:?}");
-  assert_eq!(codes(&state)[..2], ["node-reconnected", "node-lost"]);
+  // The node's own link events, newest first; the drift the placement names at its start may fall between.
+  let link: Vec<(String, String)> = codes(&state)
+    .into_iter()
+    .zip(events(&state))
+    .filter(|(code, _)| code.starts_with("node-"))
+    .collect();
+  assert_eq!(link[0], ("node-reconnected".to_owned(), "the master reaches the node again".to_owned()));
+  assert_eq!(link[1].0, "node-lost");
+  assert!(link[1].1.contains("lost the node"), "{link:?}");
 }
 
 #[tokio::test]

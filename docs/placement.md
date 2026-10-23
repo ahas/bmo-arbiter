@@ -330,7 +330,9 @@ sequenceDiagram
   changes. The roots are the directories `CARD_DECLARATIONS` names (`docs/api.md`, 「Declarations」); in
   each:
   - a committed file `<service>.card.toml` beside the service's own code, found through the root's git
-    index, checked-out submodules included, and its adapter run from the file's own directory;
+    index, checked-out submodules included, and its adapter run from the file's own directory. A root that
+    is no git tree, such as a deployed release copied out of its repository, holds every such file found
+    under it instead, leaving out hidden folders and what the root's own ignore files exclude;
   - a `[card]` table in the manifest of a tool placed under the root's `tools/` as a tool host places it,
     each tool folder's `.placed/tool.toml`, and its adapter run from the tool's own folder.
 - **Two declarations of one service, wherever each stands, are a declaration the master refuses.**
