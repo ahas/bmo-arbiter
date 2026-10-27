@@ -286,8 +286,12 @@ sequenceDiagram
   said once and tried again at the next round.
 - **On that node alone:** a server placed on several nodes goes down only where a request asks for the
   card.
-- **The slave knows nothing of it:** such a server holds no lock and asks no ticket, so a turn granted in
-  the moment before the master's next read may find the card still holding it.
+- **The slave knows nothing of it:** such a server asks no ticket, and the node's arbiter knows it only by
+  the card lock its process holds and the name that process declares (`docs/api.md`, 「The service a
+  process declares」). A ticket asked while it holds the lock waits behind it
+  (`docs/node-arbiter.md`, 「The hold」), so the master's next read stops the server and the card is free
+  before that ticket's turn is granted. A server that holds no lock leaves the card occupied until the
+  master has stopped it, and a turn granted meanwhile finds it there.
 
 ### The engine's turn
 
