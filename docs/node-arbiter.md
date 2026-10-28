@@ -93,6 +93,11 @@ keeps its model on it until another asks for the card.
   claimant's task asks the arbiter for its turn first and waits in its queue, in the order the node's
   occupants give (「The hold」); how long it waits, and what it answers its own callers meanwhile, is the
   service's own to say in its own documents.
+- **A process waiting on the lock is an occupant asking for the card.** A service that asks for no turn
+  takes the lock itself as it comes and waits in the kernel's table; that wait is its request, and a rest
+  gives way to it as to any ticket (「Resting」). The arbiter reads the waiting pid where the kernel lists
+  it and the service that pid declares, and never grants it a turn: the process takes the lock itself once
+  the rest is let go.
 - **What a holder may assume:** no other service that follows the lock runs on the card while it holds
   the lock, so it may use the whole card less the other services' contexts and what the desktop keeps.
 - **A claimant and the desktop take the lock first.** The arbiter takes it for as long as a claimant's
@@ -440,6 +445,9 @@ sequenceDiagram
   whatever its rank. Told so with `"giveWay": true` and `"giveWayFor"`, on the held-open ask it keeps while it
   rests (「Handing on」), it takes everything off the card, lets the lock go and gives the ticket back, and
   the occupant asking has the card as soon as that is done.
+  - **A process waiting on the lock asks as a ticket does,** under the service it declares: a wrapper that
+    asks for no turn and waits for the lock is the occupant it names, and the rest gives way to it
+    (「The shared card lock」). A process that declares no service is not an occupant and is not named.
   - **The card is one lock,** so an occupant asking for it never goes on beside a resting holder: what it
     asks for is the card's memory the resting weights stand in. An owner whose units the master unloads
     one at a time stays beside instead, by the rules' plan of the card's memory (`docs/placement.md`,

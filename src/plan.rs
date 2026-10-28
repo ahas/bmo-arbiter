@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::rules::{DEFAULT_PRIORITY, Eviction, NodeFacts, Rules, Selector, matches, selects};
+use crate::rules::{DEFAULT_PRIORITY, Eviction, NodeFacts, Rules, Selector, UnitKind, matches, selects};
 
 // What moving a unit costs where neither the slave nor the rules give a measured time: its size at the
 // dump store's measured rate, each way.
@@ -147,18 +147,25 @@ impl Rules {
       let candidates: Vec<&PictureUnit> = match rule.and_then(|one| one.evict.as_ref()) {
         Some(Eviction::Node) => resident.clone(),
         Some(Eviction::List(patterns)) | Some(Eviction::Cheapest(patterns)) => named(patterns),
-        // A request rule never says `below` (the rules refuse it as they are read); the default stands: the
-        // units of a later tier, of another occupant of the asker's own tier, which the turn gate unloads only
-        // once that turn gives way, and of the asker's own service at a lower priority.
+        // A request rule never says `below` (the rules refuse it as they are read); the default stands: a
+        // resident or on-demand unit that stands on the card gives way to a request of its own class, even
+        // its own service at its own priority (docs/placement.md, 「The rules」); besides those, the units of a
+        // later tier, of another occupant of the asker's own tier, which the turn gate unloads only once that
+        // turn gives way, and of the asker's own service at a lower priority.
         Some(Eviction::Below(_)) | None => resident
           .iter()
           .copied()
+          .filter(|unit| without_node(&unit.name) != without_node(&request.unit))
           .filter(|unit| {
             let tier = self.tier_of(&unit.service);
+            let spec = self.spec_of(&unit.name);
+            let yields_when_wanted =
+              spec.is_some_and(|one| matches!(one.kind, UnitKind::Resident | UnitKind::OnDemand));
             tier > asker_tier
               || (tier == asker_tier
                 && (unit.service != asker
-                  || self.spec_of(&unit.name).map_or(DEFAULT_PRIORITY, |one| one.priority.0) < priority))
+                  || yields_when_wanted
+                  || spec.map_or(DEFAULT_PRIORITY, |one| one.priority.0) < priority))
           })
           .collect(),
       };
@@ -215,17 +222,43 @@ impl Rules {
     let reason = if places.is_empty() {
       format!("no node may hold {} now", request.unit)
     } else {
-      format!(
-        "no card can be emptied enough to hold {} ({} MiB)",
-        request.unit,
-        crate::yaml::js_number(vram)
-      )
+      let mut stuck: Vec<String> = places
+        .iter()
+        .flat_map(|node| {
+          node
+            .units
+            .iter()
+            .filter(|unit| unit.state.on_card() && !unit.evictable)
+            .map(|unit| unit.name.clone())
+        })
+        .collect();
+      stuck.sort();
+      stuck.dedup();
+      if stuck.is_empty() {
+        format!(
+          "no card can be emptied enough to hold {} ({} MiB)",
+          request.unit,
+          crate::yaml::js_number(vram)
+        )
+      } else {
+        format!(
+          "no card can be emptied enough to hold {} ({} MiB); no owner can unload {}",
+          request.unit,
+          crate::yaml::js_number(vram),
+          stuck.join(", ")
+        )
+      }
     };
     Decision::Hold {
       reason,
       rule: rule_name,
     }
   }
+}
+
+/// A unit's name without the node it stands on: `model/store@node-b` and `model/store` name one unit.
+fn without_node(name: &str) -> &str {
+  name.split('@').next().unwrap_or(name)
 }
 
 /// The cheapest set of the candidates that frees at least `need` MiB, by exhaustive search over the few a

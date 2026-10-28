@@ -607,7 +607,9 @@ impl Master {
         let reserve = rules.group_of(&facts).map_or(0.0, |group| group.reserve_mib.0);
         let room = card.free_mib.map_or(0.0, |free| free.0) - reserve;
         // what makes it yield: a claim of a lower tier, a turn of a lower or the same tier in use, and a
-        // request of either waiting that the card's free memory does not hold; kept down while any stands
+        // request of either waiting that the card's free memory does not hold; kept down while any stands.
+        // A rest is not a use: the process it was stopped for comes back and waits for the lock, and the
+        // rest gives way to it (`docs/node-arbiter.md`, 「Resting」).
         let mut why: Option<String> = card
           .claim
           .as_ref()
@@ -616,7 +618,7 @@ impl Master {
         if why.is_none()
           && let Some(turn) = card.turn.as_ref().filter(|turn| turn.service != service)
           && rules.tier_of(&turn.service) <= tier
-          && (stopped || turn.in_use == Some(true))
+          && turn.in_use == Some(true)
         {
           why = Some(format!("{}'s turn holds the card", turn.service));
         }

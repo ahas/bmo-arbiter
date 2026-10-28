@@ -827,6 +827,30 @@ async fn an_occupant_that_yields_by_its_process_goes_down_for_an_earlier_tier_an
 }
 
 #[tokio::test]
+async fn a_resting_turn_does_not_keep_a_process_yield_occupant_down() {
+  let (mut master, stand) =
+    master(slave(1500.0, store_resident(), None, json!([waiting(1, "voice", None)])));
+  *stand.declared.lock().unwrap() =
+    vec![declared("translator", 1.0, YieldBy::Process), declared("voice", 1.0, YieldBy::Turn)];
+  placed(&stand, &[("translator", &["a"]), ("voice", &["a"])]);
+  master.discover().await;
+  master.poll().await;
+  assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a"]);
+  // The voice has spoken and rests on the card with its turn kept: the translator comes back and waits for
+  // the lock, and the node's rest gives way to it (docs/node-arbiter.md, 「Resting」).
+  let mut resting = ticket(1, "voice", true, None);
+  resting["resting"] = json!(true);
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([resting]));
+  master.poll().await;
+  assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a", "translator start a"]);
+  assert!(
+    !std::fs::read_to_string(stand.dir.join("process-yields.json"))
+      .unwrap()
+      .contains("translator")
+  );
+}
+
+#[tokio::test]
 async fn an_occupant_that_yields_by_its_process_stays_for_a_later_tier_and_a_request_the_card_holds() {
   let (mut master, stand) = master(slave(
     7000.0,

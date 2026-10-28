@@ -215,20 +215,35 @@ def claim_on_card(cgroup: Path | None, containers: str | None, running: list[int
     return sorted(found)
 
 
-def lock_holders(lock: Path, mine: int) -> list[int]:
-    """The processes other than this one holding a flock on the file, read from the kernel's table."""
+def _lock_pids(lock: Path, mine: int, waiting: bool) -> list[int]:
+    """The processes other than this one holding, or waiting for, a flock on the file, read from the kernel's
+    table. A held lock reads `1: FLOCK ADVISORY WRITE <pid> <dev>:<inode> 0 EOF`; a waiter reads
+    `1: -> FLOCK …`."""
     try:
         stat = lock.stat()
         table = Path("/proc/locks").read_text().splitlines()
     except OSError:
         return []
     where = f"{os.major(stat.st_dev):02x}:{os.minor(stat.st_dev):02x}:{stat.st_ino}"
-    holders = []
+    found = []
+    at, pid_at, where_at = (2, 5, 6) if waiting else (1, 4, 5)
     for fields in (line.split() for line in table):
-        # A held lock reads `1: FLOCK  ADVISORY  WRITE <pid> <dev>:<inode> 0 EOF`; a waiter reads `1: -> FLOCK …`.
-        if len(fields) >= 6 and fields[1] == "FLOCK" and fields[5] == where and fields[4].isdigit() and int(fields[4]) != mine:
-            holders.append(int(fields[4]))
-    return holders
+        if (len(fields) > where_at and fields[at] == "FLOCK" and fields[where_at] == where
+                and fields[pid_at].isdigit() and int(fields[pid_at]) != mine):
+            found.append(int(fields[pid_at]))
+    return found
+
+
+def lock_holders(lock: Path, mine: int) -> list[int]:
+    """The processes other than this one holding a flock on the file, read from the kernel's table."""
+    return _lock_pids(lock, mine, waiting=False)
+
+
+def lock_waiters(lock: Path, mine: int) -> list[int]:
+    """The processes other than this one waiting for a flock on the file: a service that asks for no turn,
+    waiting for the card (docs/node-arbiter.md, 「The shared card lock」)."""
+    return _lock_pids(lock, mine, waiting=True)
+
 
 
 def claim_cgroup(unit: str, root: Path = CGROUP_ROOT) -> Path | None:
@@ -530,15 +545,18 @@ class Turns:
     granted or not.
 
     A turn with nothing left to serve rests (docs/node-arbiter.md, 「Resting」): it keeps the lock with its weights on
-    the card and gives way to any ticket that waits for a request, whatever its rank. A ticket asked only to
-    rest stands after every other, is granted only to a card nobody else wants, and makes nobody give way."""
+    the card and gives way to any ticket that waits for a request, whatever its rank, and to a process
+    waiting for the lock under a service that has a place. A ticket asked only to rest stands after every
+    other, is granted only to a card nobody else wants, and makes nobody give way."""
 
     def __init__(self, occupants: Occupants, lock: Path, claimed: Callable[[], str | None],
                  holders: Callable[[Path, int], list[int]] | None = None, clock: Callable[[], float] = time.monotonic,
                  keep_s: float = TURN_KEEP_S, take_s: float = TURN_TAKE_S,
                  claim_holds: Callable[[], bool] = lambda: False, claim_wait_s: float = LOCK_GRACE_S,
                  hold_s: float = TURN_HOLD_S, hold_open_s: float = TURN_HOLD_OPEN_S,
-                 turn_values: Callable[[str], units_mod.Turn | None] = lambda service: None) -> None:
+                 turn_values: Callable[[str], units_mod.Turn | None] = lambda service: None,
+                 waiters: Callable[[Path, int], list[int]] | None = None,
+                 declared: Callable[[int], str | None] = declared_service) -> None:
         self.occupants = occupants
         self.lock = lock
         # The claimant whose claim stands, or None.
@@ -547,6 +565,9 @@ class Turns:
         # The longest wait a claimant's ticket is told: the keeper ends a holder below it within it.
         self.claim_wait_s = claim_wait_s
         self.holders = holders or lock_holders
+        # The processes waiting for the lock: a service that asks for no turn, asking for the card.
+        self.waiters = waiters or lock_waiters
+        self.declared = declared
         self.clock = clock
         self.keep_s = keep_s
         self.take_s = take_s
@@ -721,7 +742,16 @@ class Turns:
         peers = self._peers_due(ticket) if self._values(ticket).can_pause else []
         waiting = [other for other in self._asking()
                    if ticket.resting or self._above(other, ticket) or other in peers]
-        return waiting[0].service if waiting else None
+        if waiting:
+            return waiting[0].service
+        # A rest gives way to a process waiting for the lock too: a service that asks for no turn asks for
+        # the card in the kernel's table (docs/node-arbiter.md, 「The shared card lock」, 「Resting」).
+        if ticket.resting:
+            for pid in self.waiters(self.lock, os.getpid()):
+                service = self.declared(pid)
+                if service is not None and service != ticket.service and self.occupants.rank(service) is not None:
+                    return service
+        return None
 
     def passes_to(self, ticket_id: int) -> str | None:
         """Who a turn that lets go only at its request boundary is to pass to there, by its own turn values

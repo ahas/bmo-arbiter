@@ -341,8 +341,12 @@ class TurnsTest(unittest.TestCase):
         self.now = 0.0
         self.claim: str | None = None
         self.held: list[int] = []
+        self.waiting: list[int] = []
+        self.declared: dict[int, str] = {}
         self.turns = card.Turns(self.occupants, Path(root) / ".gpu.lock", lambda: self.claim,
-                                holders=lambda lock, mine: self.held, clock=lambda: self.now)
+                                holders=lambda lock, mine: self.held, clock=lambda: self.now,
+                                waiters=lambda lock, mine: self.waiting,
+                                declared=lambda pid: self.declared.get(pid))
 
     def test_a_free_card_is_given_at_once_and_the_next_waits_with_its_place_and_wait(self) -> None:
         router = self.turns.ask("router")
@@ -499,6 +503,32 @@ class TurnsTest(unittest.TestCase):
         self.held = []
         self.turns.done(voice["id"])
         self.assertTrue(self.turns.again(router["id"])["turn"])
+
+    def test_a_resting_turn_gives_way_to_a_process_waiting_for_the_lock(self) -> None:
+        voice = self.turns.ask("voice")
+        self.held = [99]
+        self.turns.again(voice["id"], rest=True)
+        self.assertFalse(self.turns.again(voice["id"])["giveWay"])
+        # A wrapper that asks for no turn waits in the kernel's table under the service it declares; a rest
+        # gives way to it as to a ticket.
+        self.declared[77] = "router"
+        self.waiting = [77]
+        told = self.turns.again(voice["id"])
+        self.assertEqual((told["resting"], told["giveWay"], told["giveWayFor"]), (True, True, "router"))
+        # A process of the resting service itself is not another occupant, and one with no place is nobody.
+        self.declared[77] = "voice"
+        self.assertFalse(self.turns.again(voice["id"])["giveWay"])
+        self.declared[77] = "stranger"
+        self.assertFalse(self.turns.again(voice["id"])["giveWay"])
+        # A turn in use is not idle and is not told to let go for a process that asks for no turn.
+        self.held = []
+        self.waiting = []
+        self.turns.done(voice["id"])
+        busy = self.turns.ask("router", gives_way_s=6.0)
+        self.held = [99]
+        self.declared[77] = "voice"
+        self.waiting = [77]
+        self.assertFalse(self.turns.again(busy["id"])["giveWay"])
 
     def test_a_resting_turn_gives_way_to_a_claim(self) -> None:
         voice = self.turns.ask("voice")
@@ -1410,7 +1440,9 @@ class OwnersTest(unittest.IsolatedAsyncioTestCase):
         self.owners = units.Owners(folder, self.store, lambda service: service in ("coder", "model"), "model",
                                    owner_of=lambda path: self.stage)
         self.broker = card.Card("k", "127.0.0.1", self.root / ".gpu.lock", [], self.root)
-        self.broker.units = units.Units("model", self.lent, self.store)
+        # The host memory this test weighs is the rules' bound, not the machine's: a machine with little
+        # available would send every dump to the store and test nothing of the accounting.
+        self.broker.units = units.Units("model", self.lent, self.store, available=lambda: 40 << 30)
         self.api = card.UnitsApi(self.broker, None, self.store, self.root / "rules.json", "v", owners=self.owners)
 
     async def test_only_an_owner_placed_on_the_node_and_not_the_lent_one_is_read(self) -> None:
@@ -1449,6 +1481,7 @@ class OwnersTest(unittest.IsolatedAsyncioTestCase):
         self.broker.owners = self.owners
         self.broker.take_rules({"groups": [{"name": "g", "dump": "ram", "ramMaxGiB": 12}]})
         await self.owners.refresh()
+        self.owners.units["coder"].available = lambda: 40 << 30
         await self.broker.units.evict(["model/weights"], "the master", self.broker.placing())
         # 7 GiB of the lent units kept already: the stage's 10 would pass the 12 a node's dumps may take
         outcomes = await self.api.move("evict", ["coder/stage"], "model waits")

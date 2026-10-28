@@ -483,6 +483,10 @@ sequenceDiagram
     such as one engine's), what it must never share a card with (`apart`), where it goes when unloaded over
     its group's (`dump`), and its measured `vram_mib`, `load_s` and `unload_s` with the date they were
     measured.
+    - **A `resident` or `on-demand` unit that stands on the card is idle when its holder's turn is not in
+      use or gives way to the request; it then makes room for a waiting ticket of its own class as well as
+      any other.** A `fill` unit is placed in what is left and gives way only by the default below. This is
+      what keeps a unit on the card while nobody wants it and takes it off when somebody does.
   - **`rules`** — each a trigger (`when`: a unit asked for, the desktop busy), what goes (`evict`: a list of
     units, `node` for every unit on the node, `cheapest` among a pattern, or `below` an occupant), where the
     asked unit goes (`place`), and whether what went comes back once it is done (`restore`). A claim is no
@@ -513,12 +517,17 @@ sequenceDiagram
   that cannot be read leaves the one read before standing on the node, its claimants with it; a node with
   no rules file keeps no claimant.
 - **With no rule for a request:** a unit asked for is placed where it fits in the free memory; where it
-  does not, the cheapest set of units on that card that makes room goes, chosen among the units of
-  occupants of a later tier than the asker's, of other occupants of its own tier — unloaded only once the
-  turn gives way to the asker (「The engine's turn」) — and of its own service at a lower unit `priority`;
-  where that is not enough either, the request is put on hold (`202`, `docs/node-arbiter.md`, 「The
-  hold」). A node a claim stands on is never chosen. Only that card's units are weighed, so an occupant
-  spread over several cards keeps the others.
+  does not, the cheapest set of units on that card that makes room goes, chosen among:
+  - every `resident` or `on-demand` unit of an occupant of the asker's own tier, its own service at its
+    own `priority` included, and every such unit of a later tier — unloaded only once the turn that holds
+    it is not in use or gives way to the asker (「The engine's turn」);
+  - the units of other occupants of its own tier and of its own service at a lower unit `priority` that
+    are `fill`, and every `fill` unit of a later tier.
+
+  A unit the owner cannot unload makes no room; where what can go is not enough, the request is put on
+  hold (`202`, `docs/node-arbiter.md`, 「The hold」), its reason naming the units left on the card that no
+  owner can unload. A node a claim stands on is never chosen. Only that card's units are weighed, so an
+  occupant spread over several cards keeps the others.
 - **Two engines at one rank on a shared pool** need rules that name what goes, since the default frees
   nothing between units of one priority: a rule for the pipeline's unit unloading the cheapest of the
   borrowing engine's units that make room, restored once the pipeline's ticket is done and planned only

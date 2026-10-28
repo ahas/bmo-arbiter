@@ -85,7 +85,12 @@ fn the_cheapest_set_that_makes_room_goes_on_the_card_where_it_costs_least_and_co
 }
 
 #[test]
-fn with_no_rule_only_units_of_lower_priority_go() {
+fn with_no_rule_only_a_fill_unit_of_lower_priority_goes() {
+  let rules = parse_rules(
+    "nodes:\n  - name: desk\n    select: { desktop: true }\n    reserve_mib: 1000\nunits:\n  - unit: \"voice/small\"\n    vram_mib: 1500\n  - unit: \"voice/big\"\n    kind: fill\n    priority: 70\n",
+    RULES_FILE,
+  )
+  .unwrap();
   let unit = |name: &str, vram: f64| PictureUnit {
     name: name.into(),
     service: name.split('/').next().unwrap().into(),
@@ -106,10 +111,74 @@ fn with_no_rule_only_units_of_lower_priority_go() {
     claimed_by: None,
     units: vec![unit("router/room@desk-1", 700.0), unit("voice/big@desk-1", 5000.0)],
   };
-  let Decision::Place { node, evict, .. } = rules().plan(&[desk], &asked("voice/small")) else {
+  let Decision::Place { node, evict, .. } = rules.plan(&[desk], &asked("voice/small")) else {
     panic!("held")
   };
   assert_eq!((node.as_str(), evict), ("desk-1", vec!["router/room@desk-1".to_owned()]));
+}
+
+#[test]
+fn a_waiting_ticket_of_its_own_class_makes_an_idle_resident_give_way() {
+  let rules = parse_rules(
+    "units:\n  - unit: \"model/*\"\n    kind: resident\n    priority: 50\n    load_s: 1\n    unload_s: 1\n",
+    RULES_FILE,
+  )
+  .unwrap();
+  let decision = rules.plan(
+    &[model("a", 100.0, &[("weights", 5000.0)])],
+    &Request {
+      unit: "model/large".into(),
+      vram_mib: Some(4000.0),
+      ..Request::default()
+    },
+  );
+  let Decision::Place { node, evict, .. } = decision else {
+    panic!("held: {decision:?}")
+  };
+  assert_eq!((node.as_str(), evict), ("a", vec!["model/weights@a".to_owned()]));
+}
+
+#[test]
+fn a_lone_unit_is_not_moved_while_nothing_asks_for_the_card() {
+  let decision = rules().plan(
+    &[model("a", 8000.0, &[("weights", 900.0)])],
+    &Request {
+      unit: "model/weights".into(),
+      vram_mib: Some(900.0),
+      ..Request::default()
+    },
+  );
+  assert_eq!(
+    decision,
+    Decision::Place {
+      node: "a".into(),
+      evict: vec![],
+      restore: false,
+      cost_s: 0.0,
+      rule: None
+    }
+  );
+}
+
+#[test]
+fn a_unit_no_owner_can_unload_is_named_in_the_hold_rather_than_waited_on_silently() {
+  let rules =
+    parse_rules("units:\n  - unit: \"model/*\"\n    kind: resident\n    priority: 50\n", RULES_FILE)
+      .unwrap();
+  let mut node = model("a", 100.0, &[("weights", 5000.0)]);
+  node.units[0].evictable = false;
+  let Decision::Hold { reason, .. } = rules.plan(
+    &[node],
+    &Request {
+      unit: "model/large".into(),
+      vram_mib: Some(4000.0),
+      ..Request::default()
+    },
+  ) else {
+    panic!("placed");
+  };
+  assert!(reason.contains("model/weights@a"), "{reason}");
+  assert!(reason.contains("no owner can unload"), "{reason}");
 }
 
 #[test]
