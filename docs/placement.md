@@ -278,12 +278,23 @@ sequenceDiagram
   request of an occupant of a lower tier or of the same tier, the server having stood there before the
   request. A ticket that names the card memory it needs (`need.vramMiB`) makes it yield only where the
   card's free memory, less its group's `reserve_mib`, does not hold that much.
+- **Its turn is in use while a demand for it stands on the node,** and rests while none does
+  (「Demands」). The node ticket its own turn client holds says only that it stands.
+- **In use, it is never stopped for an occupant of its own tier.** A ticket of its own tier waits until
+  the last demand on it is given back; only a claim or a ticket of a lower tier stops it while it is in
+  use, and the demands granted there are told so. No measure of time makes it yield.
+- **A hand-over between two such occupants of one tier** happens only where the standing one rests, or
+  where the one caller using it lends its card within a demand of its own (「Demands」).
 - **Down:** the master runs the adapter's `stop` for that node alone, says `occupant-stopped`, and keeps
   the stop in `placements/process-yields.json` beside the rules, so a master restarted meanwhile still
   brings it back.
 - **Back:** once nothing that made it yield stands on the node — the ticket gone, the claim ended — the
   master runs the adapter's `start` there and says `occupant-started`. A `stop` or `start` that fails is
   said once and tried again at the next round.
+- **A hand-over is not given back.** Its stop is kept as a hand-over, and the occupant that handed the card
+  over comes back on that node only by a demand of its own or as the return of a lent turn (「Demands」),
+  never because the occupant it handed to went down. Where a ticket of a lower tier or a claim then stops
+  the occupant standing, the one brought back once it is gone is that occupant alone.
 - **On that node alone:** a server placed on several nodes goes down only where a request asks for the
   card.
 - **The slave knows nothing of it:** such a server asks no ticket, and the node's arbiter knows it only by
@@ -303,11 +314,11 @@ sequenceDiagram
   ticket's node is in use (`inUse`, `docs/node-arbiter.md`, 「The hold」) and does not give way to the
   ticket's service, nothing of another occupant is unloaded for it: the ticket is held, its reason that
   turn. The turn's own rules decide when it passes:
-  - **a target whose turn is in use is never unloaded for one of its rank before its turn gives way,**
-    whatever a rule names: its turn passes to that rank for a later request or by its own turn values
-    (`docs/node-arbiter.md`, 「One rank taking turns」), by resting, by its holder giving its ticket back
-    once it has emptied the card itself, or by its head saying `QUIET` on a `PASS`, and the master unloads
-    only once it has;
+  - **a target whose turn is in use is never unloaded for one of its rank before its turn passes,**
+    whatever a rule names: its turn passes to that rank at its holder's request boundary where the next
+    request in line is that rank's, by resting, by its holder giving its ticket back once it has emptied the
+    card itself, or by its head saying `QUIET` on a `PASS` (`docs/node-arbiter.md`, 「One rank taking
+    turns」), never on time, and the master unloads only once it has;
   - one above it is made room for where the turn gives way to it;
   - a slave that says nothing of `inUse` is planned for as one whose turn is never in use.
 - **A group's tickets are planned together.** A ticket naming a unit of a group (the rules' `group`, units
@@ -318,20 +329,77 @@ sequenceDiagram
   whose stages pause — take the cards in equal turns:
   - **the pipeline takes the cards** only once the borrowing engine's turn rests on every node, its stages
     at once: `CARD_LEND_QUIET_S` after the borrowing engine's last computation there; at once where its
-    head said `QUIET`; or once the borrowing engine's turn has been in use for its `yield_after_s` while
-    the pipeline waits, the arbiter saying `PASS` and the head `QUIET` at its next request boundary
-    (`docs/node-arbiter.md`, 「Lending」);
+    head said `QUIET`; or, while the pipeline waits, at the borrowing engine's next request boundary, the
+    arbiter saying `PASS` and the head `QUIET` (`docs/node-arbiter.md`, 「Lending」);
   - **the borrowing engine queues for them through its own restore:** a request that finds its units out
     has the head say `WANT` on each card, so its hold takes a place in each node's queue at the pipeline's
-    rank. The pipeline's stages give way to it by their own turn values: at a request boundary, or in the
-    middle of a request once their turn has been in use for the pipeline's `yield_after_s`, dumping
-    themselves and giving their tickets back. Each slave then loads the borrowing engine's units back
+    rank. The pipeline's stages give way to it at their next request boundary, in the line's order, dumping
+    themselves and giving their tickets back; nothing makes them give way in the middle of a request for
+    it, and nothing does on time. Each slave then loads the borrowing engine's units back
     itself, and the master reads them as back (「Master and slaves」);
   - **a use waiting at the borrowing engine's door,** one that reached a card past the head while its
     units were out, still has the pipeline pause at once where the pipeline watches that door, as a
     backstop to the queue.
   - Where in this exchange a request is admitted or held is set out point by point in `docs/api.md`,
     「Admission on a shared pool」.
+
+### Demands
+
+- **Routing is automatic.** A caller names the service it needs and how many cards; which node answers
+  each is the master's to decide at that moment, from what stands and what is free, never a node the
+  caller names, a person's setting or a hand-made assignment. A node is what a demand is answered, never
+  what it asks. Which nodes a service may stand on is its placement alone (「Placing the services」).
+- **A demand is how a caller off the nodes finds an instance of a service that stands on several.** A
+  ticket stands on one node's loopback and is asked by a process there; a demand is the master's, asked
+  on its API (`docs/api.md`, 「Demands」) wherever the master is reached: an agent's turn on one of the lab's
+  language-model engines, a speech request on whichever voice instance is idle, a bench's measurement on
+  a card. It takes no card itself: on each card granted, the service's own process takes the card through
+  the node's queue as every occupant does.
+- **What it names:** the service; how many cards, one where it names none; and, as the caller says, the
+  demand it is asked within, the key of the work it continues, and a reference that is only shown.
+- **Granted card by card.** A card is granted on a node of the service's placement once the service stands
+  there for the demand:
+  - a service that yields by its process is started there by its adapter's `start` where it does not
+    stand, and stands once its `health` answers `running`;
+  - a service that yields by its turn stands where its server runs, its model loading on its own ticket
+    as it serves;
+  - a service with no adapter, such as the bench, stands where its tier lets it take the card, and its
+    caller then asks that node's ticket itself.
+
+  The answer names each card's node and, where the service's adapter reports them (「An adapter's
+  verbs」), the address its callers reach it at and the file its key is read from. The caller sends there
+  and gives the demand back once its work ends.
+- **One rule for every caller.** A card is granted where the service stands with no demand on it; else
+  on a card that is free, or whose standing occupant of the service's tier has no demand on it and a turn
+  not in use, which is made to yield — by its process as a hand-over, else by its units or its turn as the
+  rules say — and the service is brought up there. Among cards equally open, the one the master last
+  granted the demand's work key on comes first, so work that left its state on a card goes back to it. A
+  card a claim or a ticket of a lower tier holds is never chosen, and a card holds one demand at a time.
+- **Where no card is open:** a caller that holds a card hands its own over (「A demand asked within
+  another」 below); a caller that holds none waits in the line, behind the demands asked before it, until a
+  card frees — its last demand given back, a claim or a lower tier gone. That line is the order demands
+  were asked in, nothing more: nothing in use is taken for a waiting demand, no time ends the wait and
+  none makes anything give way. Its answer says what it waits on, one reason at a time: the service
+  starting on a card; every card in use, naming the services using them; a claim or a ticket of a lower
+  tier; a `start` that failed, tried again at the next round.
+- **A lower tier still takes a card.** Where a claim or a ticket of a lower tier stops the service on a
+  granted card, every answer to the demand says so, naming the occupant, and the card is granted again
+  once the service stands there again or another card opens, its work key preferring the same card.
+- **A demand asked within another** — the caller's granted demand on card X — serves the caller's own
+  work. For the service already standing on X it is granted on X itself, beside the caller's, since the
+  caller is waiting on it. For another service it is granted on any other card the rule above opens, and
+  only where none is open is X lent to it: X's standing service is made to yield as a hand-over, the asked
+  service is started on X, and no other demand is granted on X while it is lent. The caller's demand stands meanwhile, answered `lent`. Once the
+  asking demand is given back, the lent service is made to yield and the caller's service is started on X
+  again, and the caller's demand is granted again there. No time bounds any of it.
+- **Given back by its caller alone.** A demand stands until its caller gives it back; nothing drops it
+  for silence. A caller keeps the ids of the demands it holds and gives back, at its own start, those its
+  work no longer needs; the cluster shows every demand, and a person may give one back through the same
+  route. Demands are the master's memory: a master restarted holds none, and its callers ask again, their
+  work keys bringing them back to their cards.
+- **The rules' unit of a service yielding by its process** — its `on-demand` unit — is its card
+  accounting; a demand is what asks for it, and the rules plan nothing for it.
+- **Shown** in the cluster, each demand with its service, its cards, its state and its reason.
 
 ## Placing the services
 
@@ -382,14 +450,9 @@ sequenceDiagram
     and the reservation names it too, last; on the card each stands by its tier;
   - `adapter` — the command that carries its verbs, as a list of words, not empty; absent for a service
     the master orders on cards but never installs;
-  - `[turn]` — how it takes turns with a service of its own rank, absent for a service that never gives
-    way to one (`docs/node-arbiter.md`, 「One rank taking turns」):
-    - `yield_after_s` — the seconds its turn is in use before it gives way to a waiter of its rank, zero
-      or more;
-    - `can_pause` — whether it gives way in the middle of a request, `true`, or at its next request
-      boundary, `false`.
-    - The master carries every declared `[turn]` into each node's part of the rules as its `turns` part
-      (「The rules」), keyed by `service`.
+  - nothing of how it takes turns with a service of its own rank: no number of seconds is declared, and
+    the order between occupants of one rank is the order their requests arrived in
+    (`docs/node-arbiter.md`, 「One rank taking turns」).
 - **The services declared, and the values each declares, are their own repositories' to state.**
 
 ### An adapter's verbs
@@ -403,6 +466,8 @@ sequenceDiagram
     its data stay on the node;
   - `start`, `stop`, `health` — `stop` and `start` are also how a service declaring `yield_by =
     "process"` yields a node's card and takes it back (「Yielding by the process」);
+    `health` answering `running` may also say where the instance answers its callers (`address`) and
+    the file its key is read from (`keyFile`), which a demand's grant hands on (「Demands」);
   - `placed` — the nodes the service's own placement names, in order.
 - **An adapter touches no role and no occupants.** It writes its own placement alone.
 
@@ -494,10 +559,9 @@ sequenceDiagram
     - `below` is the desktop's eviction, which the slave carries: what stands below an occupant on the node
       gives way while the desktop is busy. A rule that names a unit asked for cannot say it, and a file
       whose request rule does is refused when it is read, rather than planned as the default.
-- **Two more parts a node is written** come from the file and the declarations together, and `push` and
-  `rules --node` write and print them with the rest:
-  - `turns`, every declared `[turn]` keyed by its service (「A service declares itself」);
-  - `tiers`, every occupant's tier keyed by its name (「Tiers」).
+- **One more part a node is written** comes from the file and the declarations together, and `push` and
+  `rules --node` write and print it with the rest: `tiers`, every occupant's tier keyed by its name
+  (「Tiers」).
 
 ### Tiers
 

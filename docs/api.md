@@ -137,9 +137,7 @@ Read from its environment, which `bmo-card.service` fills from `~/.config/bmo-ca
 | `CARD_STORE` | the dump store, on a local NVMe | `~/.local/share/bmo-card/store/units.store` |
 | `CARD_OWNERS` | the folder owners besides the borrower open their control sockets in | `~/.local/share/bmo-card/owners` |
 | `CARD_TURN_PORT` | the node arbiter's loopback port | `7439` |
-| `CARD_TURN_KEEP_S` | how long a ticket not asked after is kept | 30 |
 | `CARD_TURN_TAKE_S` | how long a granted turn may go untaken before it passes once | 5 |
-| `CARD_TURN_HOLD_S` | how long a turn is kept in use while another ticket waits | 10 |
 | `CARD_TURN_HOLD_OPEN_S` | the longest an answer is held open | 20 |
 | `CARD_CLAIM_POLL_S` | how often a claimant's tickets are looked at | 0.1 |
 | `CARD_CLAIM_SETTLE_S` | how long a node holds nothing of a claimant before its claim ends | 10 |
@@ -218,8 +216,9 @@ it. Any other method and path is answered `404` `no-route`.
   | `…processes` | each `pid`, `name`, `serviceName?`, `usedMiB` |
   | `declared` | the units the rules declare: each `unit` (a name or pattern), `serviceName`, `kind`, `vramMiB?` |
   | `tiers` | every occupant's tier as the nodes are handed it (`docs/placement.md`, 「Tiers」), lower first: each `name` and `tier` |
-  | `services` | each service the master places: `serviceName`, `cardMiB`, `priority`, `tier?` (its declaration's own), `yieldBy` (`turn` or `process`), `spread`, `alone`, `nodeNames`, and `unsettled?`, why its placement is unsettled |
+  | `services` | each service the master places: `serviceName`, `cardMiB`, `priority`, `tier?` (its declaration's own), `yieldBy` (`turn` or `process`), `spread`, `alone`, `nodeNames`, `instances` (each node where it stands now: `nodeName`, `address?`, `keyFile?`, `demands`, the number of demands on it), and `unsettled?`, why its placement is unsettled |
   | `placement` | the placement under way, `kind`, `serviceName`, `nodeName` and `step?`; or null |
+  | `demands` | every demand the master holds, as `GET /demands/{demandId}` answers it |
   | `events` | the picture's last 200 notes, newest first: each `at`, `nodeName?`, `code`, `text` |
 
   A note's `code` is a kebab-case word a reader translates by; its `text` is an English sentence for a
@@ -240,6 +239,32 @@ run one at a time in the order they were asked.
 - **The master keeps** the last 256 placements in its memory; one older, or one of an earlier run, is
   `not-found`. A placement a stopped master left running is undone at its next start (`request-undone`
   among the notes).
+
+### Demands
+
+A demand asks for cards of a service that stands on several nodes; which node answers each card is the
+master's to decide (`docs/placement.md`, 「Demands」).
+
+- **`POST /demands`** with `serviceName`, and optionally `count?` (how many cards, one where absent),
+  `within?` (the id of a granted demand of the caller's it is asked within), `workKey?` (the key of the work it continues), `ref?` (shown) and `waitMs?` (how long to hold the answer
+  open).
+  - `201` with the demand where every card it asks is granted, `202` with the demand where it waits for
+    any, with a `Retry-After` header of 1.
+  - `400` `bad-request`: a body that does not name a service, or a field of the wrong kind. `422`
+    `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not hold.
+- **`GET /demands/{demandId}`** — `200` with the demand. `waitMs` holds the answer open until a card is
+  granted, granted again, lent, or taken by a lower tier, or the time runs out, when it is answered as it
+  stands and the caller asks again; the demand itself is never dropped for it. `404` `not-found`: a
+  demand the master does not hold, so a new one is asked for.
+- **`DELETE /demands/{demandId}`** — gives it back, every card of it: `204`, or `404` `not-found`. The
+  caller alone gives a demand back; nothing else drops one.
+- **A demand** is `id`, `serviceName`, `count`, `cards` (each card granted: `nodeName`, `address?` and
+  `keyFile?` as the service's adapter reports them), `state` (`waiting`, `granted`, `partly` or `lent`),
+  `taken?` (the claimant or lower-tier occupant that stopped the service on one of its cards), `reason?`
+  (while a card waits: `code` — `starting`, `in-use`, `held`, `start-failed` — and `text`, an English
+  sentence), `waitedMs`, `within?`, `workKey?` and `ref?`.
+- **Its id** is a positive signed 64-bit integer, each larger than the last the master gave and never
+  below the milliseconds since the epoch at which it was given.
 
 ### Unit descriptions
 
@@ -397,7 +422,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | --- | --- | --- |
 | `~/.config/bmo-card/occupants` | every placement that changes the order, whole, renamed over the old | words highest first, `=` joining one rank, `*` for every declared service not named, `#` a remark |
 | `~/.config/bmo-card/occupants.log` | the node arbiter, one line per change it takes up | the time, the order before, the order after |
-| `~/.config/bmo-card/rules.json` | `push`, and every placement, renamed over the old | the node's part of the rules: `occupants`, `nodes`, `units`, `rules`, `turns` (each service's `yieldAfterS` and `canPause`) and `tiers` (each occupant's tier, by name) |
+| `~/.config/bmo-card/rules.json` | `push`, and every placement, renamed over the old | the node's part of the rules: `occupants`, `nodes`, `units`, `rules` and `tiers` (each occupant's tier, by name) |
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
@@ -418,11 +443,11 @@ The node arbiter reads the occupants and rules files again within a second of a 
     `tools/<folder>`.
 - **A declaration's keys:** `service`, `card_mib`, `priority`, `tier` (a number, zero or more, or absent),
   `yield_by` (`turn` or `process`, absent for `turn`), `spread` (`one` or `many`), `alone`, `adapter` (a
-  list of words, not empty, or absent), and an optional `[turn]` table with `yield_after_s` (seconds, zero
-  or more) and `can_pause` (`docs/placement.md`, 「A service declares itself」).
+  list of words, not empty, or absent) (`docs/placement.md`, 「A service declares itself」). A
+  declaration declares no number of seconds for how it takes turns.
 - **Refused,** said among the notes and failing the placement that read it: a file named otherwise than
   its `service`, a `service` that is not lower-case letters, digits and hyphens, an empty `adapter`, a
-  negative `yield_after_s` or `tier`, `yield_by = "process"` with no `adapter`, and two declarations of one
+  negative `tier`, `yield_by = "process"` with no `adapter`, and two declarations of one
   service across all roots.
 
 ### Adapters
@@ -431,7 +456,9 @@ The node arbiter reads the occupants and rules files again within a second of a 
   directory, the verb one of `install`, `uninstall`, `start`, `stop`, `health`, `placed`. A first word
   `bun` is run as `BMO_BUN`.
 - **The adapter's last line** is one JSON object for every verb: `ok`, `node`, `state` (`running`,
-  `stopped`, `absent` or `failing`), `detail`, and for `placed` the `nodes` in order. Lines before it are
+  `stopped`, `absent` or `failing`), `detail`, and for `placed` the `nodes` in order; `health` answering
+  `running` may add `address`, where the instance answers its callers, and `keyFile`, the file its key is
+  read from on the master's host. Lines before it are
   shown as what the adapter says on its way.
 - **An adapter touches no role and no occupants;** it keeps its own service's placement alone.
 
@@ -448,7 +475,7 @@ The node arbiter reads the occupants and rules files again within a second of a 
 - **Beside them,** the master alone writes `placements/services.json` (each service's nodes in order),
   `placements/services-request.json` (the placement under way, journaled step by step),
   `placements/process-yields.json` (`stopped`, each service and node it stopped to yield the card, with
-  the reason; `docs/placement.md`, 「Yielding by the process」) and the descriptions folder (「Unit
+  the reason and its `kind`, `yield` to be brought back or `handover` not to be; `docs/placement.md`, 「Yielding by the process」) and the descriptions folder (「Unit
   descriptions」).
 
 ## What the arbiter calls
@@ -571,16 +598,15 @@ carried.
 
 Where two services stand at one rank on a pool of nodes — a borrowing engine whose units the cards are
 lent to, and a pipeline whose stages pause — whether a request of the engine is let onto the cards while
-the pipeline holds them is decided at these points, in order. Each service's `yield_after_s` and
-`can_pause` are its own declaration's (「Declarations」).
+the pipeline holds them is decided at these points, in order. No measure of time decides any of them.
 
 1. **The engine's head finds its units out and says `WANT`** on each card's hold, with the seconds the
    request has waited (「The lending protocol」). How long the head lets a request wait for a stage before
    it gives the request up is the borrowing engine's own bound, outside this repository.
    - `docs/node-arbiter.md`, 「Lending」: "A lent hold whose units are out takes a place in the queue on
      `WANT` through its own restore … The occupant holding the turn then gives way to it by its own rules:
-     at once if it rests, by its turn values if it stands at the lend service's rank, never if it stands
-     above."
+     at once if it rests, at its request boundary if it stands at the lend service's rank, never if it
+     stands above."
 2. **The node arbiter queues the engine's restore at the pipeline's rank:** `Card.want` records the
    request's arrival, `Card._start_wanting` starts `Card._want_back`, which calls `Card.restore` with
    `waits`, and `Card._take_lock_back` asks `Turns.wait` for the lend service's ticket, backdated by the
@@ -592,17 +618,13 @@ the pipeline holds them is decided at these points, in order. Each service's `yi
    - `docs/placement.md`, 「The engine's turn」: "the borrowing engine queues for them through its own
      restore: a request that finds its units out has the head say `WANT` on each card, so its hold takes a
      place in each node's queue at the pipeline's rank."
-3. **The node arbiter decides when the pipeline's turn gives way.** The queue is ordered by rank and then
-   by arrival (`Turns._order`). The pipeline's turn is told to give way (`giveWay`, `giveWayFor`) by
-   `Turns._give_way_for` only when a claim stands, when its turn rests, when an occupant above it waits, or
-   — being of the same rank — once `Turns._turn_spent` finds its turn in use for its declared
-   `yield_after_s` with `can_pause` true, which for a ticket asked after the turn began is the same least
-   turn (`docs/node-arbiter.md`, 「Priority and yielding」). Its use is counted from the grant or from the request that ended
-   its rest. A turn that does not rest and has not used its `yield_after_s` does not give way to the
-   engine's ticket.
-   - `docs/node-arbiter.md`, 「One rank taking turns」: "Once its turn has been in use for its
-     `yieldAfterS` while a ticket of its rank waits, it gives way to that ticket: in the middle of a
-     request where `canPause` is true … at its next request boundary where it is false."
+3. **The node arbiter decides when the pipeline's turn passes.** The queue is ordered by rank and then by
+   the arrival of the request each ticket stands for. The pipeline's turn is told to give way (`giveWay`,
+   `giveWayFor`) only when a claim stands, when its turn rests, or when an occupant above it waits. To the
+   engine's ticket, of its own rank, it passes at its next request boundary, where `nextWaitedMs` answers
+   `"keep": false` because the engine's request stands ahead in line. How long the pipeline's turn has been
+   in use does not count.
+   - `docs/node-arbiter.md`, 「One rank taking turns」: "No measure of time passes a turn within a rank."
 4. **The pipeline lets go and gives its ticket back;** `Turns._grant` then grants the engine's ticket,
    `Card._take_lock_back` takes the lock within `CARD_LOCK_WAIT_S`, and `Card.restore` loads the units
    back, saying `RESTORED`. A lock another occupant keeps past that wait makes the restore fail with no
@@ -619,10 +641,12 @@ the pipeline holds them is decided at these points, in order. Each service's `yi
      with that turn as its reason. What the master unloads there is the pipeline's; the engine's units
      come back through step 2 alone.
    - `docs/placement.md`, 「The engine's turn」: "a target whose turn is in use is never unloaded for one of
-     its rank, whatever a rule names: its turn passes to that rank by its own turn values …, by resting, by
-     its holder giving its ticket back once it has emptied the card itself, or by its head saying `QUIET`
-     on a `PASS`, and the master unloads only once it has."
+     its rank before its turn passes, whatever a rule names: its turn passes to that rank at its holder's
+     request boundary …, by resting, by its holder giving its ticket back once it has emptied the card
+     itself, or by its head saying `QUIET` on a `PASS` …, never on time, and the master unloads only once it
+     has."
 
-So a request of the engine waits, at most, for the pipeline's turn to use its declared `yield_after_s`
-(or to rest), plus the pipeline's dump and the engine's units loading back; where that passes the head's
-own bound, the request is given up by the head while the arbiter keeps its place in the queue.
+So a request of the engine waits for the pipeline's request in hand to end (or for its turn to rest),
+plus the pipeline's dump and the engine's units loading back; where that passes the head's own bound,
+which is the borrowing engine's own budget, the request is given up by the head while the arbiter keeps
+its place in the queue.
