@@ -318,3 +318,71 @@ async fn a_master_with_a_token_answers_every_route_only_to_a_caller_holding_it()
     .unwrap();
   assert_eq!(held.status(), 200);
 }
+
+#[tokio::test]
+async fn a_demand_is_granted_waits_in_line_while_its_card_is_in_use_and_is_given_back_by_its_caller() {
+  let demo = "service = \"demo\"\ncard_mib = 6000\npriority = 40\nspread = \"many\"\nalone = true\nyield_by = \"process\"\nadapter = [\"bun\", \"adapter.ts\"]\n";
+  let world = World::new(json!({ "a": "demo" }), &[("a", slave(json!({})))])
+    .with_service(demo, &["a"])
+    .start();
+  world
+    .state_where("demo adopted on a", |state| {
+      connected(state, "a")
+        && state["services"]
+          .as_array()
+          .is_some_and(|all| all.iter().any(|one| one["nodeNames"] == json!(["a"])))
+    })
+    .await;
+  let (status, refused) =
+    asked(&world, Method::POST, "/demands", Some(r#"{"serviceName":"absent"}"#)).await;
+  assert_eq!((status, refused["code"].as_str()), (422, Some("no-place")));
+  let (status, refused) =
+    asked(&world, Method::POST, "/demands", Some(r#"{"serviceName":"demo","within":7}"#)).await;
+  assert_eq!((status, refused["code"].as_str()), (404, Some("not-found")));
+
+  // The service is brought up on a for the first; the answer is held open until it is granted.
+  let (status, first) = asked(
+    &world,
+    Method::POST,
+    "/demands",
+    Some(r#"{"serviceName":"demo","workKey":"k","waitMs":10000}"#),
+  )
+  .await;
+  let first_id = first["id"].as_i64().unwrap();
+  let first = if status == 201 {
+    first
+  } else {
+    asked(&world, Method::GET, &format!("/demands/{first_id}?waitMs=10000"), None).await.1
+  };
+  assert_eq!(
+    (first["state"].as_str(), first["cards"][0]["nodeName"].as_str()),
+    (Some("granted"), Some("a"))
+  );
+  assert!(std::fs::read_to_string(world.root().join("adapter.log")).unwrap().contains("start a"));
+
+  // The one card is in use: the next waits, its answer held only as long as asked, and it stands.
+  let (status, second) = asked(&world, Method::POST, "/demands", Some(r#"{"serviceName":"demo"}"#)).await;
+  assert_eq!((status, second["state"].as_str()), (202, Some("waiting")));
+  let second_id = second["id"].as_i64().unwrap();
+  let (status, still) = asked(&world, Method::GET, &format!("/demands/{second_id}?waitMs=300"), None).await;
+  assert_eq!(
+    (status, still["state"].as_str(), still["reason"]["code"].as_str()),
+    (200, Some("waiting"), Some("in-use"))
+  );
+  let (status, all) = asked(&world, Method::GET, "/demands", None).await;
+  assert_eq!((status, all["items"].as_array().map(Vec::len)), (200, Some(2)));
+
+  // Given back by its caller, the card goes to the one waiting.
+  assert_eq!(asked(&world, Method::DELETE, &format!("/demands/{first_id}"), None).await.0, 204);
+  let (status, granted) =
+    asked(&world, Method::GET, &format!("/demands/{second_id}?waitMs=10000"), None).await;
+  assert_eq!((status, granted["state"].as_str()), (200, Some("granted")));
+  let (status, gone) = asked(&world, Method::DELETE, &format!("/demands/{first_id}"), None).await;
+  assert_eq!((status, gone["code"].as_str()), (404, Some("not-found")));
+  let state = world
+    .state_where("the demand shown", |state| {
+      state["demands"].as_array().is_some_and(|all| all.len() == 1)
+    })
+    .await;
+  assert_eq!(state["services"][0]["instances"][0]["demands"], 1);
+}

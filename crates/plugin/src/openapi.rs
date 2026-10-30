@@ -10,6 +10,7 @@ use bmo_arbiter_client::card::{
   Card, CardUnit, CardUnitChanges, CardUnitPage, Ticket, TicketAsk, TicketChanges, TicketQuery,
 };
 use bmo_arbiter_client::cluster::Cluster;
+use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandPage, DemandQuery};
 use bmo_arbiter_client::descriptions::Description;
 use bmo_arbiter_client::events::{EventKind, EventPage, EventsQuery, Health};
 use bmo_arbiter_client::placements::{Placement, PlacementAsk};
@@ -25,7 +26,8 @@ use crate::tools::tools;
 const SCHEMAS: &str = "/components/schemas";
 
 const DESCRIPTION: &str = "The card arbiter: the master, one for the system, which pictures the cluster, \
-  places services on nodes and keeps what each service says of its units; and the node arbiter on every GPU \
+  places services on nodes, grants cards of a service as demands ask them and keeps what each service says \
+  of its units; and the node arbiter on every GPU \
   node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A \
   route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of \
   epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it \
@@ -92,7 +94,7 @@ pub fn openapi() -> Value {
     ],
     "security": [{ "bearer": [] }],
     "tags": [
-      { "name": "master", "description": "The master: the cluster, placements and unit descriptions." },
+      { "name": "master", "description": "The master: the cluster, placements, demands and unit descriptions." },
       { "name": "node", "description": "The node arbiter: the card, its tickets and its units." },
     ],
     "x-layer": "upstream",
@@ -166,6 +168,8 @@ enum Answer {
   Put(Schema),
   /// 201 with the ticket whose turn is given, 202 with the ticket that waits.
   Ticketed(Schema),
+  /// 201 with the demand whose every card is granted, 202 with the demand that waits.
+  Demanded(Schema),
   /// 204 and no body.
   Nothing,
   /// The event stream, or its page to a reader asking for JSON.
@@ -335,6 +339,18 @@ impl Route {
         });
         responses.insert("202".into(), waiting);
       }
+      Answer::Demanded(schema) => {
+        responses.insert("201".into(), member("The demand, every card it asks granted.", schema));
+        let mut waiting = member("The demand, waiting for a card.", schema);
+
+        waiting["headers"] = json!({
+          "Retry-After": {
+            "description": "1.",
+            "schema": { "type": "integer", "minimum": 1 },
+          },
+        });
+        responses.insert("202".into(), waiting);
+      }
       Answer::Nothing => {
         responses.insert("204".into(), json!({ "description": "Done." }));
       }
@@ -409,6 +425,7 @@ fn routes(generator: &mut SchemaGenerator) -> Vec<Route> {
   use ErrorCode::{BadField, Conflict, Gone, NameRule, NoPlace, NotFound, NotReady};
   use Served::{Both, Master, Node};
 
+  const DEMAND: &str = "The demand's id.";
   const PLACEMENT: &str = "The placement's id.";
   const SERVICE: &str = "The service's name: lower-case letters, digits and hyphens.";
   const TICKET: &str = "The ticket's id.";
@@ -464,6 +481,50 @@ fn routes(generator: &mut SchemaGenerator) -> Vec<Route> {
       read::<Placement>(generator),
     )
     .at::<i64>(generator, "placementId", PLACEMENT)
+    .never_fails()
+    .refuses(&[NotFound]),
+    Route::new(
+      "post",
+      "/demands",
+      Master,
+      "createDemands",
+      "Ask for cards of a service; the master decides which node answers each. 201 with every card granted, \
+       202 while any waits.",
+      Answer::Demanded(generator.subschema_for::<Demand>()),
+    )
+    .body::<DemandAsk>(generator)
+    .never_fails()
+    .refuses(&[NoPlace, NotFound]),
+    Route::new(
+      "get",
+      "/demands",
+      Master,
+      "listDemands",
+      "Every demand the master holds, in the line's order.",
+      read::<DemandPage>(generator),
+    )
+    .never_fails(),
+    Route::new(
+      "get",
+      "/demands/{demandId}",
+      Master,
+      "getDemand",
+      "A demand as it stands, holding the answer open with waitMs; never dropped for it.",
+      read::<Demand>(generator),
+    )
+    .at::<i64>(generator, "demandId", DEMAND)
+    .query::<DemandQuery>(generator)
+    .never_fails()
+    .refuses(&[NotFound]),
+    Route::new(
+      "delete",
+      "/demands/{demandId}",
+      Master,
+      "deleteDemand",
+      "Give a demand back, every card of it.",
+      Answer::Nothing,
+    )
+    .at::<i64>(generator, "demandId", DEMAND)
     .never_fails()
     .refuses(&[NotFound]),
     Route::new(

@@ -34,7 +34,7 @@ token from `--token` or `CARD_MASTER_TOKEN` where the master is configured with 
 2. The answer is the ticket. `turn: true` means the card is yours now. Otherwise `position` and `waitMs` say
    where you stand and how long the wait is counted at: ask `arbiter_ticket` with
    `{ "ticketId": <id>, "waitMs": 20000 }` again and again, each answer held open until your turn comes or
-   the time passes. A ticket not asked after for thirty seconds is dropped.
+   the time passes. A ticket stands, however long you stay silent, until you give it back.
 3. Use the card only while your turn stands. Where you asked with `givesWayMs`, keep asking
    `arbiter_ticket` with `waitMs` while you hold the card: once `giveWay` is true, let go at your next safe
    point; `giveWayFor` names who asked.
@@ -53,7 +53,8 @@ arbiter's `docs/node-arbiter.md` states the whole contract.
   line, how long each service typically holds the card, its units and where each one is (`resident` on the
   card, `ram` or `evicted` out of it), the driver's memory figures and the dump store.
 - `arbiter_cluster`: every node the master reads, each card with its units, turn and queue, the groups the
-  rules choose, the services the master places and its last notes.
+  rules choose, the services the master places with the nodes each stands on now, the demands the master
+  holds and its last notes.
 
 ## Placing a service
 

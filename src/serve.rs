@@ -1,6 +1,6 @@
 //! The master standing: its rounds, the live world it reads the nodes through, and its API on the loopback
 //! (docs/api.md, 「What the master serves」) — its health, its one event stream, the cluster, the placements
-//! run one at a time, and the units' descriptions the services hand in.
+//! run one at a time, the demands its rounds grant, and the units' descriptions the services hand in.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -17,6 +17,7 @@ use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use bmo_arbiter_client::demands::{DemandAsk, DemandPage, DemandQuery, DemandState};
 use bmo_arbiter_client::descriptions::Description;
 use bmo_arbiter_client::events::{Event, EventKind, EventPage, EventsQuery, Health};
 use bmo_arbiter_client::placements::{Placement, PlacementAsk, PlacementState};
@@ -26,9 +27,10 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 
+use crate::demands::Demands;
 use crate::master::{BoxFuture, Master, Reached, World};
 use crate::picture::detail_from;
-use crate::placement::{Declaration, Hands, Placer, Say, write_whole};
+use crate::placement::{AdapterAnswer, Declaration, Hands, Placer, Say, write_whole};
 use crate::reach::{NodeRegistry, NodeShell};
 
 /// The address the API answers on, the token it takes, and how often the rounds go.
@@ -143,14 +145,13 @@ impl World for LiveWorld {
     verb: &'a str,
     node: &'a str,
     placed: &'a [String],
-  ) -> BoxFuture<'a, (bool, String)> {
+  ) -> BoxFuture<'a, AdapterAnswer> {
     Box::pin(async move {
       let Some(hands) = &self.hands else {
-        return (false, "no adapter is run here".to_owned());
+        return AdapterAnswer::refused("no adapter is run here");
       };
       let say: Say = Arc::new(|line: String| println!("{line}"));
-      let answer = hands.adapter(declaration, verb, Some(node), placed, &say).await;
-      (answer.ok, answer.detail)
+      hands.adapter(declaration, verb, Some(node), placed, &say).await
     })
   }
 
@@ -260,6 +261,8 @@ struct App {
   events: Arc<Mutex<Events>>,
   placements: Arc<Mutex<Placements>>,
   requests: mpsc::UnboundedSender<i64>,
+  /// The demands the routes ask and the master's rounds grant.
+  demands: Arc<Demands>,
   /// The master's store of the units' descriptions.
   descriptions: Arc<PathBuf>,
   token: Option<Arc<str>>,
@@ -410,6 +413,101 @@ async fn placement(State(app): State<App>, Named(id): Named<String>) -> Response
     Some(placement) => answered(StatusCode::OK, placement),
     None => refused(ErrorCode::NotFound, format!("the master keeps no placement {id}")),
   }
+}
+
+/// A demand asked for (docs/api.md, 「Demands」): `201` where every card it asks is granted by the time the
+/// answer goes, `202` where it waits; the master's next round is woken for it.
+async fn create_demand(State(app): State<App>, body: Bytes) -> Response {
+  let ask: DemandAsk = match body_of(&body) {
+    Ok(ask) => ask,
+    Err(refusal) => return refusal.into_response(),
+  };
+  let changed = app.demands.changed.subscribe();
+  let asked = app.demands.book.lock().unwrap().ask(&ask, now_ms()).map(|held| (held.id, held.news));
+  let (id, news) = match asked {
+    Ok(asked) => asked,
+    Err((code, why)) => return refused(code, why),
+  };
+  app.demands.wake.notify_one();
+  demand_answer(&app, changed, id, news, ask.wait_ms, true).await
+}
+
+/// A demand's answer, held open up to `wait_ms` until its news moves: a card granted, granted again, lent
+/// or taken. Its id is no longer held where it was given back meanwhile.
+async fn demand_answer(
+  app: &App,
+  mut changed: tokio::sync::watch::Receiver<u64>,
+  id: i64,
+  news: u64,
+  wait_ms: Option<u64>,
+  created: bool,
+) -> Response {
+  let deadline = Instant::now() + Duration::from_millis(wait_ms.unwrap_or(0));
+  loop {
+    let read = app
+      .demands
+      .book
+      .lock()
+      .unwrap()
+      .held
+      .get(&id)
+      .map(|held| (held.news, held.answer(now_ms())));
+    let Some((now, demand)) = read else {
+      return refused(ErrorCode::NotFound, format!("the master holds no demand {id}"));
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    if now != news || left.is_zero() {
+      if !created {
+        return answered(StatusCode::OK, &demand);
+      }
+      if demand.state == DemandState::Granted {
+        return answered(StatusCode::CREATED, &demand);
+      }
+      let mut waiting = answered(StatusCode::ACCEPTED, &demand);
+      waiting.headers_mut().insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+      return waiting;
+    }
+    // A round that moved nothing of it wakes it to look again; the time running out answers it as it stands.
+    let _ = tokio::time::timeout(left, changed.changed()).await;
+  }
+}
+
+async fn demand(
+  State(app): State<App>,
+  Named(id): Named<String>,
+  query: Result<Query<DemandQuery>, QueryRejection>,
+) -> Response {
+  let Ok(id) = id.parse::<i64>() else {
+    return refused(ErrorCode::BadRequest, format!("{id} is not a demand's id"));
+  };
+  let query = match query {
+    Ok(Query(query)) => query,
+    Err(why) => return refused(ErrorCode::BadRequest, format!("the query does not read: {why}")),
+  };
+  let changed = app.demands.changed.subscribe();
+  let news = app.demands.book.lock().unwrap().held.get(&id).map(|held| held.news);
+  let Some(news) = news else {
+    return refused(ErrorCode::NotFound, format!("the master holds no demand {id}"));
+  };
+  demand_answer(&app, changed, id, news, query.wait_ms, false).await
+}
+
+async fn list_demands(State(app): State<App>) -> Response {
+  let answers = app.demands.book.lock().unwrap().answers(now_ms());
+  answered(StatusCode::OK, &DemandPage::whole(answers))
+}
+
+/// A demand given back by its caller, every card of it; the master's next round is woken for it.
+async fn give_back_demand(State(app): State<App>, Named(id): Named<String>) -> Response {
+  let Ok(id) = id.parse::<i64>() else {
+    return refused(ErrorCode::BadRequest, format!("{id} is not a demand's id"));
+  };
+  if !app.demands.book.lock().unwrap().give_back(id) {
+    return refused(ErrorCode::NotFound, format!("the master holds no demand {id}"));
+  }
+  app.demands.wake.notify_one();
+  app.demands.tell();
+  StatusCode::NO_CONTENT.into_response()
 }
 
 /// Whether a word may name a service: lower-case letters, digits and hyphens.
@@ -583,6 +681,8 @@ pub async fn once(mut master: Master) -> String {
 pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> std::io::Result<()> {
   master.read_rules_if_changed();
   master.attach(placer.board());
+  let demands = Arc::new(Demands::default());
+  master.attach_demands(demands.clone());
   let descriptions = Arc::new(master.descriptions_folder());
   let (requests, waiting) = mpsc::unbounded_channel();
   master.discover().await;
@@ -595,6 +695,7 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
       last_id: 0,
     })),
     requests,
+    demands: demands.clone(),
     descriptions,
     token: settings.token.as_deref().map(Arc::from),
   };
@@ -605,6 +706,8 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
     .route("/cluster", get(cluster))
     .route("/placements", post(create_placement))
     .route("/placements/{placementId}", get(placement))
+    .route("/demands", post(create_demand).get(list_demands))
+    .route("/demands/{demandId}", get(demand).delete(give_back_demand))
     .route("/descriptions/{serviceName}", put(describe))
     .fallback(no_route)
     .method_not_allowed_fallback(no_route)
@@ -637,6 +740,10 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
       .read_every
       .saturating_sub(began.elapsed())
       .max(Duration::from_millis(200).min(settings.read_every));
-    tokio::time::sleep(rest).await;
+    // A demand asked or given back has the next round come at once.
+    tokio::select! {
+      () = tokio::time::sleep(rest) => {}
+      () = demands.wake.notified() => {}
+    }
   }
 }

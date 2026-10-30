@@ -392,20 +392,20 @@ class TurnsTest(unittest.TestCase):
         shown = next(one for one in self.turns.state()["queue"] if one["id"] == claim["id"])
         self.assertEqual((shown["need"], shown["ref"]), ({"gpus": 1}, "task-1"))
 
-    def test_a_granted_claimants_ticket_never_passes_on_and_is_dropped_for_silence_while_the_lock_is_held(self) -> None:
+    def test_a_granted_claimants_ticket_never_passes_on_and_stands_however_silent_until_given_back(self) -> None:
         self.turns.claim_holds = lambda: True
         self.held = [99]
         claim = self.turns.ask("tester")
         self.assertTrue(claim["turn"])
-        self.now = 25.0
-        self.assertTrue(self.turns.again(claim["id"])["turn"])
+        self.now = 3600.0
+        self.held = []
         self.assertTrue(self.turns.claim_asked("tester"))
         self.assertFalse(self.turns.claim_asked("voice"))
-        self.now = 56.0
+        self.assertTrue(self.turns.again(claim["id"])["turn"])
+        self.turns.done(claim["id"])
         self.assertFalse(self.turns.claim_asked("tester"))
-        self.assertIsNone(self.turns.again(claim["id"]))
 
-    def test_a_silent_ticket_is_dropped_and_a_turn_not_taken_passes_on(self) -> None:
+    def test_a_silent_ticket_stands_and_a_turn_not_taken_passes_on(self) -> None:
         self.held = [99]
         voice = self.turns.ask("voice")
         router = self.turns.ask("router")
@@ -414,7 +414,20 @@ class TurnsTest(unittest.TestCase):
         self.now = 6.0
         self.assertFalse(self.turns.again(voice["id"])["turn"])
         self.assertTrue(self.turns.again(router["id"])["turn"])
-        self.now = 40.0
+        # Never asked after for an hour, the voice's ticket still stands in line behind the router's turn.
+        self.held = [99]
+        self.now = 3600.0
+        self.assertEqual([one["id"] for one in self.turns.state()["queue"]], [router["id"], voice["id"]])
+        self.assertFalse(self.turns.again(voice["id"])["turn"])
+
+    def test_a_holder_that_lets_the_lock_go_with_no_ticket_given_back_ends_its_turn(self) -> None:
+        voice = self.turns.ask("voice")
+        self.held = [99]
+        router = self.turns.ask("router")
+        self.assertEqual(self.turns.state()["queue"][0]["id"], voice["id"])
+        # The voice's process died: the kernel let its lock go, and the next in line has the card.
+        self.held = []
+        self.assertTrue(self.turns.again(router["id"])["turn"])
         self.assertIsNone(self.turns.again(voice["id"]))
 
     def test_a_turn_nobody_else_waits_for_stays_untaken_until_its_ticket_asks(self) -> None:
@@ -537,7 +550,7 @@ class TurnsTest(unittest.TestCase):
         self.claim = "tester"
         self.assertEqual(self.turns.again(voice["id"])["giveWayFor"], "tester")
 
-    def test_a_request_while_resting_carries_on_where_it_stands_first_and_its_use_counts_from_then(self) -> None:
+    def test_a_request_while_resting_carries_on_where_it_stands_first_however_long_after(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
         self.now = 2.0
@@ -546,10 +559,8 @@ class TurnsTest(unittest.TestCase):
         self.turns.ask("router")
         kept = self.turns.again(voice["id"], next_waited_s=0.0)
         self.assertEqual((kept["keep"], kept["resting"], kept["giveWay"]), (True, False, False))
-        self.now = 59.0
+        self.now = 3600.0
         self.assertTrue(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
-        self.now = 60.0
-        self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
 
     def test_a_rest_is_left_out_of_how_long_a_service_holds_the_card(self) -> None:
         voice = self.turns.ask("voice")
@@ -609,127 +620,84 @@ class TurnsTest(unittest.TestCase):
         self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.5)["keep"])
         self.assertTrue(self.turns.again(voice["id"], next_waited_s=1.5)["keep"])
 
-    def one_rank(self, values: dict[str, units.Turn]) -> None:
-        """song and voice at one rank, each with the turn values given and a bound long enough to stand aside."""
+    def one_rank(self) -> None:
+        """song and voice at one rank."""
         self.occupants.path.write_text("song=voice router\n")
         self.occupants.read()
-        self.turns.turn_values = values.get
-        self.turns.hold_s = 600.0
 
-    def test_a_turn_that_may_pause_gives_way_to_its_rank_in_the_middle_of_a_request_once_its_time_has_come(self) -> None:
-        self.one_rank({"voice": units.Turn(10.0, True)})
-        voice = self.turns.ask("voice", gives_way_s=6.0)
-        self.held = [99]
-        self.now = 1.0
-        self.turns.ask("song")
-        self.now = 9.9
-        self.assertFalse(self.turns.again(voice["id"])["giveWay"])
-        self.now = 10.0
-        told = self.turns.again(voice["id"])
-        self.assertEqual((told["giveWay"], told["giveWayFor"]), (True, "song"))
-        # It is told in the middle of its request: no boundary, and nothing passed there.
-        self.assertIsNone(self.turns.passes_to(voice["id"]))
-
-    def test_a_turn_that_may_not_pause_lets_go_to_its_rank_only_at_its_request_boundary(self) -> None:
-        self.one_rank({"voice": units.Turn(10.0, False)})
-        voice = self.turns.ask("voice", gives_way_s=6.0)
-        self.held = [99]
-        self.now = 1.0
-        self.turns.ask("song")
-        # Its next request arrived long before the song's: only its turn values make it let go.
-        self.now = 9.0
-        self.assertTrue(self.turns.again(voice["id"], next_waited_s=100.0)["keep"])
-        self.assertIsNone(self.turns.passes_to(voice["id"]))
-        self.now = 10.0
-        told = self.turns.again(voice["id"], next_waited_s=100.0)
-        self.assertEqual((told["keep"], told["giveWay"]), (False, False))
-        self.assertEqual(self.turns.passes_to(voice["id"]), "song")
-        # Its time counts from the request that ended its rest.
-        self.turns.again(voice["id"], rest=True)
-        self.assertIsNone(self.turns.passes_to(voice["id"]))
-        self.now = 11.0
-        self.assertTrue(self.turns.again(voice["id"], next_waited_s=100.0)["keep"])
-        self.assertIsNone(self.turns.passes_to(voice["id"]))
-
-    def test_one_rank_arriving_without_end_on_both_sides_takes_the_card_in_turn_by_each_ones_values(self) -> None:
-        self.one_rank({"song": units.Turn(5.0, False), "voice": units.Turn(8.0, False)})
-        holder = self.turns.ask("song")
-        self.held = [99]
-        waiter = self.turns.ask("voice", waited_s=50.0)
-        turns: list[tuple[str, float]] = [("song", 0.0)]
-        for second in range(1, 101):
-            self.now = float(second)
-            self.turns.again(waiter["id"])
-            # Each holder's next request always arrived long before the waiter's.
-            if self.turns.again(holder["id"], next_waited_s=100.0)["keep"]:
-                continue
-            self.held = []
-            self.turns.done(holder["id"])
-            self.assertTrue(self.turns.again(waiter["id"])["turn"])
-            self.held = [99]
-            turns.append((waiter["serviceName"], self.now))
-            holder, waiter = waiter, self.turns.ask(holder["serviceName"], waited_s=50.0)
-        held_for = [(service, after - since) for (service, since), (_, after) in zip(turns, turns[1:])]
-        self.assertEqual({service for service, _ in turns}, {"song", "voice"})
-        self.assertGreater(len(turns), 10)
-        # Neither waits past the holder's own time: song gives way after 5 s, voice after 8.
-        self.assertEqual({(service, length) for service, length in held_for}, {("song", 5.0), ("voice", 8.0)})
-
-    def test_one_rank_without_turn_values_gives_way_to_a_later_request_alone(self) -> None:
-        # Values of a service that is not standing here change nothing for song and voice.
-        self.one_rank({"router": units.Turn(1.0, True)})
+    def test_one_rank_takes_the_card_in_arrival_order_however_long_a_turn_is_used(self) -> None:
+        self.one_rank()
         song = self.turns.ask("song", gives_way_s=6.0)
         self.held = [99]
         self.now = 1.0
-        # A request that arrived before the song's turn began, an occupant coming back after it yielded: it waits.
-        back = self.turns.ask("voice", waited_s=5.0)
-        self.assertFalse(self.turns.again(song["id"])["giveWay"])
-        self.assertTrue(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
-        self.assertIsNone(self.turns.passes_to(song["id"]))
-        # Another request of the song's own service asked later makes it yield to nobody.
-        self.turns.done(back["id"])
-        self.turns.ask("song")
-        self.assertFalse(self.turns.again(song["id"])["giveWay"])
-        # The later request of the other occupant of its tier makes the running one yield, at once.
-        self.now = 2.0
-        self.turns.ask("voice")
-        told = self.turns.again(song["id"])
-        self.assertEqual((told["giveWay"], told["giveWayFor"]), (True, "voice"))
-        self.assertFalse(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
-
-    def test_a_later_request_of_one_tier_hands_a_turn_held_to_its_boundary_on_there(self) -> None:
-        self.one_rank({})
-        song = self.turns.ask("song")
-        self.held = [99]
-        self.now = 1.0
         voice = self.turns.ask("voice")
-        # Held to its end, it is told nothing in the middle of its request, and lets go at its boundary.
-        self.assertFalse(self.turns.again(song["id"])["giveWay"])
-        self.assertFalse(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
+        # An hour on: the song's next request arrived before the voice's, so the song carries on, and a turn
+        # that may let go in the middle of its work is never told to for one of its rank.
+        self.now = 3600.0
+        told = self.turns.again(song["id"], next_waited_s=3600.0)
+        self.assertEqual((told["keep"], told["giveWay"]), (True, False))
+        # Its next request arrived after the voice's: the turn passes at this boundary, and only here.
+        told = self.turns.again(song["id"], next_waited_s=0.0)
+        self.assertEqual((told["keep"], told["giveWay"]), (False, False))
         self.assertEqual(self.turns.passes_to(song["id"]), "voice")
         self.held = []
         self.turns.done(song["id"])
         self.assertTrue(self.turns.again(voice["id"])["turn"])
-        # The song comes back for the request it held before the voice began: it makes the voice yield nothing,
-        # and stands in line by that request, before a request of the voice's that arrived after it.
+
+    def test_no_time_passes_a_turn_to_its_rank_but_a_rest_or_the_ticket_given_back_does(self) -> None:
+        self.one_rank()
+        holder = self.turns.ask("song", gives_way_s=6.0)
         self.held = [99]
+        waiter = self.turns.ask("voice", waited_s=50.0)
+        for second in range(1, 1001):
+            self.now = float(second)
+            self.assertFalse(self.turns.again(waiter["id"])["turn"])
+            # Each of the holder's next requests arrived before the waiter's.
+            told = self.turns.again(holder["id"], next_waited_s=self.now + 100.0)
+            self.assertEqual((told["keep"], told["giveWay"]), (True, False))
+        # Nothing left to serve: the rest gives way to the waiter of its rank.
+        told = self.turns.again(holder["id"], rest=True)
+        self.assertEqual((told["giveWay"], told["giveWayFor"]), (True, "voice"))
+        self.assertIsNone(self.turns.passes_to(holder["id"]))
+        self.held = []
+        self.turns.done(holder["id"])
+        self.assertTrue(self.turns.again(waiter["id"])["turn"])
+
+    def test_a_request_of_one_tier_that_arrived_first_comes_first_whoever_holds_the_card(self) -> None:
+        self.one_rank()
+        song = self.turns.ask("song")
+        self.held = [99]
+        self.now = 1.0
+        voice = self.turns.ask("voice")
         self.now = 2.0
-        self.turns.ask("song", waited_s=1.5)
+        self.assertFalse(self.turns.again(song["id"], next_waited_s=0.0)["keep"])
+        self.held = []
+        self.turns.done(song["id"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
+        # The song comes back for the request it held before the voice's next one: it stands before it in line,
+        # and the voice lets go at its boundary for it, never in the middle of its request.
+        self.held = [99]
+        self.now = 3.0
+        self.turns.ask("song", waited_s=2.5)
         self.assertFalse(self.turns.again(voice["id"])["giveWay"])
-        self.assertIsNone(self.turns.passes_to(voice["id"]))
-        self.assertTrue(self.turns.again(voice["id"], next_waited_s=1.8)["keep"])
+        self.assertEqual(self.turns.passes_to(voice["id"]), "song")
+        self.assertTrue(self.turns.again(voice["id"], next_waited_s=2.8)["keep"])
         self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
 
-    def test_a_least_turn_declared_holds_a_later_request_of_one_tier_off_until_it_is_used(self) -> None:
-        self.one_rank({"song": units.Turn(30.0, True)})
+    def test_a_lower_tier_still_takes_the_card_from_a_turn_in_use(self) -> None:
+        tiers = {"tester": 0.0, "trainer": 0.5, "song": 2.0, "voice": 2.0}
+        self.occupants.tiers = lambda: tiers
+        self.occupants.path.write_text("song=voice trainer\n")
+        self.assertTrue(self.occupants.read())
         song = self.turns.ask("song", gives_way_s=6.0)
         self.held = [99]
         self.now = 1.0
         self.turns.ask("voice")
-        self.now = 29.0
         self.assertFalse(self.turns.again(song["id"])["giveWay"])
-        self.now = 30.0
-        self.assertEqual(self.turns.again(song["id"])["giveWayFor"], "voice")
+        self.turns.ask("trainer")
+        told = self.turns.again(song["id"])
+        self.assertEqual((told["giveWay"], told["giveWayFor"]), (True, "trainer"))
+        self.assertFalse(self.turns.again(song["id"], next_waited_s=100.0)["keep"])
 
     def test_tiers_make_the_ranks_a_lower_tier_waited_for_and_given_way_to(self) -> None:
         tiers = {"tester": 0.0, "trainer": 0.5, "voice": 1.0, "song": 2.0, "router": 2.0}
@@ -775,13 +743,6 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(units.tiers_of({"tiers": []}), {})
         self.assertEqual(units.tiers_of(None), {})
 
-    def test_turn_values_are_read_off_the_rules_and_an_entry_not_understood_is_passed_over(self) -> None:
-        rules = {"turns": {"model": {"yieldAfterS": 30, "canPause": False}, "coder": {"yieldAfterS": 12.5, "canPause": True},
-                           "odd": {"yieldAfterS": "soon", "canPause": True}, "half": {"yieldAfterS": 3}, "flag": True}}
-        self.assertEqual(units.turns_of(rules), {"model": units.Turn(30.0, False), "coder": units.Turn(12.5, True)})
-        self.assertEqual(units.turns_of({"turns": []}), {})
-        self.assertEqual(units.turns_of(None), {})
-
     def test_a_ticket_stands_by_its_requests_arrival(self) -> None:
         self.held = [99]
         router_late = self.turns.ask("router")
@@ -802,14 +763,12 @@ class TurnsTest(unittest.TestCase):
         self.turns.ask("voice")
         self.assertFalse(self.turns.again(router["id"], next_waited_s=5.0)["keep"])
 
-    def test_a_holder_above_the_waiter_carries_on_until_its_bound(self) -> None:
+    def test_a_holder_above_the_waiter_carries_on_for_as_long_as_it_has_requests(self) -> None:
         voice = self.turns.ask("voice")
         self.held = [99]
         self.turns.ask("router")
-        self.now = 9.0
+        self.now = 3600.0
         self.assertTrue(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
-        self.now = 10.0
-        self.assertFalse(self.turns.again(voice["id"], next_waited_s=0.0)["keep"])
 
     def test_a_holder_lets_go_where_its_own_rank_asked_first_or_a_claim_stands(self) -> None:
         voice = self.turns.ask("voice")
@@ -1632,7 +1591,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         said = self.answer_of(broker.ticket)
         self.assertEqual((said["inUse"], said["giveWay"], said["giveWayFor"]), (False, True, "coder"))
 
-    async def test_a_lent_turn_past_its_values_is_told_pass_once_at_its_boundary_or_unloaded_where_it_may_pause(self) -> None:
+    async def test_a_lent_turn_in_use_is_told_pass_once_while_one_of_its_rank_waits_and_never_given_way_on_time(self) -> None:
         broker, owner = await self.lent_broker()
         told: list[bytes] = []
 
@@ -1640,21 +1599,19 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
             write = staticmethod(told.append)
 
         broker.holder = Hold()  # type: ignore[assignment]
-        self.turns.turn_values = {"model": units.Turn(30.0, False)}.get
         broker.follow_use(now=0.0)
-        self.now += 29
-        broker.follow_use(now=1.0)
-        self.assertEqual(told, [])
-        self.now += 1
-        broker.follow_use(now=2.0)
-        broker.follow_use(now=3.0)
         self.assertEqual(told, [b"PASS coder\n"])
-        self.assertFalse(self.answer_of(broker.ticket)["giveWay"])
-        # A lend service that may pause gives way in the middle of a use instead, unloaded by the master.
-        self.turns.turn_values = {"model": units.Turn(30.0, True)}.get
-        broker.passed = None
-        broker.follow_use(now=4.0)
+        # An hour of use later it is told nothing more and kept in the middle of its use: the head lets the
+        # request in hand end and says QUIET.
+        for second in range(1, 3601, 60):
+            self.now = 100.0 + second
+            owner.graphs += 1
+            await broker.units.refresh()
+            broker.follow_use(now=float(second))
         self.assertEqual(told, [b"PASS coder\n"])
+        said = self.answer_of(broker.ticket)
+        self.assertEqual((said["inUse"], said["giveWay"]), (True, False))
+        await broker.quiet(now=3600.0)
         self.assertEqual(self.answer_of(broker.ticket)["giveWayFor"], "coder")
 
     async def out_broker(self) -> tuple[card.Card, list[bytes], str]:

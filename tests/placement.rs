@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use bmo_arbiter::master::BoxFuture;
 use bmo_arbiter::placement::{
   AdapterAnswer, Board, Declaration, Hands, Journal, NodeRow, Placements, Placer, Say, Spread, Step, Verb,
-  YieldBy, declarations, occupants_of, parse_declaration, role_of, tiers_of, tool_declaration, turns_of,
+  YieldBy, declarations, occupants_of, parse_declaration, role_of, tiers_of, tool_declaration,
 };
-use bmo_arbiter::rules::{Num, TurnValues};
+use bmo_arbiter::rules::Num;
 
 /// A world of nodes in memory: their roles, their occupants files, whether each is a desktop, and every
 /// adapter verb asked, answered as the test sets.
@@ -165,7 +165,6 @@ fn declaration(service: &str, priority: i64, spread: Spread, alone: bool) -> Dec
     spread,
     alone,
     adapter: Some(vec!["true".into()]),
-    turn: None,
     dir: PathBuf::from("."),
   }
 }
@@ -725,35 +724,15 @@ fn a_declaration_is_read_and_named_by_its_file() {
 }
 
 #[test]
-fn a_turn_table_is_read_into_the_turns_part_every_node_is_handed_and_one_not_understood_is_refused() {
+fn a_turn_table_is_accepted_and_means_nothing() {
   let path = Path::new("/tree/gate/model.card.toml");
   let head = "service = \"model\"\ncard_mib = 1\npriority = 50\nspread = \"many\"\nalone = true\n";
-  let model =
-    parse_declaration(&format!("{head}[turn]\nyield_after_s = 300\ncan_pause = false\n"), path).unwrap();
-  assert_eq!(
-    model.turn,
-    Some(TurnValues {
-      yield_after_s: Num(300.0),
-      can_pause: false
-    })
-  );
-  assert_eq!(parse_declaration(head, path).unwrap().turn, None);
-  for wrong in [
-    "[turn]\nyield_after_s = 300\n",
-    "[turn]\nyield_after_s = -1\ncan_pause = true\n",
-    "[turn]\nyield_after_s = 60\ncan_pause = true\nsometimes = 1\n",
-    "[turn]\nyield_after_s = \"60\"\ncan_pause = true\n",
+  let plain = parse_declaration(head, path).unwrap();
+  for table in [
+    "[turn]\nyield_after_s = 300\ncan_pause = false\n",
+    "[turn]\nyield_after_s = -1\nsometimes = \"never\"\n",
   ] {
-    assert!(parse_declaration(&format!("{head}{wrong}"), path).is_err(), "{wrong}");
+    assert_eq!(parse_declaration(&format!("{head}{table}"), path).unwrap(), plain, "{table}");
   }
-
-  let mut declarations = declared();
-  declarations[2].turn = model.turn;
-  declarations[0].turn = Some(TurnValues {
-    yield_after_s: Num(7.5),
-    can_pause: true,
-  });
-  let turns = turns_of(&declarations);
-  assert_eq!(turns.keys().collect::<Vec<_>>(), ["model", "voice"]);
-  assert_eq!(turns["voice"].yield_after_s, Num(7.5));
+  assert!(parse_declaration(&format!("{head}seconds = 60\n"), path).is_err());
 }

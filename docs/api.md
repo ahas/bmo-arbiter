@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.7**.
+This document states version **0.1.0-rev.8**.
 
 ## The wire format
 
@@ -249,9 +249,11 @@ master's to decide (`docs/placement.md`, 「Demands」).
   `within?` (the id of a granted demand of the caller's it is asked within), `workKey?` (the key of the work it continues), `ref?` (shown) and `waitMs?` (how long to hold the answer
   open).
   - `201` with the demand where every card it asks is granted, `202` with the demand where it waits for
-    any, with a `Retry-After` header of 1.
-  - `400` `bad-request`: a body that does not name a service, or a field of the wrong kind. `422`
-    `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not hold.
+    any, with a `Retry-After` header of 1. `waitMs` holds the answer open as `GET` does.
+  - `400` `bad-request`: a body that does not name a service, a `count` of nought, or a field of the wrong
+    kind. `422` `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not
+    hold.
+- **`GET /demands`** — `200` with a page of every demand the master holds, in the order they were asked.
 - **`GET /demands/{demandId}`** — `200` with the demand. `waitMs` holds the answer open until a card is
   granted, granted again, lent, or taken by a lower tier, or the time runs out, when it is answered as it
   stands and the caller asks again; the demand itself is never dropped for it. `404` `not-found`: a
@@ -426,7 +428,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.7+<commit>` or `0.1.0-rev.7+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.8+<commit>` or `0.1.0-rev.8+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 
@@ -444,7 +446,8 @@ The node arbiter reads the occupants and rules files again within a second of a 
 - **A declaration's keys:** `service`, `card_mib`, `priority`, `tier` (a number, zero or more, or absent),
   `yield_by` (`turn` or `process`, absent for `turn`), `spread` (`one` or `many`), `alone`, `adapter` (a
   list of words, not empty, or absent) (`docs/placement.md`, 「A service declares itself」). A
-  declaration declares no number of seconds for how it takes turns.
+  declaration declares no number of seconds for how it takes turns: a `[turn]` table, whatever it holds,
+  is read past and means nothing; any other key is refused.
 - **Refused,** said among the notes and failing the placement that read it: a file named otherwise than
   its `service`, a `service` that is not lower-case letters, digits and hyphens, an empty `adapter`, a
   negative `tier`, `yield_by = "process"` with no `adapter`, and two declarations of one
@@ -579,8 +582,8 @@ carried.
   | `restore-waiting` | units wait to come back until their asker's units leave the card |
   | `units-restored` | units unloaded for a ticket came back |
   | `restore-failed` | units unloaded for a ticket did not come back yet and are tried again |
-  | `occupant-stopped` | an occupant that yields by its process was stopped through its adapter; the text carries why |
-  | `occupant-started` | an occupant stopped to yield was started again through its adapter |
+  | `occupant-stopped` | an occupant that yields by its process was stopped through its adapter, to yield the card or to hand it over; the text carries why |
+  | `occupant-started` | an occupant that yields by its process was started through its adapter: again once what it yielded to is gone, or for a demand |
   | `occupant-stop-failed` | the adapter's `stop` failed and is tried again |
   | `occupant-start-failed` | the adapter's `start` failed and is tried again |
 - **The codes of the placement:**

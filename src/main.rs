@@ -248,13 +248,12 @@ async fn run(verb: Verb, roots: &Roots) -> Result<bool, String> {
           Ok(hash) => {
             log_push(&roots.data_root, &node.facts.name, &hash);
             println!(
-              "{}: {} occupants, {} groups, {} units, {} rules, {} turns, {} tiers ({hash})",
+              "{}: {} occupants, {} groups, {} units, {} rules, {} tiers ({hash})",
               node.facts.name,
               part.occupants.len(),
               part.groups.len(),
               part.units.len(),
               part.rules.len(),
-              part.turns.len(),
               part.tiers.len()
             );
           }

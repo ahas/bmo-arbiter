@@ -1,11 +1,13 @@
 //! The cluster as the master pictures it (docs/api.md, 「The cluster」): the master itself, the groups the
 //! rules choose, every node read with its card, units and queue, the units the rules declare, the services
-//! the master places, the placement under way, and the picture's last notes.
+//! the master places with the nodes each stands on now, the placement under way, the demands the master
+//! holds, and the picture's last notes.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::card::{Claim, Process, Ram, Store, UnitState};
+use crate::demands::Demand;
 use crate::descriptions::UnitDetail;
 use crate::placements::PlacementKind;
 
@@ -219,8 +221,21 @@ pub struct PlacedService {
   pub spread: Spread,
   pub alone: bool,
   pub node_names: Vec<String>,
+  /// Each node where it stands now.
+  pub instances: Vec<ServiceInstance>,
   /// Why its placement is unsettled.
   pub unsettled: Option<String>,
+}
+
+/// A node where a service stands now: where its adapter reports the instance answers its callers and the
+/// file its key is read from, and how many demands are on it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceInstance {
+  pub node_name: String,
+  pub address: Option<String>,
+  pub key_file: Option<String>,
+  pub demands: u32,
 }
 
 /// The placement under way and the step it stands at.
@@ -256,6 +271,8 @@ pub struct Cluster {
   pub tiers: Vec<OccupantTier>,
   pub services: Vec<PlacedService>,
   pub placement: Option<PlacementUnderWay>,
+  /// Every demand the master holds.
+  pub demands: Vec<Demand>,
   /// The picture's last notes, newest first.
   pub events: Vec<Note>,
 }

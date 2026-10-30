@@ -6,6 +6,7 @@
 mod call;
 pub mod card;
 pub mod cluster;
+pub mod demands;
 pub mod descriptions;
 mod error;
 pub mod events;

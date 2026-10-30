@@ -4,6 +4,7 @@
 //! them.
 
 pub mod client;
+pub mod demands;
 pub mod hands;
 pub mod install;
 pub mod machine;

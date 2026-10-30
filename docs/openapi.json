@@ -539,6 +539,13 @@
             },
             "type": "array"
           },
+          "demands": {
+            "description": "Every demand the master holds.",
+            "items": {
+              "$ref": "#/components/schemas/Demand"
+            },
+            "type": "array"
+          },
           "events": {
             "description": "The picture's last notes, newest first.",
             "items": {
@@ -593,6 +600,7 @@
           "tiers",
           "services",
           "placement",
+          "demands",
           "events"
         ],
         "type": "object"
@@ -889,6 +897,253 @@
           "vramMiB"
         ],
         "type": "object"
+      },
+      "Demand": {
+        "description": "A demand as every route answers it.",
+        "properties": {
+          "cards": {
+            "description": "Each card granted.",
+            "items": {
+              "$ref": "#/components/schemas/DemandCard"
+            },
+            "type": "array"
+          },
+          "count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemandReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "While a card waits, what it waits on."
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DemandState"
+          },
+          "taken": {
+            "description": "The claimant or lower-tier occupant that stopped the service on one of its cards.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waitedMs": {
+            "description": "How long it has stood.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "within": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "serviceName",
+          "count",
+          "cards",
+          "state",
+          "taken",
+          "reason",
+          "waitedMs",
+          "within",
+          "workKey",
+          "ref"
+        ],
+        "type": "object"
+      },
+      "DemandAsk": {
+        "description": "A demand asked for.",
+        "properties": {
+          "count": {
+            "description": "How many cards; one where absent.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ref": {
+            "description": "A reference; shown.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "waitMs": {
+            "description": "How long to hold the answer open.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "within": {
+            "description": "The id of a granted demand of the caller's this one is asked within.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workKey": {
+            "description": "The key of the work it continues.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "serviceName"
+        ],
+        "type": "object"
+      },
+      "DemandCard": {
+        "description": "One card of a demand granted: its node, and where the service's adapter reports them, the address its\ncallers reach the instance at and the file its key is read from.",
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keyFile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nodeName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "nodeName",
+          "address",
+          "keyFile"
+        ],
+        "type": "object"
+      },
+      "DemandPage": {
+        "description": "A page of demands.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Demand"
+            },
+            "type": "array"
+          },
+          "more": {
+            "description": "Whether anything stands past the last item.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "more"
+        ],
+        "type": "object"
+      },
+      "DemandReason": {
+        "description": "Why a card of a demand waits: its code, and an English sentence for a person.",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/DemandWait"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "text"
+        ],
+        "type": "object"
+      },
+      "DemandState": {
+        "description": "Where a demand stands.",
+        "oneOf": [
+          {
+            "const": "waiting",
+            "description": "No card of it is granted.",
+            "type": "string"
+          },
+          {
+            "const": "granted",
+            "description": "Every card it asks is granted.",
+            "type": "string"
+          },
+          {
+            "const": "partly",
+            "description": "Some of its cards are granted and others wait.",
+            "type": "string"
+          },
+          {
+            "const": "lent",
+            "description": "Its card is lent to a demand asked within it.",
+            "type": "string"
+          }
+        ]
+      },
+      "DemandWait": {
+        "description": "What a card of a demand waits on.",
+        "oneOf": [
+          {
+            "const": "starting",
+            "description": "The service is starting on a card.",
+            "type": "string"
+          },
+          {
+            "const": "in-use",
+            "description": "Every card it may have is in use.",
+            "type": "string"
+          },
+          {
+            "const": "held",
+            "description": "A claim or a ticket of a lower tier holds the cards it may have.",
+            "type": "string"
+          },
+          {
+            "const": "start-failed",
+            "description": "The service's `start` failed; tried again at the next round.",
+            "type": "string"
+          }
+        ]
       },
       "Description": {
         "description": "What a service says of its units, by each unit's name, `<service>/<part>`.",
@@ -1301,6 +1556,13 @@
             "format": "double",
             "type": "number"
           },
+          "instances": {
+            "description": "Each node where it stands now.",
+            "items": {
+              "$ref": "#/components/schemas/ServiceInstance"
+            },
+            "type": "array"
+          },
           "nodeNames": {
             "items": {
               "type": "string"
@@ -1345,6 +1607,7 @@
           "spread",
           "alone",
           "nodeNames",
+          "instances",
           "unsettled"
         ],
         "type": "object"
@@ -1636,6 +1899,38 @@
         "required": [
           "loadedAt",
           "error"
+        ],
+        "type": "object"
+      },
+      "ServiceInstance": {
+        "description": "A node where a service stands now: where its adapter reports the instance answers its callers and the\nfile its key is read from, and how many demands are on it.",
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "demands": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "keyFile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nodeName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "nodeName",
+          "address",
+          "keyFile",
+          "demands"
         ],
         "type": "object"
       },
@@ -2034,9 +2329,9 @@
     }
   },
   "info": {
-    "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
+    "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes, grants cards of a service as demands ask them and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.7"
+    "version": "0.1.0-rev.8"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2167,6 +2462,173 @@
           }
         },
         "summary": "The whole picture: groups, nodes, cards, units, queues, declarations.",
+        "tags": [
+          "master"
+        ]
+      }
+    },
+    "/demands": {
+      "get": {
+        "operationId": "listDemands",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemandPage"
+                }
+              }
+            },
+            "description": "Every demand the master holds, in the line's order."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "summary": "Every demand the master holds, in the line's order.",
+        "tags": [
+          "master"
+        ]
+      },
+      "post": {
+        "operationId": "createDemands",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemandAsk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Demand"
+                }
+              }
+            },
+            "description": "The demand, every card it asks granted."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Demand"
+                }
+              }
+            },
+            "description": "The demand, waiting for a card.",
+            "headers": {
+              "Retry-After": {
+                "description": "1.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/NoPlace"
+          }
+        },
+        "summary": "Ask for cards of a service; the master decides which node answers each. 201 with every card granted, 202 while any waits.",
+        "tags": [
+          "master"
+        ]
+      }
+    },
+    "/demands/{demandId}": {
+      "delete": {
+        "operationId": "deleteDemand",
+        "parameters": [
+          {
+            "description": "The demand's id.",
+            "in": "path",
+            "name": "demandId",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Done."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Give a demand back, every card of it.",
+        "tags": [
+          "master"
+        ]
+      },
+      "get": {
+        "operationId": "getDemand",
+        "parameters": [
+          {
+            "description": "The demand's id.",
+            "in": "path",
+            "name": "demandId",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "How long to hold the answer open until a card is granted, granted again, lent, or taken by a lower\ntier, or the time runs out.",
+            "in": "query",
+            "name": "waitMs",
+            "required": false,
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Demand"
+                }
+              }
+            },
+            "description": "A demand as it stands, holding the answer open with waitMs; never dropped for it."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "A demand as it stands, holding the answer open with waitMs; never dropped for it.",
         "tags": [
           "master"
         ]
@@ -2641,7 +3103,7 @@
   ],
   "tags": [
     {
-      "description": "The master: the cluster, placements and unit descriptions.",
+      "description": "The master: the cluster, placements, demands and unit descriptions.",
       "name": "master"
     },
     {

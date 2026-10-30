@@ -42,7 +42,7 @@ from pathlib import Path
 
 PORT = int(os.environ.get("CARD_TURN_PORT", "7439"))
 ASK_TIMEOUT_S = 2.0
-# How long a waiter has its answer held open at most, well inside the time a silent ticket is kept.
+# How long a waiter has its answer held open at most.
 HOLD_OPEN_S = 20.0
 # How long a waiter pauses before asking again where an answer came back early with no turn: an arbiter
 # that holds no answer open, or a lock taken in the moment between by a process that asks for no turns.

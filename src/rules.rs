@@ -234,25 +234,12 @@ pub struct Rule {
   pub restore: bool,
 }
 
-/// How a service takes turns with one of its rank (docs/node-arbiter.md, 「One rank taking turns」), as its
-/// declaration says it and its node is handed it.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnValues {
-  pub yield_after_s: Num,
-  pub can_pause: bool,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Rules {
   pub occupants: Vec<Claimant>,
   pub groups: Vec<NodeGroup>,
   pub units: Vec<UnitSpec>,
   pub rules: Vec<Rule>,
-  /// Every declared service's turn values, keyed by service: no rules file names them, the master writes
-  /// them from the declarations, and every node is handed them whole.
-  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-  pub turns: BTreeMap<String, TurnValues>,
   /// Every occupant's tier, keyed by name (docs/placement.md, 「Tiers」): read from the file the tiers its
   /// `occupants` give, and with the declarations every declared service's; every node is handed them whole.
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -627,7 +614,6 @@ pub fn parse_rules(source: &str, file: &str) -> Result<Rules, RulesError> {
     groups,
     units,
     rules,
-    turns: BTreeMap::new(),
     tiers,
   })
 }
@@ -721,7 +707,6 @@ impl Rules {
         })
         .cloned()
         .collect(),
-      turns: self.turns.clone(),
       tiers: self.tiers.clone(),
     }
   }

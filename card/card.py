@@ -77,15 +77,12 @@ LOWER_POLL_S = 2.0
 # How often the occupants file is looked at, and the lock's holders read against it.
 OCCUPANTS_POLL_S = 1.0
 KEEP_POLL_S = 1.0
-# The hold (docs/node-arbiter.md, 「The hold」): the loopback port its API answers on, how long a ticket not asked
-# after is kept, how long a turn given waits for its lock to be taken, how long an answer is held open for
-# a waiter, how long a turn carries on from request to request while another waits, how often a waiter in
-# this process asks again, and what a hold is counted at before a service has held the card here.
+# The hold (docs/node-arbiter.md, 「The hold」): the loopback port its API answers on, how long a turn given waits
+# for its lock to be taken, how long an answer is held open for a waiter, how often a waiter in this process
+# asks again, and what a hold is counted at before a service has held the card here.
 TURN_PORT = int(os.environ.get("CARD_TURN_PORT", "7439"))
-TURN_KEEP_S = float(os.environ.get("CARD_TURN_KEEP_S", "30"))
 TURN_TAKE_S = float(os.environ.get("CARD_TURN_TAKE_S", "5"))
 TURN_HOLD_OPEN_S = float(os.environ.get("CARD_TURN_HOLD_OPEN_S", "20"))
-TURN_HOLD_S = float(os.environ.get("CARD_TURN_HOLD_S", "10"))
 # How often a held answer looks again at a lock that may have freed with nobody giving a ticket back.
 TURN_LOOK_S = 0.25
 TURN_POLL_S = 0.5
@@ -499,13 +496,14 @@ class Keeper:
 
 @dataclass
 class Ticket:
-    """One occupant waiting for the card, or given its turn: who, where it stands, when it asked, when it
-    was last heard from, and when its turn came."""
+    """One occupant waiting for the card, or given its turn: who, where it stands, when it asked, and when its
+    turn came."""
     id: int
     service: str
     asked: float
-    heard: float
     granted: float | None = None
+    # Whether its holder has been seen holding the lock since its turn came: letting it go then ends the turn.
+    took: bool = False
     # When a turn given to it last passed on untaken, which lets the next in line before it once.
     passed: float | None = None
     # A ticket of this process's own — the desktop's, a lent hold's — which takes the lock at once when
@@ -529,20 +527,21 @@ class Ticket:
 class Turns:
     """The queue every occupant waits in for the card (docs/node-arbiter.md, 「The hold」). The head of the
     queue, by the occupants' order and then by who asked first, is given its turn once no claim stands and
-    nothing holds the lock; it then takes the lock itself and gives the ticket back once it has let go. A
-    ticket not asked after for its keep is dropped, so a caller that died holds nobody up; a turn not
-    taken up within its take is passed on where another ticket waits, and kept where none does. How long
-    a wait will be is counted from how long each service has held the card before.
+    nothing holds the lock; it then takes the lock itself and gives the ticket back once it has let go. No
+    silence drops a ticket: it stands until it is given back, its asker is found gone, or its holder lets
+    the lock go; a turn not taken up within its take is passed on where another ticket waits, and kept
+    where none does. How long a wait will be is counted from how long each service has held the card before.
 
     The queue is one of requests (docs/node-arbiter.md, 「One queue of requests」): a ticket stands by the arrival
     of the request it is for, and a holder asks after each request whether its next one still stands
     first. A waiter may have its answer held open until its turn is given, which happens the moment the
-    holder gives its ticket back (「Handing on」).
+    holder gives its ticket back (「Handing on」). Within one rank nothing passes a turn on time: it passes at
+    its holder's request boundary, its rest or its giving the ticket back (「One rank taking turns」).
 
     A claimant's tickets stand apart (docs/node-arbiter.md, 「Claimants」): while one is in the queue nobody else is
     given a turn, and every one is granted once `claim_holds` says the lock is held for the claim. The lock
-    is the arbiter's, so such a ticket never passes on for a lock not taken, and it is dropped for silence
-    granted or not.
+    is the arbiter's, so such a ticket never passes on for a lock not taken, and it stands until its agent
+    gives it back.
 
     A turn with nothing left to serve rests (docs/node-arbiter.md, 「Resting」): it keeps the lock with its weights on
     the card and gives way to any ticket that waits for a request, whatever its rank, and to a process
@@ -551,10 +550,9 @@ class Turns:
 
     def __init__(self, occupants: Occupants, lock: Path, claimed: Callable[[], str | None],
                  holders: Callable[[Path, int], list[int]] | None = None, clock: Callable[[], float] = time.monotonic,
-                 keep_s: float = TURN_KEEP_S, take_s: float = TURN_TAKE_S,
+                 take_s: float = TURN_TAKE_S,
                  claim_holds: Callable[[], bool] = lambda: False, claim_wait_s: float = LOCK_GRACE_S,
-                 hold_s: float = TURN_HOLD_S, hold_open_s: float = TURN_HOLD_OPEN_S,
-                 turn_values: Callable[[str], units_mod.Turn | None] = lambda service: None,
+                 hold_open_s: float = TURN_HOLD_OPEN_S,
                  waiters: Callable[[Path, int], list[int]] | None = None,
                  declared: Callable[[int], str | None] = declared_service) -> None:
         self.occupants = occupants
@@ -569,12 +567,8 @@ class Turns:
         self.waiters = waiters or lock_waiters
         self.declared = declared
         self.clock = clock
-        self.keep_s = keep_s
         self.take_s = take_s
-        self.hold_s = hold_s
         self.hold_open_s = hold_open_s
-        # Each service's own turn values, None for one that declares none (docs/node-arbiter.md, 「One rank taking turns」).
-        self.turn_values = turn_values
         self.tickets: dict[int, Ticket] = {}
         self.typical: dict[str, float] = {}
         # The last ticket id given: each next one larger, and never below the epoch milliseconds it is given at.
@@ -593,22 +587,20 @@ class Turns:
         return sorted(self.tickets.values(), key=where)
 
     def _tidy(self) -> None:
+        """A turn whose holder took the lock and let it go with no ticket given back — a holder that died — over,
+        and a turn given and never taken passed on where another ticket waits. A ticket waiting stays however
+        silent (docs/node-arbiter.md, 「The hold」)."""
         now = self.clock()
         held = bool(self.holders(self.lock, os.getpid()))
         for ticket in list(self.tickets.values()):
-            if ticket.local:
+            # This process's own tickets, and a claimant's, whose lock is ours, end only by being given back.
+            if ticket.local or ticket.granted is None or self.occupants.claims_by_ticket(ticket.service):
                 continue
-            if self.occupants.claims_by_ticket(ticket.service):
-                # A claimant asks after its ticket while it uses the grant too, and the lock it stands on is ours.
-                if now - ticket.heard > self.keep_s:
-                    del self.tickets[ticket.id]
-                continue
-            # A turn being used asks after nothing until it gives the ticket back: it stays while the lock is held.
-            if ticket.granted is not None and held:
-                continue
-            if now - ticket.heard > self.keep_s:
-                del self.tickets[ticket.id]
-            elif ticket.granted is not None and now - ticket.granted > self.take_s and self._others_wait(ticket):
+            if held:
+                ticket.took = True
+            elif ticket.took:
+                self._end(ticket)
+            elif now - ticket.granted > self.take_s and self._others_wait(ticket):
                 # Given its turn and never took the lock: its turn passes on, to the next in line before it.
                 ticket.granted = None
                 ticket.passed = now
@@ -653,52 +645,16 @@ class Turns:
         rank = self.occupants.rank(ticket.service)
         return len(self.occupants.order) + 1 if rank is None else rank
 
-    def _began(self, ticket: Ticket) -> float:
-        """When a turn's use began: its grant, or the request that ended its rest."""
-        return ticket.busy_since if ticket.busy_since is not None else ticket.granted
-
-    def _values(self, ticket: Ticket) -> units_mod.Turn:
-        """A turn's own turn values, or for an occupant that declares none no least turn, letting go in the
-        middle of a request where its ticket gives way."""
-        return self.turn_values(ticket.service) or units_mod.Turn(0.0, ticket.gives_way_s is not None)
-
-    def _turn_spent(self, ticket: Ticket) -> units_mod.Turn | None:
-        """A turn's own turn values where it has been in use for their `yield_after_s`, its least turn, counted
-        as the bound counts it (docs/node-arbiter.md, 「One rank taking turns」); None where it rests or its time
-        has not come."""
-        if ticket.granted is None or ticket.resting:
-            return None
-        turn = self._values(ticket)
-        return turn if self.clock() - self._began(ticket) >= turn.yield_after_s else None
-
-    def _peers_due(self, ticket: Ticket) -> list[Ticket]:
-        """The waiters of a turn's own rank it gives way to now (docs/node-arbiter.md, 「Priority and yielding」,
-        「One rank taking turns」): once its least turn is used, those of another occupant asked after the turn
-        began, and every one where its service declares turn values."""
-        if self._turn_spent(ticket) is None:
-            return []
-        declared = self.turn_values(ticket.service) is not None
-        began = self._began(ticket)
-        return [other for other in self._asking() if other is not ticket and self._rank(other) == self._rank(ticket)
-                and (declared or (other.asked > began and other.service != ticket.service))]
-
     def _keeps(self, ticket: Ticket, next_waited_s: float) -> bool:
-        """Whether a holder's next request still stands first in the queue: no claim stands, no waiting
-        ticket of a higher occupant or of its own rank asked before that request, the turn not held past
-        its bound while anybody waits, nor past its own turn values while one of its rank does (docs/node-arbiter.md,
-        「One queue of requests」, 「One rank taking turns」). Both count the turn's use, from its grant or from
-        the request that ended its rest."""
+        """Whether a holder's next request still stands first in the queue: no claim stands, and no waiting
+        ticket of a higher occupant or of its own rank asked before that request (docs/node-arbiter.md, 「One
+        queue of requests」, 「One rank taking turns」). How long the turn has been in use does not count."""
         if ticket.granted is None or self.claimed() is not None:
             return False
         waiting = [other for other in self._asking() if other is not ticket]
         if not waiting:
             return True
-        now = self.clock()
-        if not ticket.resting and now - self._began(ticket) >= self.hold_s:
-            return False
-        if self._peers_due(ticket):
-            return False
-        mine = (self._rank(ticket), now - max(0.0, next_waited_s))
+        mine = (self._rank(ticket), self.clock() - max(0.0, next_waited_s))
         return all((self._rank(other), other.asked) >= mine for other in waiting)
 
     def _held_open(self, ticket: Ticket, wait_s: float, holding: bool = False) -> None:
@@ -720,7 +676,6 @@ class Turns:
             if left <= 0:
                 return
             self.changed.wait(min(TURN_LOOK_S, left))
-            ticket.heard = self.clock()
             self._tidy()
             self._grant()
 
@@ -732,16 +687,14 @@ class Turns:
     def _give_way_for(self, ticket: Ticket) -> str | None:
         """Who a turn that gives way, or one resting, is to let go for: the claimant whose claim stands, else
         for a resting turn the first occupant waiting for a request, whatever its rank, and for a turn that
-        gives way the highest occupant above it waiting, or of its own rank once its turn values say it lets go
-        in the middle of a request and their time has come; None where it keeps the card."""
+        gives way the highest occupant above it waiting; never one of its own rank in the middle of a request
+        (docs/node-arbiter.md, 「One rank taking turns」). None where it keeps the card."""
         if ticket.granted is None or (ticket.gives_way_s is None and not ticket.resting):
             return None
         claimant = self.claimed()
         if claimant is not None:
             return claimant
-        peers = self._peers_due(ticket) if self._values(ticket).can_pause else []
-        waiting = [other for other in self._asking()
-                   if ticket.resting or self._above(other, ticket) or other in peers]
+        waiting = [other for other in self._asking() if ticket.resting or self._above(other, ticket)]
         if waiting:
             return waiting[0].service
         # A rest gives way to a process waiting for the lock too: a service that asks for no turn asks for
@@ -754,14 +707,14 @@ class Turns:
         return None
 
     def passes_to(self, ticket_id: int) -> str | None:
-        """Who a turn that lets go only at its request boundary is to pass to there, by its own turn values
-        (docs/node-arbiter.md, 「One rank taking turns」): the first of its rank waiting once its turn has been in use
-        for their `yield_after_s`; None where no claim, value or waiter makes it pass."""
+        """Who a turn in use is to pass to at its request boundary (docs/node-arbiter.md, 「One rank taking turns」,
+        「Lending」): the first of its rank whose request waits in line, however short the turn has been in use;
+        None where it rests, a claim stands or none of its rank waits."""
         with self.guard:
             ticket = self.tickets.get(ticket_id)
-            if ticket is None or self.claimed() is not None or self._values(ticket).can_pause:
+            if ticket is None or ticket.granted is None or ticket.resting or self.claimed() is not None:
                 return None
-            alike = self._peers_due(ticket)
+            alike = [other for other in self._asking() if other is not ticket and self._rank(other) == self._rank(ticket)]
             return alike[0].service if alike else None
 
     def _wait_s(self, ticket: Ticket, order: list[Ticket]) -> float:
@@ -808,7 +761,7 @@ class Turns:
             return None
         with self.guard:
             now = self.clock()
-            ticket = Ticket(self._new_id(), service, now - max(0.0, waited_s), now, local=local, need=need, ref=ref,
+            ticket = Ticket(self._new_id(), service, now - max(0.0, waited_s), local=local, need=need, ref=ref,
                             gives_way_s=gives_way_s, rest=rest)
             self.tickets[ticket.id] = ticket
             # A turn that gives way, its answer held open, hears at once that somebody now waits.
@@ -819,7 +772,7 @@ class Turns:
             return self.answer(ticket)
 
     def again(self, ticket_id: int, wait_s: float = 0.0, next_waited_s: float | None = None, rest: bool = False) -> dict | None:
-        """A ticket asked after, which keeps it; None where it was dropped. A waiting one may be answered once
+        """A ticket asked after; None where it is no longer held. A waiting one may be answered once
         its turn is given within `wait_s`; a turn asked with its next request's wait is told whether it keeps
         the card for that request, which ends its rest where it does; a turn asked with `rest` rests from
         then on."""
@@ -829,13 +782,12 @@ class Turns:
             if ticket is None:
                 return None
             now = self.clock()
-            ticket.heard = now
             holding = ticket.granted is not None
             if rest and holding and not ticket.resting:
                 ticket.resting, ticket.rested_at = True, now
             self._grant()
             self._held_open(ticket, wait_s, holding)
-            # Given back or dropped while its answer was held open: no ticket to answer for any more.
+            # Given back or ended while its answer was held open: no ticket to answer for any more.
             if self.tickets.get(ticket_id) is not ticket:
                 return None
             kept = None
@@ -852,18 +804,23 @@ class Turns:
         """A ticket given back, its hold over; how long it held the card is counted for the next waits, and
         the next in line is given its turn there and then."""
         with self.guard:
-            ticket = self.tickets.pop(ticket_id, None)
+            ticket = self.tickets.get(ticket_id)
             if ticket is None:
                 return False
-            # How long the card was in use, its rest left out; a turn that only rested used it for nothing.
-            if ticket.busy_since is not None:
-                ended = ticket.rested_at if ticket.resting and ticket.rested_at is not None else self.clock()
-                held = max(0.0, ended - ticket.busy_since)
-                before = self.typical.get(ticket.service)
-                self.typical[ticket.service] = held if before is None else 0.7 * before + 0.3 * held
+            self._end(ticket)
             self._grant()
             self.changed.notify_all()
             return True
+
+    def _end(self, ticket: Ticket) -> None:
+        """A ticket over, how long it held the card in use counted for the next waits, its rest left out; a turn
+        that only rested used it for nothing. Called under the guard."""
+        del self.tickets[ticket.id]
+        if ticket.busy_since is not None:
+            ended = ticket.rested_at if ticket.resting and ticket.rested_at is not None else self.clock()
+            held = max(0.0, ended - ticket.busy_since)
+            before = self.typical.get(ticket.service)
+            self.typical[ticket.service] = held if before is None else 0.7 * before + 0.3 * held
 
     def follow_use(self, ticket_id: int, in_use: bool) -> None:
         """A turn this process holds for another's engine, in use or resting as that engine's use says: a turn
@@ -881,8 +838,7 @@ class Turns:
             self.changed.notify_all()
 
     def claim_asked(self, name: str) -> bool:
-        """Whether a ticket of this claimant stands, a silent one dropped first: the claim it makes lasts
-        while one does."""
+        """Whether a ticket of this claimant stands: the claim it makes lasts while one does."""
         with self.guard:
             self._tidy()
             return self.occupants.claims_by_ticket(name) and any(ticket.service == name for ticket in self.tickets.values())
@@ -916,8 +872,8 @@ class Turns:
         """A turn waited for in this process, asked after every poll, giving way in `gives_way_s` where it
         does, and standing by a request that has waited `waited_s`; the ticket, or None where the service has
         no place on the node. `on_queued` hears each answer that is not yet a turn. `need` names the unit the
-        ticket asks for, which the master places by the rules. A ticket dropped for silence is asked for
-        afresh with the same need."""
+        ticket asks for, which the master places by the rules. A ticket no longer held is asked for afresh with
+        the same need."""
         answered = self.ask(service, local=True, need=need, gives_way_s=gives_way_s, waited_s=waited_s)
         try:
             while answered is not None and not answered["turn"]:
@@ -1513,9 +1469,6 @@ class Card:
         # Where the owner of a hold's units opens its control socket: the rpc-server this starts, or the
         # engine of a local hold, which is told it on READY.
         self.control: Path | None = None
-        # The turn values the rules carry, by service, which the hold queue reads (docs/node-arbiter.md, 「One rank
-        # taking turns」).
-        self.turn_values: dict[str, units_mod.Turn] = {}
         self.tiers: dict[str, float] = {}
         # Since when the head's longest request has waited for this card's units while it says WANT, the restore
         # its WANT started, whether a restore is loading the units already, and the turn the hold was told to
@@ -1528,7 +1481,6 @@ class Card:
     def take_rules(self, rules: dict | None) -> None:
         self.rules = rules
         self.claimants = units_mod.claimants_of(rules)
-        self.turn_values = units_mod.turns_of(rules)
         self.tiers = units_mod.tiers_of(rules)
 
     def claimed(self) -> str | None:
@@ -2102,7 +2054,7 @@ class Card:
         if door.graphs != self.graphs_seen or door.waiting:
             self.graphs_seen, self.used_at = door.graphs, now
         self.turns.follow_use(self.ticket, now - self.used_at < LEND_QUIET_S)
-        # Passed at its request boundary to one of its rank, by the lend service's own turn values, once a turn.
+        # Passed at its request boundary to one of its rank whose request waits, once a turn, never on time.
         passing = self.turns.passes_to(self.ticket)
         if passing is not None and self.passed != self.ticket:
             self.passed = self.ticket
@@ -2336,8 +2288,7 @@ def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> 
     lent_to = lend.service if lend is not None else None
     card.claim_counts = lambda name: occupants.present(name)
     card.claim_yields = lambda name: occupants.outranks(name, lent_to)
-    turns = Turns(occupants, lock, card.claimed, claim_holds=card.claim_holds,
-                  turn_values=lambda service: card.turn_values.get(service))
+    turns = Turns(occupants, lock, card.claimed, claim_holds=card.claim_holds)
     card.turns = turns
     card.lent_to = lent_to or ANY
     seen = desktop.Desktop()

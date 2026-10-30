@@ -72,6 +72,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/demands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every demand the master holds, in the line's order. */
+        get: operations["listDemands"];
+        put?: never;
+        /** Ask for cards of a service; the master decides which node answers each. 201 with every card granted, 202 while any waits. */
+        post: operations["createDemands"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/demands/{demandId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A demand as it stands, holding the answer open with waitMs; never dropped for it. */
+        get: operations["getDemand"];
+        put?: never;
+        post?: never;
+        /** Give a demand back, every card of it. */
+        delete: operations["deleteDemand"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/descriptions/{serviceName}": {
         parameters: {
             query?: never;
@@ -325,6 +361,8 @@ export interface components {
         /** @description The whole picture. */
         Cluster: {
             declared: components["schemas"]["DeclaredUnit"][];
+            /** @description Every demand the master holds. */
+            demands: components["schemas"]["Demand"][];
             /** @description The picture's last notes, newest first. */
             events: components["schemas"]["Note"][];
             groups: components["schemas"]["Group"][];
@@ -403,6 +441,77 @@ export interface components {
             /** Format: double */
             vramMiB: number | null;
         };
+        /** @description A demand as every route answers it. */
+        Demand: {
+            /** @description Each card granted. */
+            cards: components["schemas"]["DemandCard"][];
+            /** Format: uint32 */
+            count: number;
+            /** Format: int64 */
+            id: number;
+            /** @description While a card waits, what it waits on. */
+            reason: components["schemas"]["DemandReason"] | null;
+            ref: string | null;
+            serviceName: string;
+            state: components["schemas"]["DemandState"];
+            /** @description The claimant or lower-tier occupant that stopped the service on one of its cards. */
+            taken: string | null;
+            /**
+             * Format: int64
+             * @description How long it has stood.
+             */
+            waitedMs: number;
+            /** Format: int64 */
+            within: number | null;
+            workKey: string | null;
+        };
+        /** @description A demand asked for. */
+        DemandAsk: {
+            /**
+             * Format: uint32
+             * @description How many cards; one where absent.
+             */
+            count?: number | null;
+            /** @description A reference; shown. */
+            ref?: string | null;
+            serviceName: string;
+            /**
+             * Format: uint64
+             * @description How long to hold the answer open.
+             */
+            waitMs?: number | null;
+            /**
+             * Format: int64
+             * @description The id of a granted demand of the caller's this one is asked within.
+             */
+            within?: number | null;
+            /** @description The key of the work it continues. */
+            workKey?: string | null;
+        };
+        /**
+         * @description One card of a demand granted: its node, and where the service's adapter reports them, the address its
+         *     callers reach the instance at and the file its key is read from.
+         */
+        DemandCard: {
+            address: string | null;
+            keyFile: string | null;
+            nodeName: string;
+        };
+        /** @description A page of demands. */
+        DemandPage: {
+            items: components["schemas"]["Demand"][];
+            /** @description Whether anything stands past the last item. */
+            more: boolean;
+        };
+        /** @description Why a card of a demand waits: its code, and an English sentence for a person. */
+        DemandReason: {
+            code: components["schemas"]["DemandWait"];
+            text: string;
+        };
+        /** @description Where a demand stands. */
+        DemandState: "waiting" | "granted" | "partly" | "lent";
+        /** @description What a card of a demand waits on. */
+        DemandWait: "starting" | "in-use" | "held" | "start-failed";
         /** @description What a service says of its units, by each unit's name, `<service>/<part>`. */
         Description: {
             units: {
@@ -560,6 +669,8 @@ export interface components {
             alone: boolean;
             /** Format: double */
             cardMiB: number;
+            /** @description Each node where it stands now. */
+            instances: components["schemas"]["ServiceInstance"][];
             nodeNames: string[];
             /** Format: double */
             priority: number;
@@ -671,6 +782,17 @@ export interface components {
             error: string | null;
             /** Format: int64 */
             loadedAt: number | null;
+        };
+        /**
+         * @description A node where a service stands now: where its adapter reports the instance answers its callers and the
+         *     file its key is read from, and how many demands are on it.
+         */
+        ServiceInstance: {
+            address: string | null;
+            /** Format: uint32 */
+            demands: number;
+            keyFile: string | null;
+            nodeName: string;
         };
         /** @description The rules as a slave last read them. */
         SlaveRules: {
@@ -1020,6 +1142,121 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    listDemands: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every demand the master holds, in the line's order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemandPage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createDemands: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DemandAsk"];
+            };
+        };
+        responses: {
+            /** @description The demand, every card it asks granted. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Demand"];
+                };
+            };
+            /** @description The demand, waiting for a card. */
+            202: {
+                headers: {
+                    /** @description 1. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Demand"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["NoPlace"];
+        };
+    };
+    getDemand: {
+        parameters: {
+            query?: {
+                /**
+                 * @description How long to hold the answer open until a card is granted, granted again, lent, or taken by a lower
+                 *     tier, or the time runs out.
+                 */
+                waitMs?: number;
+            };
+            header?: never;
+            path: {
+                /** @description The demand's id. */
+                demandId: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A demand as it stands, holding the answer open with waitMs; never dropped for it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Demand"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteDemand: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The demand's id. */
+                demandId: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     putDescription: {

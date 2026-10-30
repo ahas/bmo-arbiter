@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::placement::{declarations, tiers_of, turns_of};
+use crate::placement::{declarations, tiers_of};
 use crate::reach::{NodeRegistry, NodeShell};
 use crate::rules::{Dump, NodeFacts, Num, RamFree, Rules, read_rules, rules_path, selects};
 
@@ -117,12 +117,11 @@ pub fn standing_rules(roots: &Roots) -> Result<Rules, String> {
   }
 }
 
-/// The rules with the `turns` and `tiers` parts every node is handed, read off the declarations the roots
-/// carry (docs/placement.md, 「The rules」, 「Tiers」).
+/// The rules with the `tiers` part every node is handed, read off the declarations the roots carry
+/// (docs/placement.md, 「The rules」, 「Tiers」).
 pub fn with_declared(rules: Rules, declaration_roots: &[PathBuf]) -> Result<Rules, String> {
   let declared = declarations(declaration_roots)?;
   Ok(Rules {
-    turns: turns_of(&declared),
     tiers: tiers_of(&rules.tiers, &declared),
     ..rules
   })

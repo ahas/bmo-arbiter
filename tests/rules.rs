@@ -4,8 +4,8 @@
 mod fixtures;
 
 use bmo_arbiter::rules::{
-  Claimant, Dump, Eviction, NodeFacts, Num, RULES_FILE, RamFree, Rules, SeenBy, TurnValues, UnitKind,
-  matches, parse_rules,
+  Claimant, Dump, Eviction, NodeFacts, Num, RULES_FILE, RamFree, Rules, SeenBy, UnitKind, matches,
+  parse_rules,
 };
 use fixtures::RULES;
 
@@ -157,41 +157,6 @@ fn what_a_node_is_pushed_is_the_json_its_slave_reads() {
   assert_eq!(read["rules"][0]["evict"]["node"], true);
   assert_eq!(read["rules"][0]["when"], serde_json::json!({ "desktop": "busy" }));
   assert!(read.get("turns").is_none(), "{text}");
-}
-
-#[test]
-fn every_node_is_handed_the_turns_part_whole_in_the_form_its_slave_reads() {
-  let mut rules = read(RULES);
-  rules.turns.insert(
-    "model".into(),
-    TurnValues {
-      yield_after_s: Num(300.0),
-      can_pause: false,
-    },
-  );
-  rules.turns.insert(
-    "coder".into(),
-    TurnValues {
-      yield_after_s: Num(60.5),
-      can_pause: true,
-    },
-  );
-  for (name, desktop) in [("node-b", false), ("desk-1", true)] {
-    let facts = NodeFacts {
-      name: name.into(),
-      role: None,
-      desktop,
-    };
-    let read: serde_json::Value = serde_json::from_str(&rules.for_node(&facts).node_text()).unwrap();
-    assert_eq!(
-      read["turns"],
-      serde_json::json!({
-        "coder": { "yieldAfterS": 60.5, "canPause": true },
-        "model": { "yieldAfterS": 300, "canPause": false },
-      }),
-      "{name}"
-    );
-  }
 }
 
 #[test]

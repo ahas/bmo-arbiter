@@ -12,7 +12,7 @@ use bmo_arbiter_client::placements::PlacementKind;
 use serde::{Deserialize, Serialize};
 
 use crate::reach::BoxFuture;
-use crate::rules::{DEFAULT_TIER, Num, RULES_FILE, TurnValues, read_rules, role_services};
+use crate::rules::{DEFAULT_TIER, Num, RULES_FILE, read_rules, role_services};
 
 /// Where a declaration stands among a root's files: `<service>.card.toml`.
 pub const DECLARATION_SUFFIX: &str = ".card.toml";
@@ -68,14 +68,10 @@ struct DeclarationFile {
   spread: Spread,
   alone: bool,
   adapter: Option<Vec<String>>,
-  turn: Option<TurnFile>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TurnFile {
-  yield_after_s: f64,
-  can_pause: bool,
+  /// A `[turn]` table, accepted and meaning nothing: no number of seconds decides how a service takes turns
+  /// with one of its rank (docs/api.md, 「Declarations」).
+  #[serde(rename = "turn")]
+  _turn: Option<serde::de::IgnoredAny>,
 }
 
 /// A service as it declares itself, and the directory its adapter runs from.
@@ -90,8 +86,6 @@ pub struct Declaration {
   pub spread: Spread,
   pub alone: bool,
   pub adapter: Option<Vec<String>>,
-  /// How it takes turns with one of its rank; none for a service that never gives way to one.
-  pub turn: Option<TurnValues>,
   pub dir: PathBuf,
 }
 
@@ -161,13 +155,6 @@ fn held(read: DeclarationFile, path: &Path, dir: PathBuf) -> Result<Declaration,
   if read.adapter.as_ref().is_some_and(|argv| argv.is_empty()) {
     return Err(format!("{}: adapter must be a command that is not empty", path.display()));
   }
-  if read
-    .turn
-    .as_ref()
-    .is_some_and(|turn| !turn.yield_after_s.is_finite() || turn.yield_after_s < 0.0)
-  {
-    return Err(format!("{}: [turn] yield_after_s must be zero or more seconds", path.display()));
-  }
   if read.tier.is_some_and(|tier| !tier.is_finite() || tier < 0.0) {
     return Err(format!("{}: tier must be a number of zero or more", path.display()));
   }
@@ -186,17 +173,8 @@ fn held(read: DeclarationFile, path: &Path, dir: PathBuf) -> Result<Declaration,
     spread: read.spread,
     alone: read.alone,
     adapter: read.adapter,
-    turn: read.turn.map(|turn| TurnValues {
-      yield_after_s: Num(turn.yield_after_s),
-      can_pause: turn.can_pause,
-    }),
     dir,
   })
-}
-
-/// The `turns` part every node is handed: each declared `[turn]`, keyed by its service.
-pub fn turns_of(declarations: &[Declaration]) -> BTreeMap<String, TurnValues> {
-  declarations.iter().filter_map(|one| Some((one.service.clone(), one.turn?))).collect()
 }
 
 /// Every occupant's tier (docs/placement.md, 「Tiers」): the ones the rules' `occupants` give, and for each
@@ -420,6 +398,12 @@ pub struct AdapterAnswer {
   pub detail: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub nodes: Option<Vec<String>>,
+  /// For `health` answering `running`: where the instance answers its callers.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub address: Option<String>,
+  /// For `health` answering `running`: the file its key is read from on the master's host.
+  #[serde(default, rename = "keyFile", skip_serializing_if = "Option::is_none")]
+  pub key_file: Option<String>,
 }
 
 impl AdapterAnswer {
@@ -684,6 +668,7 @@ impl Placer {
         spread: one.spread.into(),
         alone: one.alone,
         node_names: placements.nodes_of(&one.service).to_vec(),
+        instances: Vec::new(),
         unsettled: placements.unsettled.get(&one.service).cloned(),
       })
       .collect();

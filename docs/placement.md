@@ -243,7 +243,10 @@ sequenceDiagram
     what brings it back, and the master tries no restore of it meanwhile.
   - **It makes an occupant that yields by its process go down and come back** (「Yielding by the
     process」).
-  - **How often it reads:** every two seconds, and the node service once a minute;
+  - **How often it reads:** every two seconds, and the node service once a minute, each placed service's
+    adapter's `health` on each of its nodes read with it, apart from the rounds, for where the service
+    stands now; a service it starts is read there again once started, and one it stops stands nowhere it
+    stopped it;
     `CARD_MASTER_READ_EVERY_MS` and `CARD_MASTER_DISCOVER_EVERY_MS` set them otherwise.
   - **A node whose slave gives no card is lost,** and read again at every round all the same, so it is
     connected at the first read that gives one. It is said once in the notes when it is lost, a node never
@@ -287,8 +290,9 @@ sequenceDiagram
   where the one caller using it lends its card within a demand of its own (「Demands」).
 - **Down:** the master runs the adapter's `stop` for that node alone, says `occupant-stopped`, and keeps
   the stop in `placements/process-yields.json` beside the rules, so a master restarted meanwhile still
-  brings it back.
-- **Back:** once nothing that made it yield stands on the node — the ticket gone, the claim ended — the
+  brings it back. A stop for an occupant of its own tier that yields by its process as well is kept as a
+  hand-over; every other stop is kept as a yield.
+- **Back:** once nothing that made a yield stands on the node — the ticket gone, the claim ended — the
   master runs the adapter's `start` there and says `occupant-started`. A `stop` or `start` that fails is
   said once and tried again at the next round.
 - **A hand-over is not given back.** Its stop is kept as a hand-over, and the occupant that handed the card

@@ -15,6 +15,7 @@ use crate::card::{
   Card, CardUnit, CardUnitChanges, CardUnitPage, Ticket, TicketAsk, TicketChanges, TicketQuery,
 };
 use crate::cluster::Cluster;
+use crate::demands::{Demand, DemandAsk, DemandPage, DemandQuery};
 use crate::descriptions::Description;
 use crate::error::WireError;
 use crate::events::{Event, EventPage, EventsQuery, Health};
@@ -176,6 +177,26 @@ impl ArbiterClient {
   /// `GET /placements/{placementId}`, of the master.
   pub async fn placement(&self, placement_id: i64) -> CallResult<Placement> {
     self.get(&["placements", &placement_id.to_string()]).await
+  }
+
+  /// `POST /demands`, of the master: the demand with every card it asks granted, or waiting for any.
+  pub async fn create_demand(&self, ask: &DemandAsk) -> CallResult<Demand> {
+    self.send(Method::POST, &["demands"], ask).await
+  }
+
+  /// `GET /demands`, of the master.
+  pub async fn demands(&self) -> CallResult<DemandPage> {
+    self.get(&["demands"]).await
+  }
+
+  /// `GET /demands/{demandId}`, of the master.
+  pub async fn demand(&self, demand_id: i64, query: &DemandQuery) -> CallResult<Demand> {
+    Self::answer(self.request(Method::GET, &["demands", &demand_id.to_string()]).query(query)).await
+  }
+
+  /// `DELETE /demands/{demandId}`, of the master: the demand given back.
+  pub async fn delete_demand(&self, demand_id: i64) -> CallResult<()> {
+    self.remove(&["demands", &demand_id.to_string()]).await
   }
 
   /// `PUT /descriptions/{serviceName}`, of the master.

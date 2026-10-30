@@ -723,30 +723,6 @@ def claimants_of(rules: dict | None) -> list[Claimant]:
     return found
 
 
-@dataclass(frozen=True)
-class Turn:
-    """A service's turn values as the rules carry them (docs/node-arbiter.md, 「One rank taking turns」): how long its
-    turn is in use before it gives way to a waiter of its rank, and whether it lets go in the middle of a
-    request rather than at its boundary."""
-    yield_after_s: float
-    can_pause: bool
-
-
-def turns_of(rules: dict | None) -> dict[str, Turn]:
-    """The turn values the node's rules carry, by service; an entry not understood is passed over, and a
-    service the rules do not name has none."""
-    found: dict[str, Turn] = {}
-    turns = (rules or {}).get("turns")
-    for service, one in (turns.items() if isinstance(turns, dict) else []):
-        if not isinstance(one, dict) or not isinstance(one.get("canPause"), bool):
-            continue
-        after = one.get("yieldAfterS")
-        if isinstance(after, bool) or not isinstance(after, (int, float)) or after < 0:
-            continue
-        found[service] = Turn(float(after), one["canPause"])
-    return found
-
-
 def placing_of(rules: dict | None, service: str, floor_bytes: int = 0) -> Placing:
     """Where the node's rules put the service's units when they go out (docs/placement.md, 「The rules」):
     each unit entry naming one of its parts, else the node's group; and the most host memory its dumps

@@ -62,8 +62,9 @@ The owner's covenant for the card. Every rule below realises it, on each node an
   - **An occupant with neither,** whose declaration says it yields by its process, goes down through its
     adapter's `stop` and comes back through its `start` once nothing that made it yield stands on its node
     (`docs/placement.md`, 「Yielding by the process」). Two such occupants of one tier hand a card to each
-    other only as the master's demands ask, and the one that handed it over is not brought back by the
-    other going (`docs/placement.md`, 「Demands」).
+    other only where the standing one has no demand on it or its caller lends it within a demand of its
+    own, and the one that handed it over is not brought back by the other going (`docs/placement.md`,
+    「Demands」).
 - **Only what the request needs comes down.** A ticket is asked on one node's arbiter and stands for that
   node's card; a request that needs several cards asks a ticket on each, its units one group of the rules.
   On each card the master unloads only what the ticket's unit needs there, so an occupant spread over
@@ -214,7 +215,7 @@ keeps its model on it until another asks for the card.
   - A container stops counting by its name. Any of its processes that comes onto the card claims again,
     and a new container claims as any container does.
   - A ticket is the claimant's own word that its work is held or running, and keeps its claim for as long
-    as it is asked after, whatever is on the card.
+    as it stands, until its agent gives it back, whatever is on the card.
   - Where the card is not read, nothing is given back by this rule.
 - **What the arbiter does when a claim begins:** it gives no turn to anyone else while it stands; it has
   the owner of a hold's units unload them, each where the rules put it within the host memory the
@@ -436,7 +437,7 @@ sequenceDiagram
     granted, its turn rests from the start.
   - It never makes a holder give way, never stops a turn carrying on, and is not someone waiting for an
     untaken turn to pass to.
-  - It is kept as any ticket is, by being asked after.
+  - It stands as any ticket does, until it is given back or its asker is found gone.
   - A request that comes meanwhile gives it back and asks for a ticket of its own, standing as that
     request does.
 - **What a resting turn counts for:** none of its rest is counted in how long its service typically holds
@@ -531,8 +532,8 @@ Each occupant chooses how it waits, inside the contract above:
     says `QUEUED <position> <seconds>` on the hold while it waits, and loads the units back once the turn
     is the hold's, saying `RESTORED`. The ticket names the first of the hold's units still out and its
     size, so the master plans room for it by the rules (`docs/api.md`, 「Admission on a shared pool」).
-    The occupant holding the turn then gives way to it by its own rules: at once if it rests, by its turn
-    values if it stands at the lend service's rank, never if it stands above.
+    The occupant holding the turn then gives way to it by its own rules: at once if it rests, at its
+    request boundary if it stands at the lend service's rank, never if it stands above.
   - **The seconds** count from the later of the request's arrival and its card's units going out, so a
     request held across a `PASS` stands behind the ticket the turn passed to.
   - **`UNWANT`** takes the ticket back where the units have not begun to come back; units already coming
