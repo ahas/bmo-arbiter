@@ -35,9 +35,9 @@ over the network brings its lend settings.
 The owner's covenant for the card. Every rule below realises it, on each node and in the master.
 
 - **Every occupant has a tier,** a number of zero or more, and the lower number takes the card first. The
-  covenant's tiers: a claimant that takes the card outright, such as an external job runner, `0`; a
-  training run launched on the owner's word, `0.5`, between the two; the voice and the translator's
-  engine, `1`; every other occupant `2`. Where each occupant's tier is written is
+  covenant's tiers: a claimant that takes the card outright, such as an external job runner, `0`; the
+  bench, a measurement that takes the lab for its length, `1`; every service `2`, the voice, the
+  translator's engine, the training and the model engines alike. Where each occupant's tier is written is
   `docs/placement.md`, 「Tiers」; the desktop stands at `0` unless the rules give it another.
 - **A higher number waits while a lower one has work.** A ticket waits behind every ticket and turn of a
   lower tier, and a turn in use gives way to a ticket of a lower tier (「Giving way」): at once where it can
