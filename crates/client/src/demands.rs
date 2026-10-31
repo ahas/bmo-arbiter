@@ -32,8 +32,9 @@ pub struct DemandAsk {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DemandQuery {
-  /// How long to hold the answer open until a card is granted, granted again, lent, or taken by a lower
-  /// tier, or the time runs out.
+  /// How long to hold the answer open, while the demand waits with no card taken, until a card is granted,
+  /// granted again, lent, or taken by a lower tier, or the time runs out; any other demand is answered at
+  /// once.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub wait_ms: Option<u64>,
 }

@@ -547,12 +547,22 @@ pub struct Said {
   pub text: String,
 }
 
-/// What the placement shows the master's picture, and what it has to say among its events.
+/// A service a placement stood on a node: its service and node, and its `health` answering `running`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stood {
+  pub service: String,
+  pub node: String,
+  pub health: AdapterAnswer,
+}
+
+/// What the placement shows the master's picture, what it has to say among its events, and the services
+/// it stood since the master last looked, which stand there whatever the master stopped before.
 #[derive(Debug, Default)]
 pub struct Board {
   pub services: Vec<PlacedService>,
   pub request: Option<PlacementUnderWay>,
   pub said: Vec<Said>,
+  pub stood: Vec<Stood>,
 }
 
 /// The placement, its declarations read again through its hands as each request is taken.
@@ -947,13 +957,12 @@ impl Placer {
         .is_some_and(|one| !one.alone && one.priority < declaration.priority)
     };
     let roles = role_services(row.role.as_deref());
+    // A service standing alone joins a reservation whose services standing alone stand at its priority, the
+    // ones standing beneath them standing below it too.
+    let joins = roles.iter().all(|one| shares(one) || (declaration.alone && below(one)));
     let reserved_above = roles.iter().any(|one| self.declaration(one).is_some_and(|one| one.alone))
       && roles.iter().all(|one| beneath(one));
-    if !roles.is_empty()
-      && !roles.contains(&service)
-      && !roles.iter().all(|one| shares(one))
-      && !reserved_above
-    {
+    if !roles.is_empty() && !roles.contains(&service) && !joins && !reserved_above {
       return Err(refuse(format!(
         "{node} is reserved for {} in the node service, so {service} cannot stand there",
         row.role.as_deref().unwrap_or("")
@@ -1106,6 +1115,11 @@ impl Placer {
           ),
         });
       }
+      self.board.lock().unwrap().stood.push(Stood {
+        service: service.clone(),
+        node: node.clone(),
+        health: answer,
+      });
     }
     Ok(())
   }

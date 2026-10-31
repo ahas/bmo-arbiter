@@ -11,7 +11,7 @@ use bmo_arbiter::demands::Demands;
 use bmo_arbiter::master::{
   BoxFuture, Master, Reached, Shell, World, asker_of, awaited_ticket, unload_reason,
 };
-use bmo_arbiter::placement::{AdapterAnswer, Declaration, Placements, Spread, YieldBy};
+use bmo_arbiter::placement::{AdapterAnswer, Board, Declaration, Placements, Spread, Stood, YieldBy};
 use bmo_arbiter::reach::RunResult;
 use bmo_arbiter::rules::Num;
 use bmo_arbiter_client::cluster::LinkState;
@@ -1160,4 +1160,51 @@ async fn a_hand_over_is_not_given_back_and_a_lower_tier_brings_back_only_what_it
   rounds(&mut master, 2).await;
   assert_eq!(adapted(&stand), ["lab-arena stop a", "coder stop a", "coder start a"]);
   assert_eq!(granted_on(&demands, coder), ["a"]);
+}
+
+#[tokio::test]
+async fn a_stop_is_let_go_once_its_service_stands_again_by_its_health_or_by_a_placement() {
+  let both: &[&str] = &["a", "b"];
+  let (mut master, stand, demands) =
+    demanding(both, two_engines(), &[("lab-arena", both), ("coder", both)], &["lab-arena a", "lab-arena b"]).await;
+  let board = Arc::new(Mutex::new(Board::default()));
+  master.attach(board.clone());
+  // The coder asks both cards: each idle lab-arena hands its card over, and the hand-overs are kept.
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([waiting(1, "coder", None)]));
+  rounds(&mut master, 1).await;
+  assert_eq!(adapted(&stand), ["lab-arena stop a", "lab-arena stop b"]);
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([]));
+  let kept = || std::fs::read_to_string(stand.dir.join("process-yields.json")).unwrap();
+  assert_eq!(kept().matches("\"kind\": \"handover\"").count(), 2, "{}", kept());
+
+  // Brought up on a by something else, its health answers running there: the stop is let go and it stands.
+  stand.running.lock().unwrap().insert("lab-arena a".into());
+  master.discover().await;
+  rounds(&mut master, 2).await;
+  assert!(!kept().contains("\"nodeName\": \"a\""), "{}", kept());
+  assert!(kept().contains("\"nodeName\": \"b\""), "{}", kept());
+  assert!(master.state().events.iter().any(|event| event.code == "occupant-standing"));
+  let first = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, first), ["a"]);
+
+  // A placement stands it on b: its stop there is let go, and a demand is granted on it as it stands.
+  stand.running.lock().unwrap().insert("lab-arena b".into());
+  board.lock().unwrap().stood.push(Stood {
+    service: "lab-arena".into(),
+    node: "b".into(),
+    health: AdapterAnswer {
+      ok: true,
+      node: Some("b".into()),
+      state: Some("running".into()),
+      address: Some("http://b.test/lab-arena".into()),
+      ..AdapterAnswer::default()
+    },
+  });
+  let second = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 1).await;
+  assert!(!kept().contains("lab-arena"), "{}", kept());
+  assert_eq!(granted_on(&demands, second), ["b"]);
+  assert_eq!(demand(&demands, second).cards[0].address.as_deref(), Some("http://b.test/lab-arena"));
+  assert_eq!(adapted(&stand), ["lab-arena stop a", "lab-arena stop b"]);
 }

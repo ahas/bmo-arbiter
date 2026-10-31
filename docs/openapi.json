@@ -2331,7 +2331,7 @@
   "info": {
     "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes, grants cards of a service as demands ask them and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.8"
+    "version": "0.1.0-rev.9"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2596,7 +2596,7 @@
             }
           },
           {
-            "description": "How long to hold the answer open until a card is granted, granted again, lent, or taken by a lower\ntier, or the time runs out.",
+            "description": "How long to hold the answer open, while the demand waits with no card taken, until a card is granted,\ngranted again, lent, or taken by a lower tier, or the time runs out; any other demand is answered at\nonce.",
             "in": "query",
             "name": "waitMs",
             "required": false,
@@ -2616,7 +2616,7 @@
                 }
               }
             },
-            "description": "A demand as it stands, holding the answer open with waitMs; never dropped for it."
+            "description": "A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it."
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2628,7 +2628,7 @@
             "$ref": "#/components/responses/NotFound"
           }
         },
-        "summary": "A demand as it stands, holding the answer open with waitMs; never dropped for it.",
+        "summary": "A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it.",
         "tags": [
           "master"
         ]

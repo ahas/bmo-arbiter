@@ -295,10 +295,15 @@ sequenceDiagram
 - **Back:** once nothing that made a yield stands on the node — the ticket gone, the claim ended — the
   master runs the adapter's `start` there and says `occupant-started`. A `stop` or `start` that fails is
   said once and tried again at the next round.
-- **A hand-over is not given back.** Its stop is kept as a hand-over, and the occupant that handed the card
-  over comes back on that node only by a demand of its own or as the return of a lent turn (「Demands」),
-  never because the occupant it handed to went down. Where a ticket of a lower tier or a claim then stops
-  the occupant standing, the one brought back once it is gone is that occupant alone.
+- **A hand-over is not given back.** Its stop is kept as a hand-over, and the master starts the occupant
+  that handed the card over on that node only for a demand of its own or as the return of a lent turn
+  (「Demands」), never because the occupant it handed to went down. Where a ticket of a lower tier or a
+  claim then stops the occupant standing, the one brought back once it is gone is that occupant alone.
+- **A stop is kept only while the occupant stays down.** The master reads the `health` of what it stopped
+  as of every placed service, and once the occupant stands on that node again — its `health` answering
+  `running`, or a placement of it there done — whatever brought it up, the stop is let go and said
+  `occupant-standing`. The occupant then stands there as any other does: demands are granted on it, and
+  what makes it yield stops it again.
 - **On that node alone:** a server placed on several nodes goes down only where a request asks for the
   card.
 - **The slave knows nothing of it:** such a server asks no ticket, and the node's arbiter knows it only by

@@ -396,6 +396,29 @@ async fn a_service_below_every_reserving_one_stands_beneath_them_and_they_are_pl
 }
 
 #[tokio::test]
+async fn a_service_standing_alone_joins_a_reservation_beside_one_standing_beneath_it_and_none_below_does() {
+  let dir = tempfile::tempdir().unwrap();
+  standing(dir.path(), &[("voice", &["a"]), ("router-train", &["a"])]);
+  let stand = Arc::new(Stand::with(&[("a", Some("voice+router-train"))]));
+  let mut declarations = equals();
+  declarations.push(declaration("router-train", 20, Spread::Many, false));
+  declarations.push(declaration("speaker", 70, Spread::Many, true));
+  declarations.push(declaration("listener", 10, Spread::Many, true));
+  let placer = placer_of(&stand, declarations, dir.path());
+
+  // Alone at the priority of the one standing alone there, and above the one standing beneath it.
+  placer.run(Verb::Place, "speaker", "a", &quiet()).await.unwrap();
+
+  assert_eq!(placer.state().unwrap().nodes_of("speaker"), ["a"]);
+  assert_eq!(stand.role("a"), Some("speaker+voice+router-train".into()));
+  // Alone below the one standing beneath them: refused before anything changes.
+  let below = placer.run(Verb::Place, "listener", "a", &quiet()).await.unwrap_err();
+  assert_eq!(below.step, None);
+  assert!(below.why.contains("reserved for speaker+voice+router-train"), "{}", below.why);
+  assert!(placer.state().unwrap().nodes_of("listener").is_empty());
+}
+
+#[tokio::test]
 async fn each_request_reads_the_declarations_its_hands_give_then() {
   let dir = tempfile::tempdir().unwrap();
   let stand = Arc::new(Stand::with(&[("a", None)]));

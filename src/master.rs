@@ -287,15 +287,40 @@ impl Master {
     self.board = Some(board);
   }
 
-  /// What the placement had to say since the last round, said among the events.
+  /// What the placement had to say since the last round, said among the events, and every service it
+  /// stood taken as standing there.
   fn take_board_words(&mut self) {
-    let said = match &self.board {
-      Some(board) => std::mem::take(&mut board.lock().unwrap().said),
+    let (said, stood) = match &self.board {
+      Some(board) => {
+        let mut board = board.lock().unwrap();
+        (std::mem::take(&mut board.said), std::mem::take(&mut board.stood))
+      }
       None => return,
     };
     for one in said {
       self.say(one.node.as_deref(), one.code, one.text);
     }
+    for one in stood {
+      let key = (one.service, one.node);
+      self.touched.insert(key.clone());
+      if let Some(instance) = instance_of(&one.health) {
+        self.standing_again(key, instance, "a placement stood it");
+      }
+    }
+  }
+
+  /// A service standing on the node, its instance kept; a stop the master kept of it there let go, as it
+  /// stands again whatever brought it up (docs/placement.md, 「Yielding by the process」).
+  fn standing_again(&mut self, key: (String, String), instance: Instance, how: &str) {
+    if self.stopped.remove(&key).is_some() {
+      self.save_yields();
+      self.say(
+        Some(&key.1),
+        "occupant-standing",
+        format!("{} stands again, {how}: its stop is let go", key.0),
+      );
+    }
+    self.instances.insert(key, instance);
   }
 
   pub fn new(world: Arc<dyn World>, rules_file: PathBuf, read_every_s: f64) -> Self {
@@ -1076,9 +1101,7 @@ impl Master {
     for one in self.declared.iter().filter(|one| one.adapter.is_some()) {
       let placed = placements.nodes_of(&one.service).to_vec();
       for node in &placed {
-        if !self.stopped.contains_key(&(one.service.clone(), node.clone()))
-          && !self.bringing.contains_key(node)
-        {
+        if !self.bringing.contains_key(node) {
           asks.push((one.clone(), node.clone(), placed.clone()));
         }
       }
@@ -1097,21 +1120,21 @@ impl Master {
     }));
   }
 
-  /// The health read taken in where it is read, leaving what moved since it began as it stands now.
+  /// The health read taken in where it is read, leaving what moved since it began as it stands now; what
+  /// the master stopped and stands again has its stop let go.
   fn collect_sweep(&mut self) {
     let Some(handle) = self.sweep.take_if(|handle| handle.is_finished()) else { return };
     let Some(Ok(read)) = handle.now_or_never() else { return };
     let before = self.instances.clone();
     for (key, instance) in read {
-      if self.touched.contains(&key)
-        || self.stopped.contains_key(&key)
-        || self.bringing.contains_key(&key.1)
-      {
+      if self.touched.contains(&key) || self.bringing.contains_key(&key.1) {
         continue;
       }
       match instance {
-        Some(instance) => self.instances.insert(key, instance),
-        None => self.instances.remove(&key),
+        Some(instance) => self.standing_again(key, instance, "its health answering running"),
+        None => {
+          self.instances.remove(&key);
+        }
       };
     }
     if self.instances != before {

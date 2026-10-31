@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.8**.
+This document states version **0.1.0-rev.9**.
 
 ## The wire format
 
@@ -254,10 +254,13 @@ master's to decide (`docs/placement.md`, 「Demands」).
     kind. `422` `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not
     hold.
 - **`GET /demands`** — `200` with a page of every demand the master holds, in the order they were asked.
-- **`GET /demands/{demandId}`** — `200` with the demand. `waitMs` holds the answer open until a card is
-  granted, granted again, lent, or taken by a lower tier, or the time runs out, when it is answered as it
-  stands and the caller asks again; the demand itself is never dropped for it. `404` `not-found`: a
-  demand the master does not hold, so a new one is asked for.
+- **`GET /demands/{demandId}`** — `200` with the demand. `waitMs` holds the answer open only while the
+  caller still waits on it: a demand `waiting`, its service `starting` on a card among them, with no card
+  `taken`. Such an answer is held until a card is granted, granted again, lent, or taken by a lower tier,
+  or the time runs out, when it is answered as it stands and the caller asks again; the demand itself is
+  never dropped for it. A demand `granted`, `partly` or `lent`, or one with a card `taken`, is answered
+  at once, whatever `waitMs` asks. `404` `not-found`, at once: a demand the master does not hold, one
+  given back among them, so a new one is asked for.
 - **`DELETE /demands/{demandId}`** — gives it back, every card of it: `204`, or `404` `not-found`. The
   caller alone gives a demand back; nothing else drops one.
 - **A demand** is `id`, `serviceName`, `count`, `cards` (each card granted: `nodeName`, `address?` and
@@ -428,7 +431,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.8+<commit>` or `0.1.0-rev.8+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.9+<commit>` or `0.1.0-rev.9+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 
@@ -477,8 +480,9 @@ The node arbiter reads the occupants and rules files again within a second of a 
   push: the time, the file's hash, and what changed or where it went.
 - **Beside them,** the master alone writes `placements/services.json` (each service's nodes in order),
   `placements/services-request.json` (the placement under way, journaled step by step),
-  `placements/process-yields.json` (`stopped`, each service and node it stopped to yield the card, with
-  the reason and its `kind`, `yield` to be brought back or `handover` not to be; `docs/placement.md`, 「Yielding by the process」) and the descriptions folder (「Unit
+  `placements/process-yields.json` (`stopped`, each service and node it stopped to yield the card and
+  that stands there no more, with the reason and its `kind`, `yield` to be brought back or `handover` not
+  to be; `docs/placement.md`, 「Yielding by the process」) and the descriptions folder (「Unit
   descriptions」).
 
 ## What the arbiter calls
@@ -586,6 +590,7 @@ carried.
   | `occupant-started` | an occupant that yields by its process was started through its adapter: again once what it yielded to is gone, or for a demand |
   | `occupant-stop-failed` | the adapter's `stop` failed and is tried again |
   | `occupant-start-failed` | the adapter's `start` failed and is tried again |
+  | `occupant-standing` | an occupant the master had stopped stands on the node again, its `health` answering `running` or a placement of it there done, so the master keeps no stop of it there |
 - **The codes of the placement:**
 
   | Code | What happened |

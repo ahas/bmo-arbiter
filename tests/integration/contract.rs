@@ -359,12 +359,20 @@ async fn a_demand_is_granted_waits_in_line_while_its_card_is_in_use_and_is_given
     (Some("granted"), Some("a"))
   );
   assert!(std::fs::read_to_string(world.root().join("adapter.log")).unwrap().contains("start a"));
+  // Granted, it is answered at once however long the read asks to be held.
+  let began = std::time::Instant::now();
+  let (status, again) =
+    asked(&world, Method::GET, &format!("/demands/{first_id}?waitMs=10000"), None).await;
+  assert_eq!((status, again["state"].as_str()), (200, Some("granted")));
+  assert!(began.elapsed() < Duration::from_secs(1), "{:?}", began.elapsed());
 
   // The one card is in use: the next waits, its answer held only as long as asked, and it stands.
   let (status, second) = asked(&world, Method::POST, "/demands", Some(r#"{"serviceName":"demo"}"#)).await;
   assert_eq!((status, second["state"].as_str()), (202, Some("waiting")));
   let second_id = second["id"].as_i64().unwrap();
+  let began = std::time::Instant::now();
   let (status, still) = asked(&world, Method::GET, &format!("/demands/{second_id}?waitMs=300"), None).await;
+  assert!(began.elapsed() >= Duration::from_millis(300), "{:?}", began.elapsed());
   assert_eq!(
     (status, still["state"].as_str(), still["reason"]["code"].as_str()),
     (200, Some("waiting"), Some("in-use"))

@@ -432,8 +432,9 @@ async fn create_demand(State(app): State<App>, body: Bytes) -> Response {
   demand_answer(&app, changed, id, news, ask.wait_ms, true).await
 }
 
-/// A demand's answer, held open up to `wait_ms` until its news moves: a card granted, granted again, lent
-/// or taken. Its id is no longer held where it was given back meanwhile.
+/// A demand's answer, held open up to `wait_ms` until its news moves — a card granted, granted again, lent
+/// or taken — only while its caller still waits on it: a demand in any other state, or one with a card
+/// taken, is answered at once. Its id is no longer held where it was given back meanwhile.
 async fn demand_answer(
   app: &App,
   mut changed: tokio::sync::watch::Receiver<u64>,
@@ -456,7 +457,8 @@ async fn demand_answer(
       return refused(ErrorCode::NotFound, format!("the master holds no demand {id}"));
     };
     let left = deadline.saturating_duration_since(Instant::now());
-    if now != news || left.is_zero() {
+    let waits = demand.state == DemandState::Waiting && demand.taken.is_none();
+    if now != news || left.is_zero() || !waits {
       if !created {
         return answered(StatusCode::OK, &demand);
       }

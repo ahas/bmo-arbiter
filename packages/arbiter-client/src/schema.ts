@@ -97,7 +97,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** A demand as it stands, holding the answer open with waitMs; never dropped for it. */
+        /** A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it. */
         get: operations["getDemand"];
         put?: never;
         post?: never;
@@ -1208,8 +1208,9 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description How long to hold the answer open until a card is granted, granted again, lent, or taken by a lower
-                 *     tier, or the time runs out.
+                 * @description How long to hold the answer open, while the demand waits with no card taken, until a card is granted,
+                 *     granted again, lent, or taken by a lower tier, or the time runs out; any other demand is answered at
+                 *     once.
                  */
                 waitMs?: number;
             };
@@ -1222,7 +1223,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A demand as it stands, holding the answer open with waitMs; never dropped for it. */
+            /** @description A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it. */
             200: {
                 headers: {
                     [name: string]: unknown;
