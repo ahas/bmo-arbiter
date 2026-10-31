@@ -1065,10 +1065,10 @@ class TurnCommandTest(unittest.TestCase):
         "sys.exit(7)\n"
     )
 
-    def run_turn(self, folder: Path) -> subprocess.Popen:
+    def run_turn(self, folder: Path, *extra: str) -> subprocess.Popen:
         env = {**os.environ, "CARD_TURN_PORT": "9"}
         process = subprocess.Popen([sys.executable, str(HERE / "turn.py"), "--service", "tester", "--lock",
-                                    str(folder / "lock"), "--", sys.executable, "-c", self.COMMAND,
+                                    str(folder / "lock"), *extra, "--", sys.executable, "-c", self.COMMAND,
                                     str(folder / "up"), str(folder / "heard")], env=env)
         self.addCleanup(lambda: process.poll() is None and process.kill())
         deadline = time.monotonic() + 20
@@ -1086,6 +1086,43 @@ class TurnCommandTest(unittest.TestCase):
             process.send_signal(signal.SIGTERM)
             self.assertEqual(process.wait(timeout=20), 7)
             self.assertEqual((folder / "heard").read_text(), "1")
+
+    def test_the_card_is_lent_and_taken_back_while_the_command_runs(self) -> None:
+        import signal
+
+        def state_is(path: Path, word: str) -> None:
+            deadline = time.monotonic() + 20
+            while not (path.exists() and path.read_text().strip() == word):
+                self.assertLess(time.monotonic(), deadline, f"the state never read {word}")
+                time.sleep(0.02)
+
+        def lock_free(path: Path) -> bool:
+            fd = os.open(path, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return True
+            except BlockingIOError:
+                return False
+            finally:
+                os.close(fd)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            state = folder / "run" / "tester.turn"
+            process = self.run_turn(folder, "--state", str(state))
+            state_is(state, "held")
+            self.assertFalse(lock_free(folder / "lock"))
+            process.send_signal(signal.SIGUSR1)
+            state_is(state, "lent")
+            self.assertTrue(lock_free(folder / "lock"))
+            process.send_signal(signal.SIGUSR2)
+            state_is(state, "held")
+            self.assertFalse(lock_free(folder / "lock"))
+            self.assertIsNone(process.poll())
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=20), 7)
+            self.assertFalse(state.exists())
 
     def test_an_interrupt_is_left_to_the_command(self) -> None:
         import signal

@@ -398,13 +398,19 @@ needs the card and the units cannot be unloaded.
   install. An occupant in a process of its own imports its `TurnClient` (a ticket asked for and after,
   `keep`, `rest`, `give_back`, `state`), `hold` (the turn waited for and the lock taken), `GivingTurn` (a
   turn that gives way) and `quiet` (wait until the card stands unasked), or runs it as a command:
-  `python turn.py --service <name> [--lock <path>] -- <command> [<argument> …]`, which holds a turn and the
-  lock around the command and exits with its code, or `3` where the service has no place on the node.
+  `python turn.py --service <name> [--lock <path>] [--state <file>] -- <command> [<argument> …]`, which
+  holds a turn and the lock around the command and exits with its code, or `3` where the service has no
+  place on the node.
   While the command runs, a `SIGTERM` sent to `turn.py` is passed on to the command and `turn.py` waits
   for it to end, so a stop reaches the command once and its own way of ending runs to the end; `SIGINT`
   and `SIGHUP`, which a terminal sends to the command as well, are left to the command. A unit that runs
   it sends its stop to it alone (systemd's `KillMode=mixed`), the rest of the unit killed only once
   `turn.py` has ended.
+- **Lending the card while the command runs:** with `--state <file>`, `SIGUSR1` lets the lock go and gives
+  the ticket back, and `SIGUSR2` asks for a ticket again, waits for the turn as at the start and takes the
+  lock back on the same descriptor the command shares. They are done one after another, and the file reads
+  `held` or `lent` once each is done, `held` from the start, and is removed once the command has ended. What the command keeps on the card while the
+  card is lent is the command's to take off first; the arbiter sees only that the lock is not held.
 - **An occupant may carry a copy of its own** beside its code instead, or call the ticket routes through a
   published client; the contract it meets is 「Tickets」, and the installed file is what follows this
   repository's version.

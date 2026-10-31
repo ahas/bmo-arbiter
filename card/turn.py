@@ -13,11 +13,13 @@ comes, as it always did.
 
 Run as a command, it holds a turn and the lock around another command:
 
-    python turn.py --service <name> [--lock ~/.gpu.lock] -- <command> [<argument> …]
+    python turn.py --service <name> [--lock ~/.gpu.lock] [--state <file>] -- <command> [<argument> …]
 
 While the command runs, a SIGTERM is passed on to it and waited out, so a stop reaches the command once and
 its own way of ending runs to the end; SIGINT and SIGHUP, which a terminal sends to the command as well,
-are left to the command.
+are left to the command. With `--state <file>`, the card is lent while the command keeps running: SIGUSR1
+lets the lock and the ticket go, SIGUSR2 asks for a turn again and takes the lock back, and the file says
+`held` or `lent` once each is done, and is removed once the command has ended.
 
 An occupant that can let go of the card in the middle of its work holds a turn that gives way instead
 (docs/node-arbiter.md, 「Giving way」): `GivingTurn` asks for it with the seconds letting go takes, watches its
@@ -35,6 +37,7 @@ import argparse
 import fcntl
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -182,17 +185,28 @@ def try_lock(path: Path) -> int | None:
         return None
 
 
-def hold(client: TurnClient, lock: Path, until: float | None = None, said=None, waited_s: float | None = None) -> int | None:
-    """The occupant's turn waited for, with the answer held open, then the lock taken; its descriptor, or None
-    where `until` passed first. The ticket stands by a request that has waited `waited_s` already. Each
-    answer that is not yet a turn is handed to `said`."""
+def relock(fd: int) -> int | None:
+    """The lock taken again without waiting on a descriptor that held it before, or None where another holds it."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except BlockingIOError:
+        return None
+
+
+def hold(client: TurnClient, lock: Path | int, until: float | None = None, said=None,
+         waited_s: float | None = None) -> int | None:
+    """The occupant's turn waited for, with the answer held open, then the lock taken — at its path, or on the
+    descriptor given, which held it before; its descriptor, or None where `until` passed first. The ticket
+    stands by a request that has waited `waited_s` already. Each answer that is not yet a turn is handed to
+    `said`."""
     while True:
         left = HOLD_OPEN_S if until is None else max(0.0, until - time.monotonic())
         asked_at = time.monotonic()
         answered = client.ask(wait_s=left, waited_s=waited_s)
         waited_s = None
         if answered is None or answered.turn:
-            fd = try_lock(lock)
+            fd = relock(lock) if isinstance(lock, int) else try_lock(lock)
             if fd is not None:
                 return fd
         elif said is not None:
@@ -295,6 +309,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="hold a turn for the card and its lock around a command")
     parser.add_argument("--service", required=True)
     parser.add_argument("--lock", default=str(Path.home() / ".gpu.lock"))
+    parser.add_argument("--state", help="lend the card on SIGUSR1 and take it back on SIGUSR2, writing held or lent here")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -314,16 +329,54 @@ def main() -> int:
         print(f"turn: {refused}", file=sys.stderr, flush=True)
         return 3
     assert fd is not None
+    lending = Lending(client, fd, Path(args.state)) if args.state else None
     try:
-        return run_passing_stop(command, fd)
+        return run_passing_stop(command, fd, lending)
     finally:
+        if lending is not None:
+            lending.state.unlink(missing_ok=True)
         os.close(fd)
         client.give_back()
 
 
-def run_passing_stop(command: list[str], fd: int) -> int:
+class Lending:
+    """The card let go and taken back while the command keeps running: SIGUSR1 lets the lock and the ticket go,
+    SIGUSR2 waits for a turn and takes the lock again on the same descriptor, which the command shares. Each is
+    done on a thread of its own, one after another, and what stands once it is done is written to the state
+    file: `held` or `lent`."""
+
+    def __init__(self, client: TurnClient, fd: int, state: Path) -> None:
+        self.client, self.fd, self.state = client, fd, state
+        self.asked: queue.Queue[int] = queue.Queue()
+        self.held = True
+        self.write()
+        threading.Thread(target=self._run, daemon=True, name="turn-lending").start()
+
+    def write(self) -> None:
+        self.state.parent.mkdir(parents=True, exist_ok=True)
+        part = self.state.with_name(self.state.name + ".part")
+        part.write_text("held\n" if self.held else "lent\n")
+        part.replace(self.state)
+
+    def ask(self, signum, frame) -> None:
+        self.asked.put(signum)
+
+    def _run(self) -> None:
+        while True:
+            signum = self.asked.get()
+            if signum == signal.SIGUSR1 and self.held:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+                self.client.give_back()
+                self.held = False
+            elif signum == signal.SIGUSR2 and not self.held:
+                hold(self.client, self.fd)
+                self.held = True
+            self.write()
+
+
+def run_passing_stop(command: list[str], fd: int, lending: Lending | None = None) -> int:
     """The command run to its end with the lock's descriptor, a SIGTERM to this process passed on to it once it
-    runs, and its exit code."""
+    runs, the card lent and taken back on SIGUSR1 and SIGUSR2 where `lending` stands, and its exit code."""
     running: list[subprocess.Popen] = []
     asked: list[int] = []
 
@@ -341,6 +394,8 @@ def run_passing_stop(command: list[str], fd: int) -> int:
         with subprocess.Popen(command, pass_fds=(fd,)) as process:
             running.append(process)
             kept.update((signum, signal.signal(signum, signal.SIG_IGN)) for signum in (signal.SIGINT, signal.SIGHUP))
+            if lending is not None:
+                kept.update((signum, signal.signal(signum, lending.ask)) for signum in (signal.SIGUSR1, signal.SIGUSR2))
             for signum in asked:
                 process.send_signal(signum)
             return process.wait()
