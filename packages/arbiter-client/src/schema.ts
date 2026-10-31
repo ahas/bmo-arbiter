@@ -511,7 +511,7 @@ export interface components {
         /** @description Where a demand stands. */
         DemandState: "waiting" | "granted" | "partly" | "lent";
         /** @description What a card of a demand waits on. */
-        DemandWait: "starting" | "in-use" | "held" | "start-failed";
+        DemandWait: "starting" | "ceiling" | "in-use" | "held" | "start-failed";
         /** @description What a service says of its units, by each unit's name, `<service>/<part>`. */
         Description: {
             units: {
@@ -669,6 +669,13 @@ export interface components {
             alone: boolean;
             /** Format: double */
             cardMiB: number;
+            /**
+             * Format: uint32
+             * @description Its ceiling, the most cards it uses at once, where its declaration gives one.
+             */
+            cards: number | null;
+            /** @description Each node whose card it uses now. */
+            cardsInUse: string[];
             /** @description Each node where it stands now. */
             instances: components["schemas"]["ServiceInstance"][];
             nodeNames: string[];

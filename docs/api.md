@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.9**.
+This document states version **0.1.0-rev.10**.
 
 ## The wire format
 
@@ -216,7 +216,7 @@ it. Any other method and path is answered `404` `no-route`.
   | `…processes` | each `pid`, `name`, `serviceName?`, `usedMiB` |
   | `declared` | the units the rules declare: each `unit` (a name or pattern), `serviceName`, `kind`, `vramMiB?` |
   | `tiers` | every occupant's tier as the nodes are handed it (`docs/placement.md`, 「Tiers」), lower first: each `name` and `tier` |
-  | `services` | each service the master places: `serviceName`, `cardMiB`, `priority`, `tier?` (its declaration's own), `yieldBy` (`turn` or `process`), `spread`, `alone`, `nodeNames`, `instances` (each node where it stands now: `nodeName`, `address?`, `keyFile?`, `demands`, the number of demands on it), and `unsettled?`, why its placement is unsettled |
+  | `services` | each service the master places: `serviceName`, `cardMiB`, `priority`, `tier?` (its declaration's own), `yieldBy` (`turn` or `process`), `spread`, `alone`, `cards?` (its ceiling, the most cards it uses at once, where it declares one), `cardsInUse` (the cards it uses now, by node name: `docs/placement.md`, 「A service's ceiling」), `nodeNames`, `instances` (each node where it stands now: `nodeName`, `address?`, `keyFile?`, `demands`, the number of demands on it), and `unsettled?`, why its placement is unsettled |
   | `placement` | the placement under way, `kind`, `serviceName`, `nodeName` and `step?`; or null |
   | `demands` | every demand the master holds, as `GET /demands/{demandId}` answers it |
   | `events` | the picture's last 200 notes, newest first: each `at`, `nodeName?`, `code`, `text` |
@@ -266,8 +266,9 @@ master's to decide (`docs/placement.md`, 「Demands」).
 - **A demand** is `id`, `serviceName`, `count`, `cards` (each card granted: `nodeName`, `address?` and
   `keyFile?` as the service's adapter reports them), `state` (`waiting`, `granted`, `partly` or `lent`),
   `taken?` (the claimant or lower-tier occupant that stopped the service on one of its cards), `reason?`
-  (while a card waits: `code` — `starting`, `in-use`, `held`, `start-failed` — and `text`, an English
-  sentence), `waitedMs`, `within?`, `workKey?` and `ref?`.
+  (while a card waits: `code` — `starting`, `ceiling` (the service uses as many cards as its ceiling
+  lets it), `in-use`, `held`, `start-failed` — and `text`, an English sentence), `waitedMs`, `within?`,
+  `workKey?` and `ref?`.
 - **Its id** is a positive signed 64-bit integer, each larger than the last the master gave and never
   below the milliseconds since the epoch at which it was given.
 
@@ -431,7 +432,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.9+<commit>` or `0.1.0-rev.9+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.10+<commit>` or `0.1.0-rev.10+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 
@@ -448,13 +449,14 @@ The node arbiter reads the occupants and rules files again within a second of a 
     `tools/<folder>`.
 - **A declaration's keys:** `service`, `card_mib`, `priority`, `tier` (a number, zero or more, or absent),
   `yield_by` (`turn` or `process`, absent for `turn`), `spread` (`one` or `many`), `alone`, `adapter` (a
-  list of words, not empty, or absent) (`docs/placement.md`, 「A service declares itself」). A
+  list of words, not empty, or absent), `cards` (a whole number, one or more, or absent)
+  (`docs/placement.md`, 「A service declares itself」). A
   declaration declares no number of seconds for how it takes turns: a `[turn]` table, whatever it holds,
   is read past and means nothing; any other key is refused.
 - **Refused,** said among the notes and failing the placement that read it: a file named otherwise than
   its `service`, a `service` that is not lower-case letters, digits and hyphens, an empty `adapter`, a
-  negative `tier`, `yield_by = "process"` with no `adapter`, and two declarations of one
-  service across all roots.
+  negative `tier`, `cards` of nought, `yield_by = "process"` with no `adapter`, and two declarations of
+  one service across all roots.
 
 ### Adapters
 

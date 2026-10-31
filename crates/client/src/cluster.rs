@@ -220,6 +220,10 @@ pub struct PlacedService {
   pub yield_by: YieldBy,
   pub spread: Spread,
   pub alone: bool,
+  /// Its ceiling, the most cards it uses at once, where its declaration gives one.
+  pub cards: Option<u32>,
+  /// Each node whose card it uses now.
+  pub cards_in_use: Vec<String>,
   pub node_names: Vec<String>,
   /// Each node where it stands now.
   pub instances: Vec<ServiceInstance>,

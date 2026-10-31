@@ -68,6 +68,7 @@ struct DeclarationFile {
   spread: Spread,
   alone: bool,
   adapter: Option<Vec<String>>,
+  cards: Option<u32>,
   /// A `[turn]` table, accepted and meaning nothing: no number of seconds decides how a service takes turns
   /// with one of its rank (docs/api.md, 「Declarations」).
   #[serde(rename = "turn")]
@@ -86,6 +87,9 @@ pub struct Declaration {
   pub spread: Spread,
   pub alone: bool,
   pub adapter: Option<Vec<String>>,
+  /// The most cards it uses across the cluster at once (docs/placement.md, 「A service's ceiling」); none for
+  /// no ceiling.
+  pub cards: Option<u32>,
   pub dir: PathBuf,
 }
 
@@ -158,6 +162,9 @@ fn held(read: DeclarationFile, path: &Path, dir: PathBuf) -> Result<Declaration,
   if read.tier.is_some_and(|tier| !tier.is_finite() || tier < 0.0) {
     return Err(format!("{}: tier must be a number of zero or more", path.display()));
   }
+  if read.cards == Some(0) {
+    return Err(format!("{}: cards must be one or more", path.display()));
+  }
   if read.yield_by == Some(YieldBy::Process) && read.adapter.is_none() {
     return Err(format!(
       "{}: yield_by = \"process\" needs an adapter to stop and start it",
@@ -173,6 +180,7 @@ fn held(read: DeclarationFile, path: &Path, dir: PathBuf) -> Result<Declaration,
     spread: read.spread,
     alone: read.alone,
     adapter: read.adapter,
+    cards: read.cards,
     dir,
   })
 }
@@ -677,6 +685,8 @@ impl Placer {
         yield_by: one.yield_by.into(),
         spread: one.spread.into(),
         alone: one.alone,
+        cards: one.cards,
+        cards_in_use: Vec::new(),
         node_names: placements.nodes_of(&one.service).to_vec(),
         instances: Vec::new(),
         unsettled: placements.unsettled.get(&one.service).cloned(),

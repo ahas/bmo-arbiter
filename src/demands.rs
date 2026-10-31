@@ -39,6 +39,15 @@ impl Seat {
       Seat::Taken { node, .. } => Some(node),
     }
   }
+
+  /// The node whose card this seat uses for its service (docs/placement.md, 「A service's ceiling」): every
+  /// node it holds but a card lent out, which counts for the demand it is lent to.
+  pub fn uses(&self) -> Option<&str> {
+    match self {
+      Seat::Lent(_) => None,
+      other => other.node(),
+    }
+  }
 }
 
 /// One demand the master holds.

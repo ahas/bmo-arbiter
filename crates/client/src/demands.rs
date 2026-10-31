@@ -69,6 +69,8 @@ pub struct DemandCard {
 pub enum DemandWait {
   /// The service is starting on a card.
   Starting,
+  /// The service uses as many cards as its ceiling lets it.
+  Ceiling,
   /// Every card it may have is in use.
   InUse,
   /// A claim or a ticket of a lower tier holds the cards it may have.

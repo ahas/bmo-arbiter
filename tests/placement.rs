@@ -165,6 +165,7 @@ fn declaration(service: &str, priority: i64, spread: Spread, alone: bool) -> Dec
     spread,
     alone,
     adapter: Some(vec!["true".into()]),
+    cards: None,
     dir: PathBuf::from("."),
   }
 }
@@ -378,6 +379,7 @@ async fn a_service_below_every_reserving_one_stands_beneath_them_and_they_are_pl
   // Below them in priority, so the reservation takes it; ahead of them on the card by the tier it declares.
   declarations.push(Declaration {
     tier: Some(Num(0.5)),
+    cards: Some(2),
     ..declaration("router-train", 20, Spread::Many, false)
   });
   let placer = placer_of(&stand, declarations, dir.path());
@@ -385,6 +387,14 @@ async fn a_service_below_every_reserving_one_stands_beneath_them_and_they_are_pl
   placer.run(Verb::Place, "router-train", "a", &quiet()).await.unwrap();
 
   assert_eq!(placer.state().unwrap().nodes_of("router-train"), ["a"]);
+  // The cluster shows the ceiling it declares beside it.
+  let shown = placer.board().lock().unwrap().services.clone();
+  let ceilings: Vec<(&str, Option<u32>)> =
+    shown.iter().map(|one| (one.service_name.as_str(), one.cards)).collect();
+  assert!(
+    ceilings.contains(&("router-train", Some(2))) && ceilings.contains(&("voice", None)),
+    "{ceilings:?}"
+  );
   assert_eq!(
     (stand.role("a"), stand.order("a")),
     (Some("song+voice+router-train".into()), Some("router-train song=voice".into()))
@@ -758,4 +768,15 @@ fn a_turn_table_is_accepted_and_means_nothing() {
     assert_eq!(parse_declaration(&format!("{head}{table}"), path).unwrap(), plain, "{table}");
   }
   assert!(parse_declaration(&format!("{head}seconds = 60\n"), path).is_err());
+}
+
+#[test]
+fn a_ceiling_of_cards_is_read_and_one_of_nought_refused() {
+  let path = Path::new("/tree/engine/model.card.toml");
+  let head = "service = \"model\"\ncard_mib = 1\npriority = 50\nspread = \"many\"\nalone = true\n";
+  assert_eq!(parse_declaration(head, path).unwrap().cards, None);
+  assert_eq!(parse_declaration(&format!("{head}cards = 3\n"), path).unwrap().cards, Some(3));
+  let nought = parse_declaration(&format!("{head}cards = 0\n"), path).unwrap_err();
+  assert!(nought.contains("cards must be one or more"), "{nought}");
+  assert!(parse_declaration(&format!("{head}cards = -1\n"), path).is_err());
 }

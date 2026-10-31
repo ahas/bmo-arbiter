@@ -213,7 +213,9 @@ sequenceDiagram
     request runs, whichever release the master started in. A root given as a link is followed afresh each
     time.
   - **A ticket on hold is planned again at every read,** so room a card frees later reaches it; the hold is
-    said once, and again only where its reason changes.
+    said once, and again only where its reason changes. A ticket whose service is at its ceiling on a card
+    it does not use is held, its reason that ceiling, and planned only once the service is below it
+    (「A service's ceiling」).
   - **A ticket stays planned at every read until its unit is on the card.**
     - A placement counts as done only while a unit it unloaded is still out waiting on that ticket;
       meanwhile the ticket is not planned again, so nothing is unloaded twice for it.
@@ -280,7 +282,9 @@ sequenceDiagram
   claimant's tier is lower than the occupant's, or a ticket there, waiting or holding the turn, for a
   request of an occupant of a lower tier or of the same tier, the server having stood there before the
   request. A ticket that names the card memory it needs (`need.vramMiB`) makes it yield only where the
-  card's free memory, less its group's `reserve_mib`, does not hold that much.
+  card's free memory, less its group's `reserve_mib`, does not hold that much; a waiting ticket of a
+  service at its ceiling makes it yield only where that service uses the card already (「A service's
+  ceiling」).
 - **Its turn is in use while a demand for it stands on the node,** and rests while none does
   (「Demands」). The node ticket its own turn client holds says only that it stands.
 - **In use, it is never stopped for an occupant of its own tier.** A ticket of its own tier waits until
@@ -383,14 +387,16 @@ sequenceDiagram
   not in use, which is made to yield — by its process as a hand-over, else by its units or its turn as the
   rules say — and the service is brought up there. Among cards equally open, the one the master last
   granted the demand's work key on comes first, so work that left its state on a card goes back to it. A
-  card a claim or a ticket of a lower tier holds is never chosen, and a card holds one demand at a time.
+  card a claim or a ticket of a lower tier holds is never chosen, a card holds one demand at a time, and
+  no card is chosen that would put the service above its ceiling (「A service's ceiling」 below).
 - **Where no card is open:** a caller that holds a card hands its own over (「A demand asked within
   another」 below); a caller that holds none waits in the line, behind the demands asked before it, until a
   card frees — its last demand given back, a claim or a lower tier gone. That line is the order demands
   were asked in, nothing more: nothing in use is taken for a waiting demand, no time ends the wait and
   none makes anything give way. Its answer says what it waits on, one reason at a time: the service
-  starting on a card; every card in use, naming the services using them; a claim or a ticket of a lower
-  tier; a `start` that failed, tried again at the next round.
+  starting on a card; its ceiling, naming the cards the service uses; every card in use, naming the
+  services using them; a claim or a ticket of a lower tier; a `start` that failed, tried again at the next
+  round.
 - **A lower tier still takes a card.** Where a claim or a ticket of a lower tier stops the service on a
   granted card, every answer to the demand says so, naming the occupant, and the card is granted again
   once the service stands there again or another card opens, its work key preferring the same card.
@@ -398,9 +404,12 @@ sequenceDiagram
   work. For the service already standing on X it is granted on X itself, beside the caller's, since the
   caller is waiting on it. For another service it is granted on any other card the rule above opens, and
   only where none is open is X lent to it: X's standing service is made to yield as a hand-over, the asked
-  service is started on X, and no other demand is granted on X while it is lent. The caller's demand stands meanwhile, answered `lent`. Once the
-  asking demand is given back, the lent service is made to yield and the caller's service is started on X
-  again, and the caller's demand is granted again there. No time bounds any of it.
+  service is started on X, and no other demand is granted on X while it is lent. The caller's demand stands
+  meanwhile, answered `lent`. Once the asking demand is given back, the lent service is made to yield and
+  the caller's service is started on X again, and the caller's demand is granted again there. No time
+  bounds any of it. A card is lent, and comes back, only within the ceilings: X is lent only where the
+  asked service is below its own, and X comes back to the caller's service only once that service is below
+  its own, waiting meanwhile with the ceiling as its reason.
 - **Given back by its caller alone.** A demand stands until its caller gives it back; nothing drops it
   for silence. A caller keeps the ids of the demands it holds and gives back, at its own start, those its
   work no longer needs; the cluster shows every demand, and a person may give one back through the same
@@ -409,6 +418,34 @@ sequenceDiagram
 - **The rules' unit of a service yielding by its process** — its `on-demand` unit — is its card
   accounting; a demand is what asks for it, and the rules plan nothing for it.
 - **Shown** in the cluster, each demand with its service, its cards, its state and its reason.
+
+#### A service's ceiling
+
+- **A service that declares `cards` uses at most that many cards across the cluster at once**
+  (「A service declares itself」); one that declares none has no ceiling. The ceiling is the service's own
+  word, never a caller's: however many callers ask for it, and however many cards stand free, it uses no
+  more.
+- **The cards a service uses** are each card one of its demands holds — granted there, its service being
+  brought up there for it, coming back there to it, or taken from it by a claim or a lower tier and still
+  owed — and each card where its turn is in use (`inUse`, `docs/node-arbiter.md`, 「The hold」). A card
+  lent within a demand counts for the service it is lent to while it is lent, and for the caller's service
+  again once it comes back. A card where the service stands with no demand on it and its turn not in use
+  is not used.
+- **Nothing the master does puts a service above its ceiling,** and where the service is at its ceiling
+  the master gives it only a card it already uses:
+  - a demand of it is granted no card it does not use, nor lent one: it waits in the line, its reason the
+    ceiling, behind the demands of its service asked before it, and takes the next card once one of the
+    cards its service uses frees — a demand of it given back, or its turn resting. A demand of another
+    service behind it in the line is not held back by it;
+  - the master makes no room for a ticket of the service on a card it does not use: the ticket is held,
+    its reason the ceiling (「Master and slaves」), and it makes no occupant yield by its process for it
+    (「Yielding by the process」). The node's arbiter knows no ceiling: the turn it hands a ticket in its own
+    line is its own to hand (`docs/node-arbiter.md`, 「The hold」).
+- **A ceiling takes nothing in use and ends no wait:** a service declared at a ceiling below the cards it
+  uses keeps them until its demands are given back and its turns rest, and a demand waiting on the ceiling
+  waits as long as it takes, with no time ending the wait.
+- **Shown** in the cluster beside each declared service, its ceiling and the cards it uses
+  (`docs/api.md`, 「The cluster」).
 
 ## Placing the services
 
@@ -459,6 +496,8 @@ sequenceDiagram
     and the reservation names it too, last; on the card each stands by its tier;
   - `adapter` — the command that carries its verbs, as a list of words, not empty; absent for a service
     the master orders on cards but never installs;
+  - `cards` — its ceiling: the most cards it uses across the cluster at once, one or more; absent, none
+    (「A service's ceiling」);
   - nothing of how it takes turns with a service of its own rank: no number of seconds is declared, and
     the order between occupants of one rank is the order their requests arrived in
     (`docs/node-arbiter.md`, 「One rank taking turns」).

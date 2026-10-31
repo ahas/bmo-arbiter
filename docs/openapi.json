@@ -1129,6 +1129,11 @@
             "type": "string"
           },
           {
+            "const": "ceiling",
+            "description": "The service uses as many cards as its ceiling lets it.",
+            "type": "string"
+          },
+          {
             "const": "in-use",
             "description": "Every card it may have is in use.",
             "type": "string"
@@ -1556,6 +1561,22 @@
             "format": "double",
             "type": "number"
           },
+          "cards": {
+            "description": "Its ceiling, the most cards it uses at once, where its declaration gives one.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cardsInUse": {
+            "description": "Each node whose card it uses now.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "instances": {
             "description": "Each node where it stands now.",
             "items": {
@@ -1606,6 +1627,8 @@
           "yieldBy",
           "spread",
           "alone",
+          "cards",
+          "cardsInUse",
           "nodeNames",
           "instances",
           "unsettled"
@@ -2331,7 +2354,7 @@
   "info": {
     "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes, grants cards of a service as demands ask them and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.9"
+    "version": "0.1.0-rev.10"
   },
   "openapi": "3.1.0",
   "paths": {

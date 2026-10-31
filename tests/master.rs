@@ -14,7 +14,7 @@ use bmo_arbiter::master::{
 use bmo_arbiter::placement::{AdapterAnswer, Board, Declaration, Placements, Spread, Stood, YieldBy};
 use bmo_arbiter::reach::RunResult;
 use bmo_arbiter::rules::Num;
-use bmo_arbiter_client::cluster::LinkState;
+use bmo_arbiter_client::cluster::{self as wire, LinkState, PlacedService};
 use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandState, DemandWait};
 use serde_json::{Value, json};
 
@@ -750,6 +750,7 @@ fn declared(service: &str, tier: f64, yield_by: YieldBy) -> Declaration {
     spread: Spread::One,
     alone: false,
     adapter: Some(vec!["true".into()]),
+    cards: None,
     dir: PathBuf::from("."),
   }
 }
@@ -1207,4 +1208,185 @@ async fn a_stop_is_let_go_once_its_service_stands_again_by_its_health_or_by_a_pl
   assert_eq!(granted_on(&demands, second), ["b"]);
   assert_eq!(demand(&demands, second).cards[0].address.as_deref(), Some("http://b.test/lab-arena"));
   assert_eq!(adapted(&stand), ["lab-arena stop a", "lab-arena stop b"]);
+}
+
+/// A service as it declares itself, with the ceiling given.
+fn capped(service: &str, yield_by: YieldBy, cards: u32) -> Declaration {
+  Declaration {
+    cards: Some(cards),
+    ..declared(service, 2.0, yield_by)
+  }
+}
+
+/// The service as the cluster shows it, its placement board standing in for the placer's.
+fn shown(board: &Mutex<Board>, master: &Master, service: &str) -> PlacedService {
+  if board.lock().unwrap().services.iter().all(|one| one.service_name != service) {
+    board.lock().unwrap().services.push(PlacedService {
+      service_name: service.into(),
+      card_mib: 1000.0,
+      priority: 10.0,
+      tier: Some(2.0),
+      yield_by: wire::YieldBy::Process,
+      spread: wire::Spread::Many,
+      alone: false,
+      cards: None,
+      cards_in_use: Vec::new(),
+      node_names: Vec::new(),
+      instances: Vec::new(),
+      unsettled: None,
+    });
+  }
+  master.state().services.into_iter().find(|one| one.service_name == service).unwrap()
+}
+
+#[tokio::test]
+async fn a_service_at_its_ceiling_takes_no_other_card_and_its_demands_wait_in_line_until_one_of_its_own_frees()
+ {
+  let all: &[&str] = &["a", "b", "c"];
+  let services = vec![capped("lab-arena", YieldBy::Process, 2), declared("coder", 2.0, YieldBy::Process)];
+  let (mut master, stand, demands) =
+    demanding(all, services, &[("lab-arena", all), ("coder", all)], &["lab-arena a", "lab-arena b", "lab-arena c"])
+      .await;
+  let board = Arc::new(Mutex::new(Board::default()));
+  master.attach(board.clone());
+  let first = ask(&demands, "lab-arena", None, None);
+  let second = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 1).await;
+  assert_eq!(
+    (granted_on(&demands, first), granted_on(&demands, second)),
+    (vec!["a".to_owned()], vec!["b".to_owned()])
+  );
+
+  // Two cards in use, its ceiling: c, where it stands idle, is not granted it, and the line keeps its order.
+  let third = ask(&demands, "lab-arena", None, None);
+  let fourth = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 10).await;
+  for id in [third, fourth] {
+    let waiting = demand(&demands, id);
+    assert_eq!(waiting.state, DemandState::Waiting);
+    let reason = waiting.reason.unwrap();
+    assert_eq!(reason.code, DemandWait::Ceiling);
+    assert!(reason.text.contains("ceiling is 2: a, b"), "{}", reason.text);
+  }
+  assert!(adapted(&stand).is_empty());
+  assert_eq!(shown(&board, &master, "lab-arena").cards_in_use, ["a", "b"]);
+
+  // The card it leaves is the other engine's to take, its idle lab-arena handed over.
+  let coder = ask(&demands, "coder", None, None);
+  rounds(&mut master, 3).await;
+  assert_eq!(granted_on(&demands, coder), ["c"]);
+  assert_eq!(adapted(&stand), ["lab-arena stop c", "coder start c"]);
+  assert_eq!(shown(&board, &master, "coder").cards_in_use, ["c"]);
+
+  // One of its own given back: the next in line takes that card, the one after it still waits.
+  assert!(demands.book.lock().unwrap().give_back(first));
+  rounds(&mut master, 2).await;
+  assert_eq!(granted_on(&demands, third), ["a"]);
+  assert_eq!(demand(&demands, fourth).reason.unwrap().code, DemandWait::Ceiling);
+  assert_eq!(adapted(&stand), ["lab-arena stop c", "coder start c"]);
+}
+
+#[tokio::test]
+async fn a_lent_card_counts_for_the_service_it_is_lent_to_and_comes_back_once_the_callers_is_below_its_ceiling()
+ {
+  let all: &[&str] = &["a", "b", "c"];
+  let services = vec![
+    capped("lab-arena", YieldBy::Process, 1),
+    capped("coder", YieldBy::Process, 2),
+    declared("voice", 2.0, YieldBy::Process),
+  ];
+  let (mut master, stand, demands) = demanding(
+    all,
+    services,
+    &[("lab-arena", all), ("coder", all), ("voice", all)],
+    &["lab-arena a", "coder b", "voice c"],
+  )
+  .await;
+  let voice = ask(&demands, "voice", None, None);
+  let coder = ask(&demands, "coder", None, None);
+  let outer = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 1).await;
+  assert_eq!(
+    [granted_on(&demands, voice), granted_on(&demands, coder), granted_on(&demands, outer)],
+    [["c"], ["b"], ["a"]]
+  );
+
+  // Every card in use and the coder below its ceiling: the caller's card is lent to it.
+  let inner = ask(&demands, "coder", Some(outer), None);
+  rounds(&mut master, 3).await;
+  assert_eq!(granted_on(&demands, inner), ["a"]);
+  assert_eq!(demand(&demands, outer).state, DemandState::Lent);
+  assert_eq!(adapted(&stand), ["lab-arena stop a", "coder start a"]);
+
+  // c freed: the lent card counts for the coder, at its ceiling of two, and no longer for the lab-arena, which
+  // takes c though asked after the coder.
+  demands.book.lock().unwrap().give_back(voice);
+  let later = ask(&demands, "coder", None, None);
+  let lab-arena = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 3).await;
+  let waiting = demand(&demands, later);
+  assert_eq!(waiting.reason.unwrap().code, DemandWait::Ceiling);
+  assert_eq!(granted_on(&demands, lab-arena), ["c"]);
+  assert_eq!(adapted(&stand), ["lab-arena stop a", "coder start a", "voice stop c", "lab-arena start c"]);
+
+  // The lent demand given back: the lab-arena uses c, its ceiling, so the caller's card waits on it.
+  demands.book.lock().unwrap().give_back(inner);
+  rounds(&mut master, 3).await;
+  let owed = demand(&demands, outer);
+  assert_eq!(owed.state, DemandState::Lent);
+  assert_eq!(owed.reason.unwrap().code, DemandWait::Ceiling);
+  assert_eq!(adapted(&stand).len(), 4);
+
+  // c given back: the caller's card comes back to it, and the coder waiting takes c.
+  demands.book.lock().unwrap().give_back(lab-arena);
+  rounds(&mut master, 3).await;
+  assert_eq!(
+    (demand(&demands, outer).state, granted_on(&demands, outer)),
+    (DemandState::Granted, vec!["a".to_owned()])
+  );
+  assert_eq!(granted_on(&demands, later), ["c"]);
+  let moved = adapted(&stand);
+  for one in ["coder stop a", "lab-arena start a", "lab-arena stop c", "coder start c"] {
+    assert!(moved[4..].iter().any(|done| done == one), "{moved:?}");
+  }
+}
+
+#[tokio::test]
+async fn the_master_makes_no_room_for_a_ticket_that_would_put_its_service_above_its_ceiling() {
+  let (mut master, stand) = master_of(slave(1500.0, store_resident(), None, json!([])), &["a", "b"], None);
+  *stand.declared.lock().unwrap() = vec![capped("voice", YieldBy::Turn, 1)];
+  let mut using = ticket(1, "voice", true, None);
+  using["inUse"] = json!(true);
+  stand
+    .answers
+    .lock()
+    .unwrap()
+    .insert("a".into(), slave(1500.0, store_resident(), None, json!([using])));
+  stand
+    .answers
+    .lock()
+    .unwrap()
+    .insert("b".into(), slave(1500.0, store_resident(), None, asking(2)));
+  master.discover().await;
+  master.poll().await;
+  master.poll().await;
+  assert!(sent(&stand, "evict").is_empty());
+  let said = master.state().events;
+  assert!(
+    said
+      .iter()
+      .any(|event| event.code == "ticket-held" && event.text.contains("its ceiling is 1: a")),
+    "{said:?}"
+  );
+
+  // Its turn on a rests: below its ceiling, b is made room on.
+  stand
+    .answers
+    .lock()
+    .unwrap()
+    .insert("a".into(), slave(1500.0, store_resident(), None, json!([])));
+  master.poll().await;
+  let evicted = sent(&stand, "evict");
+  assert_eq!(evicted.len(), 1, "{evicted:?}");
+  assert!(evicted[0].contains("/card-units/model%2Fstore"), "{evicted:?}");
 }
