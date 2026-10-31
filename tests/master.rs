@@ -1010,6 +1010,22 @@ async fn a_demand_is_granted_where_its_service_stands_idle_else_where_it_comes_u
 }
 
 #[tokio::test]
+async fn the_end_of_a_bring_has_the_next_round_come_at_once() {
+  let both: &[&str] = &["a", "b"];
+  let (mut master, stand, demands) =
+    demanding(both, two_engines(), &[("lab-arena", both), ("coder", both)], &["coder a", "coder b"]).await;
+  let asked = ask(&demands, "lab-arena", None, None);
+  master.poll().await;
+  // The bring runs apart from the rounds; its end wakes the round loop rather than waiting out its rest.
+  tokio::time::timeout(std::time::Duration::from_secs(5), demands.wake.notified())
+    .await
+    .expect("the bring's end woke the rounds");
+  master.poll().await;
+  assert_eq!(demand(&demands, asked).state, DemandState::Granted);
+  assert_eq!(adapted(&stand), ["coder stop a", "lab-arena start a"]);
+}
+
+#[tokio::test]
 async fn a_demand_within_another_runs_beside_it_elsewhere_or_on_its_lent_card_which_comes_back() {
   let both: &[&str] = &["a", "b"];
   let (mut master, stand, demands) =

@@ -943,7 +943,8 @@ impl Master {
     let world = self.world.clone();
     let service = declaration.clone();
     let at = node.to_owned();
-    let handle = tokio::spawn(async move {
+    let wake = self.demands.clone();
+    let bring = async move {
       let mut stopped = Vec::new();
       for (one, placed) in &stops {
         let answer = world.adapter(one, "stop", &at, placed).await;
@@ -972,6 +973,14 @@ impl Master {
         )
       });
       Brought { stopped, started }
+    };
+    // The bring's end has the next round come at once, so its grant waits on no round's rest.
+    let handle = tokio::spawn(async move {
+      let brought = bring.await;
+      if let Some(demands) = wake {
+        demands.wake.notify_one();
+      }
+      brought
     });
     self.start_failed.remove(&demand);
     let bringing = Bringing {

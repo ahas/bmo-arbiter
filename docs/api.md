@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.9**.
+This document states version **0.1.0-rev.10**.
 
 ## The wire format
 
@@ -400,6 +400,11 @@ needs the card and the units cannot be unloaded.
   turn that gives way) and `quiet` (wait until the card stands unasked), or runs it as a command:
   `python turn.py --service <name> [--lock <path>] -- <command> [<argument> …]`, which holds a turn and the
   lock around the command and exits with its code, or `3` where the service has no place on the node.
+  While the command runs, a `SIGTERM` sent to `turn.py` is passed on to the command and `turn.py` waits
+  for it to end, so a stop reaches the command once and its own way of ending runs to the end; `SIGINT`
+  and `SIGHUP`, which a terminal sends to the command as well, are left to the command. A unit that runs
+  it sends its stop to it alone (systemd's `KillMode=mixed`), the rest of the unit killed only once
+  `turn.py` has ended.
 - **An occupant may carry a copy of its own** beside its code instead, or call the ticket routes through a
   published client; the contract it meets is 「Tickets」, and the installed file is what follows this
   repository's version.
@@ -431,7 +436,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.9+<commit>` or `0.1.0-rev.9+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.10+<commit>` or `0.1.0-rev.10+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 

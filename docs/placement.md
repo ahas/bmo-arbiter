@@ -369,7 +369,8 @@ sequenceDiagram
 - **Granted card by card.** A card is granted on a node of the service's placement once the service stands
   there for the demand:
   - a service that yields by its process is started there by its adapter's `start` where it does not
-    stand, and stands once its `health` answers `running`;
+    stand, and stands once its `health` answers `running`; the round after that bring ends comes at once,
+    not after `CARD_MASTER_READ_EVERY_MS`, so the card is granted as soon as its `health` answers;
   - a service that yields by its turn stands where its server runs, its model loading on its own ticket
     as it serves;
   - a service with no adapter, such as the bench, stands where its tier lets it take the card, and its

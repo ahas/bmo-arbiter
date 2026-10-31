@@ -1048,6 +1048,58 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(clock.now, 11.0)
 
 
+class TurnCommandTest(unittest.TestCase):
+    """`turn.py` run as a command, against a node whose arbiter does not answer: a stop it is sent reaches the
+    command once and is waited out, and an interrupt meant for the command is left to it."""
+
+    # The command: says it stands, counts the SIGTERMs it hears, and ends with 7 a while after the first.
+    COMMAND = (
+        "import signal, sys, time\n"
+        "heard = []\n"
+        "signal.signal(signal.SIGTERM, lambda *_: heard.append(1))\n"
+        "open(sys.argv[1], 'w').write('up')\n"
+        "while not heard:\n"
+        "    time.sleep(0.02)\n"
+        "time.sleep(0.5)\n"
+        "open(sys.argv[2], 'w').write(str(len(heard)))\n"
+        "sys.exit(7)\n"
+    )
+
+    def run_turn(self, folder: Path) -> subprocess.Popen:
+        env = {**os.environ, "CARD_TURN_PORT": "9"}
+        process = subprocess.Popen([sys.executable, str(HERE / "turn.py"), "--service", "tester", "--lock",
+                                    str(folder / "lock"), "--", sys.executable, "-c", self.COMMAND,
+                                    str(folder / "up"), str(folder / "heard")], env=env)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        deadline = time.monotonic() + 20
+        while not (folder / "up").exists():
+            self.assertLess(time.monotonic(), deadline, "the command did not start")
+            time.sleep(0.02)
+        return process
+
+    def test_a_stop_reaches_the_command_once_and_is_waited_out(self) -> None:
+        import signal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            process = self.run_turn(folder)
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=20), 7)
+            self.assertEqual((folder / "heard").read_text(), "1")
+
+    def test_an_interrupt_is_left_to_the_command(self) -> None:
+        import signal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            process = self.run_turn(folder)
+            process.send_signal(signal.SIGINT)
+            time.sleep(0.3)
+            self.assertIsNone(process.poll())
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=20), 7)
+
+
 class ClaimWatchTest(unittest.TestCase):
     """The claims watched one poll at a time against a stand-in clock, tickets, containers and card."""
 

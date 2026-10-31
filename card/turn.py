@@ -15,6 +15,10 @@ Run as a command, it holds a turn and the lock around another command:
 
     python turn.py --service <name> [--lock ~/.gpu.lock] -- <command> [<argument> …]
 
+While the command runs, a SIGTERM is passed on to it and waited out, so a stop reaches the command once and
+its own way of ending runs to the end; SIGINT and SIGHUP, which a terminal sends to the command as well,
+are left to the command.
+
 An occupant that can let go of the card in the middle of its work holds a turn that gives way instead
 (docs/node-arbiter.md, 「Giving way」): `GivingTurn` asks for it with the seconds letting go takes, watches its
 ticket while the card is held, and says once an occupant above it wants the card; `quiet` waits until
@@ -31,6 +35,7 @@ import argparse
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -310,11 +315,38 @@ def main() -> int:
         return 3
     assert fd is not None
     try:
-        # The lock rides the command's own descriptor too, so it goes with the command's last process.
-        return subprocess.run(command, pass_fds=(fd,)).returncode
+        return run_passing_stop(command, fd)
     finally:
         os.close(fd)
         client.give_back()
+
+
+def run_passing_stop(command: list[str], fd: int) -> int:
+    """The command run to its end with the lock's descriptor, a SIGTERM to this process passed on to it once it
+    runs, and its exit code."""
+    running: list[subprocess.Popen] = []
+    asked: list[int] = []
+
+    def pass_on(signum, frame) -> None:
+        if running:
+            running[0].send_signal(signum)
+        else:
+            asked.append(signum)
+
+    # A caught signal goes back to its default in the command as it starts; one ignored would stay ignored
+    # there, so SIGINT and SIGHUP are ignored here only once it runs.
+    kept = {signal.SIGTERM: signal.signal(signal.SIGTERM, pass_on)}
+    try:
+        # The lock rides the command's own descriptor too, so it goes with the command's last process.
+        with subprocess.Popen(command, pass_fds=(fd,)) as process:
+            running.append(process)
+            kept.update((signum, signal.signal(signum, signal.SIG_IGN)) for signum in (signal.SIGINT, signal.SIGHUP))
+            for signum in asked:
+                process.send_signal(signum)
+            return process.wait()
+    finally:
+        for signum, disposition in kept.items():
+            signal.signal(signum, disposition)
 
 
 if __name__ == "__main__":
