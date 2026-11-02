@@ -120,7 +120,7 @@ data root and reads the deployment's own settings from `~/.config/bmo-arbiter/en
 | `CARD_MASTER_PORT` | the loopback port of the master's API; `0` has the system choose, named in the line the master prints as it starts listening | `7440` |
 | `CARD_MASTER_READ_EVERY_MS` | how often every slave is read | `2000` |
 | `CARD_MASTER_DISCOVER_EVERY_MS` | how often the node service is read | `60000` |
-| `CARD_INSTALL_POLL_MS` | how often the install polls the node setup and the unit, and how long it waits before reading the unit's main process again, all alike; a check sets it to run an install quickly | the setup every 5 s, the unit every second, then 5 s |
+| `CARD_INSTALL_POLL_MS` | how often the install looks at the node setup and at the arbiter's health, both alike; a check sets it to run an install quickly | the setup every 5 s, the health every second |
 | `HOME` | the home a key path written `~/…` and the defaults above stand under | `/` |
 
 ### The node arbiter
@@ -137,21 +137,13 @@ Read from its environment, which `bmo-card.service` fills from `~/.config/bmo-ca
 | `CARD_STORE` | the dump store, on a local NVMe | `~/.local/share/bmo-card/store/units.store` |
 | `CARD_OWNERS` | the folder owners besides the borrower open their control sockets in | `~/.local/share/bmo-card/owners` |
 | `CARD_TURN_PORT` | the node arbiter's loopback port | `7439` |
-| `CARD_TURN_TAKE_S` | how long a granted turn may go untaken before it passes once | 5 |
 | `CARD_TURN_HOLD_OPEN_S` | the longest an answer is held open | 20 |
 | `CARD_CLAIM_POLL_S` | how often a claimant's tickets are looked at | 0.1 |
-| `CARD_CLAIM_SETTLE_S` | how long a node holds nothing of a claimant before its claim ends | 10 |
-| `CARD_CLAIM_IDLE_S` | how long a claim on containers alone stands with nothing on the card | 600 |
-| `CARD_LOCK_WAIT_S` | how long a hold waits for the lock | 10 |
-| `CARD_YIELD_WAIT_S` | how long a hold told to `YIELD` has to let go | 5 |
-| `CARD_LOCK_GRACE_S` | how long a holder below a claim may keep the lock | 20 |
-| `CARD_LEND_QUIET_S` | how long after its owner's last graph a lent hold's turn rests | 10 |
 | `CARD_LEND_GIVES_WAY_S` | how long a lent hold takes to let go, its ticket's `givesWayMs` in seconds | 3 |
 | `DESKTOP_READ_EVERY_S` | how often the desktop's card is read | 1 |
 | `DESKTOP_BUSY_READINGS` | readings in a row that make the card the desktop's | 5 |
 | `DESKTOP_BUSY_PERCENT` | the use that counts as busy | 20 |
 | `DESKTOP_ROOM_MIB` | the free memory below which the card counts as busy | 4096 |
-| `DESKTOP_QUIET_S` | how long the desktop is quiet before the card is given back | 60 |
 | `LLM_KEY` | lend setting: the key the head asks with | lending off |
 | `CARD_ADDRESS` | lend setting: the address on the inner network the node waits on | lending off |
 | `CARD_LEND_SERVICE` | lend setting: the service the card is lent to | required with lending |
@@ -347,7 +339,8 @@ A ticket is a place in the node's queue for one turn on the card (`docs/node-arb
 - **Its id** is a positive signed 64-bit integer, each larger than the last the node arbiter gave and never
   below the milliseconds since the epoch at which it was given, so a ticket from before a restart is never
   another's after it.
-- **An answer that cannot be delivered** gives its ticket back.
+- **An asker that leaves gives its ticket back:** an answer that cannot be delivered does, and so does a
+  held-open answer whose asker closes its connection while it is held.
 
 ### Card units
 
@@ -358,6 +351,9 @@ A ticket is a place in the node's queue for one turn on the card (`docs/node-arb
   asked to unload is out, unless `keepsTurn` is true, which says more of its units go out after this one:
   a caller unloading several units of one holder sends it with every one but the last. `200` with the unit
   as it stands after.
+  - A restore of a lent hold's unit whose turn is not the hold's takes its place in the card's line
+    instead, standing as the head's `WANT` does (「The lending protocol」), and loads the hold's units back
+    once its turn comes; it is answered `409` `conflict`, the error saying it waits its turn.
   - `409` `conflict`: an unload that left it on the card, or a restore that found no room or a claim
     standing; the error says why. `404` `not-found`: no unit of that name. `400` `bad-request`: a body
     that is not that shape. `503` `not-ready`: the arbiter is starting. `500` `failed`: the move itself
@@ -371,14 +367,15 @@ A ticket is a place in the node's queue for one turn on the card (`docs/node-arb
 
 ### The lending protocol
 
-TCP on `CARD_ADDRESS`, open only where lend settings stand. Each connection opens with one line,
+TCP on `CARD_ADDRESS`, open only where lend settings stand, every connection watched by TCP keep-alive
+probes so a peer gone without closing ends it as a close does. Each connection opens with one line,
 `<VERB> <key> [<words>]`, the key being `LLM_KEY`; a wrong key or verb is answered `REFUSED`. It is a
 line protocol of its own words, outside the HTTP wire format: the `<seconds>` of `WANT` and `QUEUED` are
 seconds, written as a decimal number.
 
 | Asked | Answered | Meaning |
 | --- | --- | --- |
-| `HOLD <key> [local]` | `READY [<socket>]`, `BUSY …`, `CLAIMED <claimant> …` | holds the card for as long as the connection stays open; `local` for an engine on the node itself, told its control socket where the node keeps a dump store |
+| `HOLD <key> [local]` | `READY [<socket>]`, `REFUSED …`, `FAILED …` | holds the card for as long as the connection stays open, waiting first for a hold or a claim standing, its turn and the lock, however long that takes; `local` for an engine on the node itself, told its control socket where the node keeps a dump store; `REFUSED` where the lend service has no place among the occupants, `FAILED` where the rpc-server ends before it answers |
 | `STATE <key>` | `FREE`, `HELD`, `LOCKED by <pid>`, `CLAIMED <claimant>` | whether it could be held |
 | `QUIET <key>` | `QUIETED` | rests the standing hold's turn until its owner's next graph |
 | `WANT <key> <seconds>` | `WANTED` | a request of the head's has waited that long for this card while its units are out |
@@ -391,7 +388,8 @@ On a standing hold the head may say `USES <group>`, answered `USING <group>` or 
 arbiter says, whenever each applies: `QUEUED <position> <seconds>` while the hold waits for its turn,
 `EVICTED <reason>` or `EVICTED claim <claimant>` when its units went out, `RESTORED` when they are back,
 `PASS <occupant>` when its turn is to pass at its request boundary, and `YIELD <claimant>` when a claim
-needs the card and the units cannot be unloaded.
+needs the card and the units cannot be unloaded, said right after `READY` where the claim began before
+it.
 
 ### The turn client
 
@@ -479,6 +477,8 @@ The node arbiter reads the occupants and rules files again within a second of a 
   `running` may add `address`, where the instance answers its callers, and `keyFile`, the file its key is
   read from on the master's host. Lines before it are
   shown as what the adapter says on its way.
+- **An adapter runs to its own end:** the master waits for its last line however long the verb takes,
+  and sets no limit on it.
 - **An adapter touches no role and no occupants;** it keeps its own service's placement alone.
 
 ### The rules file
@@ -513,8 +513,10 @@ only through that service's published Rust client, `bmo-node-client`, at `CARD_N
 | how one node is reached, and its role | `GET /nodes/{nodeName}/target` |
 | a node's role written: the services joined by `+`, or none | `PATCH /nodes/{nodeName}` with `role` |
 
-A refusal or a failure of the node service is said with its status, code and sentence. A node whose
-target's shell is PowerShell is not reached for a command.
+A refusal or a failure of the node service is said with its status, code and sentence. Each call waits
+for its answer, a refused or broken connection, or TCP keep-alive probes finding the node service gone;
+no limit of the master's cuts it short. A node whose target's shell is PowerShell is not reached for a
+command.
 
 ### Node shells
 
@@ -526,9 +528,11 @@ target's shell is PowerShell is not reached for a command.
   exec -a <agentName> <command>`, and a file is carried by `<BMO_BUN> <BMO_HUB_CONSOLE> upload <local>
   <remote> -a <agentName>`.
 - **On every node** the master runs only bash commands: reading a slave
-  (`curl -s -m 3 http://127.0.0.1:7439/card`), moving a unit (`PATCH /card-units/{unitName}` there),
+  (`curl -s http://127.0.0.1:7439/card`), moving a unit (`PATCH /card-units/{unitName}` there),
   writing the node files, the install's steps and `systemctl --user` on `bmo-card.service` and the rival
   units.
+- **A command and a carry run to their own end:** the master sets no limit on either and waits for what
+  the shell or the hub's console answers.
 
 ### Adapters, declarations and descriptions
 
@@ -622,8 +626,8 @@ lent to, and a pipeline whose stages pause — whether a request of the engine i
 the pipeline holds them is decided at these points, in order. No measure of time decides any of them.
 
 1. **The engine's head finds its units out and says `WANT`** on each card's hold, with the seconds the
-   request has waited (「The lending protocol」). How long the head lets a request wait for a stage before
-   it gives the request up is the borrowing engine's own bound, outside this repository.
+   request has waited (「The lending protocol」). How the head's request waits for a stage is the borrowing
+   engine's own, outside this repository.
    - `docs/node-arbiter.md`, 「Lending」: "A lent hold whose units are out takes a place in the queue on
      `WANT` through its own restore … The occupant holding the turn then gives way to it by its own rules:
      at once if it rests, at its request boundary if it stands at the lend service's rank, never if it
@@ -647,9 +651,9 @@ the pipeline holds them is decided at these points, in order. No measure of time
    in use does not count.
    - `docs/node-arbiter.md`, 「One rank taking turns」: "No measure of time passes a turn within a rank."
 4. **The pipeline lets go and gives its ticket back;** `Turns._grant` then grants the engine's ticket,
-   `Card._take_lock_back` takes the lock within `CARD_LOCK_WAIT_S`, and `Card.restore` loads the units
-   back, saying `RESTORED`. A lock another occupant keeps past that wait makes the restore fail with no
-   room, and `Card._want_back` tries again every two seconds while the `WANT` stands.
+   `Card._take_lock_back` takes the lock once whoever holds it lets go, and `Card.restore` loads the
+   units back, saying `RESTORED`. A card without the memory for them makes the restore fail with no room,
+   and `Card._want_back` tries again every two seconds while the `WANT` stands.
 5. **The master never unloads an in-use turn of one rank for the other.** In each round, `Master` plans a
    ticket's placement and passes it through `turn_gate`: where the card's turn is in use and
    `Turn::passes_to` says it does not pass to the ticket's service — it passes only to its own service, a
@@ -668,6 +672,5 @@ the pipeline holds them is decided at these points, in order. No measure of time
      has."
 
 So a request of the engine waits for the pipeline's request in hand to end (or for its turn to rest),
-plus the pipeline's dump and the engine's units loading back; where that passes the head's own bound,
-which is the borrowing engine's own budget, the request is given up by the head while the arbiter keeps
-its place in the queue.
+plus the pipeline's dump and the engine's units loading back, however long that takes, the arbiter keeping
+its place in the queue throughout.

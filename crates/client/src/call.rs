@@ -84,7 +84,7 @@ impl ArbiterClient {
     Self::with_http(base, token, reqwest::Client::new())
   }
 
-  /// A client of the program at `base` over the HTTP client given, which sets its timeouts.
+  /// A client of the program at `base` over the HTTP client given, which sets how it connects.
   pub fn with_http(base: &str, token: Option<String>, http: reqwest::Client) -> Result<Self, String> {
     let base = Url::parse(base).map_err(|why| format!("{base} is not an address: {why}"))?;
 

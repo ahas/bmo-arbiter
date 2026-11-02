@@ -99,7 +99,7 @@ if (command.startsWith("echo HOME")) {
 } else if (command.includes("setup.log")) {
   process.stdout.write("CARD-SETUP-DONE ok\n");
 } else if (command.includes("MainPID")) {
-  process.stdout.write("4242\n");
+  process.stdout.write('ActiveState=active\nSubState=running\nMainPID=4242\nExecMainStatus=0\nCARD-HEALTH {"ready":true}\n');
 } else if (command.startsWith("cat ~/.config/bmo-card/occupants")) {
   process.stdout.write(existsSync(kept("occupants")) ? readFileSync(kept("occupants"), "utf8") : "__BMO_NO_OCCUPANTS__\n");
 } else if (command.startsWith("mv ~/.config/bmo-card/occupants.partial")) {

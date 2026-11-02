@@ -17,6 +17,8 @@ ExecStartPre=/usr/bin/mkdir -p %h/.local/share/bmo-arbiter/data/placements
 ExecStart=%h/.local/share/bmo-arbiter/deploy/bin/bmo-arbiter
 Restart=always
 RestartSec=5
+# A stop is waited for until the master and the adapters it runs have ended, each of which ends on SIGTERM.
+TimeoutStopSec=infinity
 
 [Install]
 WantedBy=default.target

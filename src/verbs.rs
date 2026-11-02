@@ -13,7 +13,7 @@ use crate::reach::{NodeRegistry, NodeShell};
 use crate::rules::{Dump, NodeFacts, Num, RamFree, Rules, read_rules, rules_path, selects};
 
 /// Where the master's slave answers on each node's loopback.
-pub const SLAVE_UNITS: &str = "curl -s -m 3 http://127.0.0.1:7439/card";
+pub const SLAVE_UNITS: &str = "curl -s http://127.0.0.1:7439/card";
 
 // Where a node keeps the rules it was pushed, under its account's home.
 const NODE_RULES: &str = ".config/bmo-card/rules.json";

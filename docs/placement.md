@@ -341,9 +341,9 @@ sequenceDiagram
 - **Two engines at one rank on a shared pool** — a borrowing engine that lends its cards and a pipeline
   whose stages pause — take the cards in equal turns:
   - **the pipeline takes the cards** only once the borrowing engine's turn rests on every node, its stages
-    at once: `CARD_LEND_QUIET_S` after the borrowing engine's last computation there; at once where its
-    head said `QUIET`; or, while the pipeline waits, at the borrowing engine's next request boundary, the
-    arbiter saying `PASS` and the head `QUIET` (`docs/node-arbiter.md`, 「Lending」);
+    at once: where its head said `QUIET`, or, while the pipeline waits, at the borrowing engine's next
+    request boundary, the arbiter saying `PASS` and the head `QUIET`; no span without a computation rests
+    it (`docs/node-arbiter.md`, 「Lending」);
   - **the borrowing engine queues for them through its own restore:** a request that finds its units out
     has the head say `WANT` on each card, so its hold takes a place in each node's queue at the pipeline's
     rank. The pipeline's stages give way to it at their next request boundary, in the line's order, dumping

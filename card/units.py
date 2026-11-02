@@ -30,7 +30,6 @@ PARTS = ("weights", "store", "compute", "stage")
 RESIDENT, RAM, EVICTED = "resident", "ram", "evicted"
 # The two places a unit is unloaded to, as the rules name them.
 TO_RAM, TO_DISK = "ram", "disk"
-ASK_WAIT_S = 120.0
 GIB = 2**30
 # The floor a claim that wants every dump out of host memory sets: no host memory is ever that available.
 NO_RAM = 1 << 62
@@ -47,8 +46,8 @@ class NoRoom(Exception):
 def extents(path: Path) -> int | None:
     """How many extents the file lies in, as filefrag counts them; None where it cannot say."""
     try:
-        said = subprocess.run(["filefrag", str(path)], capture_output=True, text=True, timeout=30).stdout
-    except (OSError, subprocess.TimeoutExpired):
+        said = subprocess.run(["filefrag", str(path)], capture_output=True, text=True).stdout
+    except OSError:
         return None
     found = re.search(r":\s+(\d+) extents? found", said)
     return int(found.group(1)) if found else None
@@ -263,11 +262,11 @@ def parse_listing(lines: list[str]) -> tuple[list[Buffer], Stage] | None:
 
 
 class Owner:
-    """The owner's control socket, asked one line at a time."""
+    """The owner's control socket, asked one line at a time, each ask waiting for its answer: an owner that
+    ends closes the socket, which ends the ask."""
 
-    def __init__(self, socket: Path, wait_s: float = ASK_WAIT_S) -> None:
+    def __init__(self, socket: Path) -> None:
         self.socket = socket
-        self.wait_s = wait_s
         self.guard = asyncio.Lock()
 
     def present(self) -> bool:
@@ -275,13 +274,13 @@ class Owner:
 
     async def ask(self, line: str, until_end: bool = False) -> list[str]:
         async with self.guard:
-            reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(self.socket)), 5.0)
+            reader, writer = await asyncio.open_unix_connection(str(self.socket))
             try:
                 writer.write(f"{line}\n".encode())
                 await writer.drain()
                 answer: list[str] = []
                 while True:
-                    said = (await asyncio.wait_for(reader.readline(), self.wait_s)).decode(errors="replace").strip()
+                    said = (await reader.readline()).decode(errors="replace").strip()
                     answer.append(said)
                     if not until_end or said in ("END", "") or said.startswith(("NOCLIENT", "ERROR")):
                         return answer
@@ -361,7 +360,7 @@ class Units:
             return
         try:
             listed = parse_listing(await self.owner.ask("LIST", until_end=True))
-        except (OSError, asyncio.TimeoutError, ValueError):
+        except (OSError, ValueError):
             listed = None
         if listed is None:
             self.buffers, self.stage, self.connected = [], Stage(), False
@@ -462,7 +461,7 @@ class Units:
             line = f"EVICT {buffer.id} ram" if to == TO_RAM else f"EVICT {buffer.id} {self.store.path} {offsets[buffer.id]}"
             try:
                 said = (await self.owner.ask(line))[0].split()
-            except (OSError, asyncio.TimeoutError) as fault:
+            except OSError as fault:
                 error = f"{type(fault).__name__}: {fault}"
                 break
             if said[:1] != ["EVICTED"]:
@@ -493,7 +492,7 @@ class Units:
                 offset = self.store.slot(key, buffer.slot_bytes)
                 said = (await self.owner.ask(f"LOWER {buffer.id} {self.store.path} {offset}"))[0].split()
                 error = None if said[:1] == ["LOWERED"] else (" ".join(said) or "the owner answered nothing")
-            except (OSError, asyncio.TimeoutError, StoreFull) as fault:
+            except (OSError, StoreFull) as fault:
                 said, error = [], f"{type(fault).__name__}: {fault}"
             took = (self.clock() - began) * 1000
             written = int(said[2]) if error is None else 0

@@ -21,6 +21,9 @@ Environment=LD_LIBRARY_PATH=/usr/lib/wsl/lib
 ExecStart=%h/bmo-card/.venv/bin/python %h/bmo-card/card.py
 Restart=always
 RestartSec=5
+# A stop is waited for until the arbiter has ended: it, and the rpc-server it lends the card through, end on
+# SIGTERM, and the card is empty once they have.
+TimeoutStopSec=infinity
 
 [Install]
 WantedBy=default.target

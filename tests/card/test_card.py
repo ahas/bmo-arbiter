@@ -20,6 +20,7 @@ import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 # The node arbiter's package, `card/` at the repository's root, whose modules the tests import as it does.
 HERE = Path(__file__).resolve().parents[2] / "card"
@@ -53,8 +54,7 @@ class Clock:
 
 class DesktopTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.clock = Clock()
-        self.desktop = watch.Desktop(busy_percent=20, room_mib=4096, busy_readings=5, quiet_s=60, clock=self.clock)
+        self.desktop = watch.Desktop(busy_percent=20, room_mib=4096, busy_readings=5)
 
     def test_a_game_takes_the_card_after_five_busy_readings(self) -> None:
         for _ in range(4):
@@ -76,28 +76,20 @@ class DesktopTest(unittest.TestCase):
         for _ in range(10):
             self.assertFalse(self.desktop.see(GAME, ours_on_card=True))
 
-    def test_given_back_after_a_quiet_minute_and_not_before(self) -> None:
+    def test_given_back_at_the_first_reading_that_finds_the_desktop_gone(self) -> None:
         for _ in range(5):
             self.desktop.see(GAME, ours_on_card=False)
-        self.clock.now = 100.0
-        self.assertTrue(self.desktop.see(IDLE, ours_on_card=False))
-        self.clock.now = 159.0
-        self.assertTrue(self.desktop.see(IDLE, ours_on_card=False))
-        self.clock.now = 160.0
+        for _ in range(3):
+            self.assertTrue(self.desktop.see(PAUSED, ours_on_card=False))
         self.assertFalse(self.desktop.see(IDLE, ours_on_card=False))
 
-    def test_a_busy_reading_in_the_quiet_minute_starts_it_again(self) -> None:
+    def test_taken_again_only_after_five_busy_readings_once_given_back(self) -> None:
         for _ in range(5):
             self.desktop.see(GAME, ours_on_card=False)
-        self.desktop.see(IDLE, ours_on_card=False)
-        self.clock.now = 50.0
-        self.desktop.see(GAME, ours_on_card=False)
-        self.clock.now = 70.0
-        self.assertTrue(self.desktop.see(IDLE, ours_on_card=False))
-        self.clock.now = 129.0
-        self.assertTrue(self.desktop.see(IDLE, ours_on_card=False))
-        self.clock.now = 130.0
         self.assertFalse(self.desktop.see(IDLE, ours_on_card=False))
+        for _ in range(4):
+            self.assertFalse(self.desktop.see(GAME, ours_on_card=False))
+        self.assertTrue(self.desktop.see(GAME, ours_on_card=False))
 
     def test_a_card_that_cannot_be_read_is_left_to_the_desktop_at_once(self) -> None:
         self.assertTrue(self.desktop.see(None, ours_on_card=False))
@@ -177,7 +169,7 @@ class CardProcessesTest(unittest.TestCase):
             gone, other = 2**22 + 11, 2**22 + 13
             self.assertIsNone(lent.service_of(gone))
             lent.lent_to = "model"
-            lent.server_pid = gone
+            lent.server = SimpleNamespace(pid=gone)  # type: ignore[assignment]
             self.assertEqual(lent.service_of(gone), "model")
             self.assertIsNone(lent.service_of(other))
             if "BMO_CARD_SERVICE" not in os.environ:
@@ -272,8 +264,6 @@ class OccupantsFileTest(unittest.TestCase):
 class KeeperTest(unittest.TestCase):
     def setUp(self) -> None:
         self.ticks: dict[int, int] = {}
-        self.now = 100.0
-        self.claims: list[tuple[str, float]] = []
 
     def keeper(self, order: str, holders: list[int], declared: dict[int, str | None]) -> tuple[card.Keeper, list[int]]:
         ended: list[int] = []
@@ -288,9 +278,8 @@ class KeeperTest(unittest.TestCase):
         path.write_text(order)
         occupants = card.Occupants(path, Path(root) / "log", claimants=lambda: [TESTER])
         occupants.read()
-        kept = card.Keeper(occupants, Path("/nowhere/.gpu.lock"), lambda: self.claims, grace_s=20,
-                           holders=lambda lock, mine: holders, declared=lambda pid: declared.get(pid), end=end,
-                           started=lambda pid: self.ticks.get(pid, 1), clock=lambda: self.now)
+        kept = card.Keeper(occupants, Path("/nowhere/.gpu.lock"), holders=lambda lock, mine: holders,
+                           declared=lambda pid: declared.get(pid), end=end, started=lambda pid: self.ticks.get(pid, 1))
         return kept, ended
 
     def test_a_service_with_no_place_on_the_node_is_ended_once(self) -> None:
@@ -306,22 +295,11 @@ class KeeperTest(unittest.TestCase):
         self.assertEqual(kept.step(), [21])
         self.assertEqual(ended, [21, 21])
 
-    def test_a_holder_below_a_claim_is_ended_past_the_grace_and_one_above_it_never(self) -> None:
-        kept, ended = self.keeper("desktop *", [40], {40: "voice"})
-        self.claims = [("desktop", 90.0)]
-        self.assertEqual(kept.step(), [])
-        self.now = 110.0
-        self.assertEqual(kept.step(), [40])
-        above, never = self.keeper("voice desktop", [41], {41: "voice"})
-        self.assertEqual(above.step(), [])
-        self.assertEqual(never, [])
-
-    def test_a_claim_with_no_place_on_the_node_ends_nothing(self) -> None:
-        kept, ended = self.keeper("model", [50], {50: None})
-        self.claims = [("desktop", 0.0)]
-        self.assertEqual(kept.step(), [])
-        self.claims = [("tester", 0.0)]
-        self.assertEqual(kept.step(), [50])
+    def test_a_holder_with_a_place_or_declaring_nothing_is_never_ended_however_long_it_keeps_the_lock(self) -> None:
+        kept, ended = self.keeper("tester desktop *", [40, 41], {40: "voice", 41: None})
+        for _ in range(3):
+            self.assertEqual(kept.step(), [])
+        self.assertEqual(ended, [])
 
     def test_the_arbiter_never_ends_its_own_process_group(self) -> None:
         self.assertFalse(card.end_group(os.getpid(), "ended {}", "occupants"))
@@ -379,7 +357,6 @@ class TurnsTest(unittest.TestCase):
         self.held = [99]
         claim = self.turns.ask("tester", need={"gpus": 1}, ref="task-1")
         self.assertEqual((claim["turn"], claim["position"]), (False, 1))
-        self.assertLessEqual(claim["waitMs"], self.turns.claim_wait_s * 1000)
         self.held = []
         voice = self.turns.ask("voice")
         self.assertFalse(voice["turn"])
@@ -405,20 +382,19 @@ class TurnsTest(unittest.TestCase):
         self.turns.done(claim["id"])
         self.assertFalse(self.turns.claim_asked("tester"))
 
-    def test_a_silent_ticket_stands_and_a_turn_not_taken_passes_on(self) -> None:
+    def test_a_silent_ticket_stands_and_a_turn_not_taken_stays_its_own_while_others_wait(self) -> None:
         self.held = [99]
         voice = self.turns.ask("voice")
         router = self.turns.ask("router")
         self.held = []
         self.assertTrue(self.turns.again(voice["id"])["turn"])
-        self.now = 6.0
-        self.assertFalse(self.turns.again(voice["id"])["turn"])
-        self.assertTrue(self.turns.again(router["id"])["turn"])
-        # Never asked after for an hour, the voice's ticket still stands in line behind the router's turn.
-        self.held = [99]
+        # Untaken for an hour with the router waiting behind it, the voice's turn is still the voice's.
         self.now = 3600.0
-        self.assertEqual([one["id"] for one in self.turns.state()["queue"]], [router["id"], voice["id"]])
-        self.assertFalse(self.turns.again(voice["id"])["turn"])
+        self.assertFalse(self.turns.again(router["id"])["turn"])
+        self.assertTrue(self.turns.again(voice["id"])["turn"])
+        self.assertEqual([one["id"] for one in self.turns.state()["queue"]], [voice["id"], router["id"]])
+        self.turns.done(voice["id"])
+        self.assertTrue(self.turns.again(router["id"])["turn"])
 
     def test_a_holder_that_lets_the_lock_go_with_no_ticket_given_back_ends_its_turn(self) -> None:
         voice = self.turns.ask("voice")
@@ -445,17 +421,15 @@ class TurnsTest(unittest.TestCase):
             self.assertEqual(self.turns.state()["lockHeldBy"], [])
         self.assertTrue(self.turns.again(router["id"])["turn"])
 
-    def test_a_turn_that_passed_is_given_again_once_nobody_ready_stands_before_it(self) -> None:
+    def test_an_asker_that_leaves_while_its_answer_is_held_open_gives_its_ticket_back(self) -> None:
         self.held = [99]
         voice = self.turns.ask("voice")
-        router = self.turns.ask("router")
-        self.held = []
-        self.assertTrue(self.turns.again(voice["id"])["turn"])
-        self.now = 6.0
-        self.assertTrue(self.turns.again(router["id"])["turn"])
-        self.now = 8.0
-        self.turns.done(router["id"])
-        self.assertTrue(self.turns.again(voice["id"])["turn"])
+        with self.assertRaises(card.AskerGone):
+            self.turns.again(voice["id"], wait_s=5.0, gone=lambda: True)
+        self.assertIsNone(self.turns.again(voice["id"]))
+        with self.assertRaises(card.AskerGone):
+            self.turns.ask("router", wait_s=5.0, gone=lambda: True)
+        self.assertEqual(self.turns.state()["queue"], [])
 
     def test_a_turn_in_use_stays_however_long_it_is_silent(self) -> None:
         voice = self.turns.ask("voice")
@@ -916,6 +890,32 @@ class TurnsTest(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(self.turns.tickets, {})
 
+    def test_an_asker_that_closes_its_connection_while_the_card_stays_held_gives_its_ticket_back(self) -> None:
+        import socket
+        from http.server import ThreadingHTTPServer
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), card.turns_handler(self.turns))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.held = [99]
+        body = b'{"serviceName": "voice", "waitMs": 20000}'
+        asker = socket.create_connection(server.server_address)
+        asker.sendall(b"POST /tickets HTTP/1.1\r\nhost: card\r\ncontent-type: application/json\r\n"
+                      + f"content-length: {len(body)}\r\n\r\n".encode() + body)
+        deadline = time.monotonic() + 5
+        while not self.turns.tickets and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(self.turns.tickets), 1)
+        # the asker stops asking and closes its end, the card still held by another
+        closed_at = time.monotonic()
+        asker.close()
+        deadline = time.monotonic() + 5
+        while self.turns.tickets and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.turns.tickets, {})
+        self.assertLess(time.monotonic() - closed_at, 2)
+
     def test_a_client_rests_its_turn_and_hears_it_is_to_give_way_on_one_held_ask(self) -> None:
         from http.server import ThreadingHTTPServer
 
@@ -994,10 +994,9 @@ class TurnsTest(unittest.TestCase):
         took: list[float] = []
 
         def waits() -> None:
-            fd = turn.hold(waiter, lock, until=time.monotonic() + 10.0)
+            fd = turn.hold(waiter, lock)
             took.append(time.monotonic())
-            if fd is not None:
-                os.close(fd)
+            os.close(fd)
 
         waiting = threading.Thread(target=waits)
         waiting.start()
@@ -1138,7 +1137,7 @@ class TurnCommandTest(unittest.TestCase):
 
 
 class ClaimWatchTest(unittest.TestCase):
-    """The claims watched one poll at a time against a stand-in clock, tickets, containers and card."""
+    """The claims watched one poll at a time against stand-in tickets, containers and card."""
 
     def setUp(self) -> None:
         self.declared: list[units.Claimant] = [TESTER]
@@ -1163,22 +1162,20 @@ class ClaimWatchTest(unittest.TestCase):
             return self.card_holds
 
         self.watch = card.ClaimWatch(lambda: self.declared, lambda name, seen: self.said.append(f"{name}: {seen}"),
-                                     lambda name: self.said.append(f"{name}: ended"), settle_s=10,
+                                     lambda name: self.said.append(f"{name}: ended"),
                                      containers=lambda prefix: self.running.get(prefix, []),
                                      asked=lambda name: name in self.asked, cgroup=cgroup,
-                                     on_card=on_card, idle_s=600, card_every_s=0)
+                                     on_card=on_card, card_every_s=0)
 
-    def test_a_ticket_and_a_container_make_one_claim_ended_once_neither_has_stood_the_settle(self) -> None:
+    def test_a_ticket_and_a_container_make_one_claim_ended_at_the_first_look_that_finds_neither(self) -> None:
         self.asked.add("tester")
         self.watch.step(0)
-        self.asked.clear()
         self.running["tester-"] = ["tester-1"]
+        self.asked.clear()
         self.watch.step(1)
+        self.assertEqual(self.said, ["tester: a ticket was asked for"])
         self.running.clear()
         self.watch.step(2)
-        self.watch.step(11.9)
-        self.assertEqual(self.said, ["tester: a ticket was asked for"])
-        self.watch.step(12)
         self.assertEqual(self.said, ["tester: a ticket was asked for", "tester: ended"])
 
     def test_a_container_named_for_the_claimant_claims_and_one_named_otherwise_does_not(self) -> None:
@@ -1221,7 +1218,6 @@ class ClaimWatchTest(unittest.TestCase):
         self.watch.step(0)
         self.card_holds = []
         self.watch.step(1)
-        self.watch.step(11)
         self.assertEqual(self.said, ["tester: a process of it is on the card (process 5150)", "tester: ended"])
         self.assertEqual(self.asked_card[0], (None, "tester-"))
 
@@ -1234,30 +1230,14 @@ class ClaimWatchTest(unittest.TestCase):
         self.assertEqual(self.said, ["agent: a process of it is on the card (process 6160)"])
         self.assertEqual(self.asked_card[-1], ("agent.service", None))
 
-    def test_containers_that_never_reach_the_card_stop_counting_after_the_idle_time(self) -> None:
+    def test_a_container_that_never_reaches_the_card_claims_until_it_ends(self) -> None:
         self.running["tester-"] = ["tester-1"]
-        self.watch.step(0)
-        self.watch.step(599)
+        for now in range(0, 7200, 100):
+            self.watch.step(now)
         self.assertEqual(self.said, ["tester: a container of it runs (tester-1)"])
-        self.watch.step(600)
-        self.watch.step(609.9)
-        self.assertEqual(len(self.said), 1)
-        self.watch.step(610)
+        self.running.clear()
+        self.watch.step(7200)
         self.assertEqual(self.said[-1], "tester: ended")
-        # The same container claims nothing more, until a process of it comes onto the card; a new one
-        # claims as any container does.
-        self.watch.step(700)
-        self.assertEqual(len(self.said), 2)
-        self.card_holds = [4242]
-        self.watch.step(701)
-        self.assertEqual(self.said[-1], "tester: a process of it is on the card (process 4242)")
-        self.card_holds = []
-        self.watch.step(702)
-        self.watch.step(712)
-        self.assertEqual(self.said[-1], "tester: ended")
-        self.running["tester-"] = ["tester-1", "tester-2"]
-        self.watch.step(713)
-        self.assertEqual(self.said[-1], "tester: a container of it runs (tester-2)")
 
     def test_the_card_in_use_and_a_ticket_keep_a_claim_however_long(self) -> None:
         self.running["tester-"] = ["tester-1"]
@@ -1555,9 +1535,10 @@ class OwnersTest(unittest.IsolatedAsyncioTestCase):
 
 
 class LentTurnTest(unittest.IsolatedAsyncioTestCase):
-    """The lent hold's turn following its engine's use (docs/card.md, 「Lending」): in use while its owner
-    computes or a use waits at its door, resting after the quiet, giving way to an occupant above it always and
-    to one of its rank only while it rests, and taken back by the request waiting at its door."""
+    """The lent hold's turn following its engine's use (docs/node-arbiter.md, 「Lending」): in use from its grant,
+    its owner's next graph or a use waiting at its door, resting from the head's QUIET and never on time, giving
+    way to an occupant above it always and to one of its rank only while it rests, and taken back by the
+    request waiting at its door."""
 
     async def asyncSetUp(self) -> None:
         root = Path(tempfile.mkdtemp())
@@ -1612,71 +1593,73 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         await broker.units.refresh()
         return broker, owner
 
-    async def test_the_holds_turn_follows_its_owners_graphs_and_its_door(self) -> None:
+    async def test_the_holds_turn_follows_its_owners_graphs_its_door_and_quiet(self) -> None:
         broker, owner = await self.lent_broker()
-        broker.follow_use(now=0.0)
+        broker.follow_use()
         self.assertTrue(self.answer_of(broker.ticket)["inUse"])
-        broker.follow_use(now=card.LEND_QUIET_S + 1)
+        await broker.quiet()
         self.assertFalse(self.answer_of(broker.ticket)["inUse"])
         owner.graphs = 2
         await broker.units.refresh()
-        broker.follow_use(now=card.LEND_QUIET_S + 2)
+        broker.follow_use()
         self.assertTrue(self.answer_of(broker.ticket)["inUse"])
+        await broker.quiet()
         owner.waiting = True
         await broker.units.refresh()
-        broker.follow_use(now=card.LEND_QUIET_S * 3)
+        broker.follow_use()
         self.assertTrue(self.answer_of(broker.ticket)["inUse"])
 
-    async def test_an_owner_that_never_says_quiet_keeps_its_turn_in_use_for_the_whole_quiet(self) -> None:
+    async def test_an_owner_that_computes_nothing_keeps_its_turn_in_use_however_long_until_quiet(self) -> None:
         broker, owner = await self.lent_broker()
-        broker.follow_use(now=0.0)
-        broker.follow_use(now=card.LEND_QUIET_S - 0.1)
-        self.assertTrue(self.answer_of(broker.ticket)["inUse"])
-        self.assertFalse(self.answer_of(broker.ticket)["giveWay"])
-        broker.follow_use(now=card.LEND_QUIET_S)
+        for _ in range(60):
+            self.now += 60
+            broker.follow_use()
+        said = self.answer_of(broker.ticket)
+        self.assertEqual((said["inUse"], said["giveWay"]), (True, False))
+        await broker.quiet()
         said = self.answer_of(broker.ticket)
         self.assertEqual((said["inUse"], said.get("resting", False)), (False, True))
 
     async def test_quiet_rests_the_turn_at_once_a_graph_computed_before_it_counting_as_before(self) -> None:
         broker, owner = await self.lent_broker()
-        broker.follow_use(now=0.0)
+        broker.follow_use()
         # The answer's last graph, computed before QUIET and not yet read, is read by QUIET itself.
         owner.graphs = 2
-        await broker.quiet(now=1.0)
+        await broker.quiet()
         said = self.answer_of(broker.ticket)
         self.assertEqual((said["inUse"], said.get("resting", False)), (False, True))
-        broker.follow_use(now=2.0)
+        broker.follow_use()
         self.assertFalse(self.answer_of(broker.ticket)["inUse"])
 
     async def test_a_graph_after_quiet_puts_the_turn_back_in_use(self) -> None:
         broker, owner = await self.lent_broker()
-        await broker.quiet(now=1.0)
+        await broker.quiet()
         owner.graphs = 2
         await broker.units.refresh()
-        broker.follow_use(now=2.0)
+        broker.follow_use()
         said = self.answer_of(broker.ticket)
         self.assertEqual((said["inUse"], said.get("resting", False)), (True, False))
-        broker.follow_use(now=2.0 + card.LEND_QUIET_S - 0.1)
+        broker.follow_use()
         self.assertTrue(self.answer_of(broker.ticket)["inUse"])
 
     async def test_a_use_waiting_at_the_door_keeps_the_turn_in_use_whatever_quiet_says(self) -> None:
         broker, owner = await self.lent_broker()
         owner.waiting = True
-        await broker.quiet(now=1.0)
+        await broker.quiet()
         self.assertTrue(self.answer_of(broker.ticket)["inUse"])
         owner.waiting = False
-        await broker.quiet(now=2.0)
+        await broker.quiet()
         self.assertFalse(self.answer_of(broker.ticket)["inUse"])
         owner.waiting = True
         await broker.units.refresh()
-        broker.follow_use(now=3.0)
+        broker.follow_use()
         self.assertTrue(self.answer_of(broker.ticket)["inUse"])
 
     async def test_a_quieted_turn_gives_way_to_a_ticket_asking_at_its_rank(self) -> None:
         broker, owner = await self.lent_broker()
-        broker.follow_use(now=0.0)
+        broker.follow_use()
         self.assertFalse(self.answer_of(broker.ticket)["giveWay"])
-        await broker.quiet(now=1.0)
+        await broker.quiet()
         said = self.answer_of(broker.ticket)
         self.assertEqual((said["inUse"], said["giveWay"], said["giveWayFor"]), (False, True, "coder"))
 
@@ -1688,7 +1671,7 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
             write = staticmethod(told.append)
 
         broker.holder = Hold()  # type: ignore[assignment]
-        broker.follow_use(now=0.0)
+        broker.follow_use()
         self.assertEqual(told, [b"PASS coder\n"])
         # An hour of use later it is told nothing more and kept in the middle of its use: the head lets the
         # request in hand end and says QUIET.
@@ -1696,11 +1679,11 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
             self.now = 100.0 + second
             owner.graphs += 1
             await broker.units.refresh()
-            broker.follow_use(now=float(second))
+            broker.follow_use()
         self.assertEqual(told, [b"PASS coder\n"])
         said = self.answer_of(broker.ticket)
         self.assertEqual((said["inUse"], said["giveWay"]), (True, False))
-        await broker.quiet(now=3600.0)
+        await broker.quiet()
         self.assertEqual(self.answer_of(broker.ticket)["giveWayFor"], "coder")
 
     async def out_broker(self) -> tuple[card.Card, list[bytes], str]:
@@ -1789,19 +1772,35 @@ class LentTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(broker.wanting)
         self.assertEqual(self.model_tickets(), [])
         broker.claim_ended("tester")
-        returning = broker.coming_back
-        self.assertIsNotNone(returning)
         await self.until(lambda: bool(self.model_tickets()))
         self.assertGreaterEqual(self.model_tickets()[0]["waitedMs"], 5000)
-        # A WANT while the units come back after the claim leaves that return to them.
+        returning = broker.wanting
+        self.assertIsNotNone(returning)
+        # A WANT while the units wait to come back after the claim leaves that return as it stands.
         broker.want(8.0)
-        self.assertIsNone(broker.wanting)
-        self.assertIs(broker.coming_back, returning)
+        self.assertIs(broker.wanting, returning)
+        self.assertEqual(len(self.model_tickets()), 1)
         self.held = []
         self.turns.done(coder)
         await self.until(lambda: returning.done())
         self.assertFalse(broker.units.out())
         self.assertEqual(told[-1], b"RESTORED\n")
+
+    async def test_a_restore_asked_while_the_turn_is_not_the_holds_waits_its_turn_in_line(self) -> None:
+        broker, told, coder = await self.out_broker()
+        with self.assertRaises(units.NoRoom):
+            await broker.restore(None)
+        await self.until(lambda: bool(self.model_tickets()))
+        self.assertFalse(self.model_tickets()[0]["turn"])
+        # Asked again while it waits, it keeps the one place it has.
+        with self.assertRaises(units.NoRoom):
+            await broker.restore(None)
+        self.assertEqual(len(self.model_tickets()), 1)
+        self.held = []
+        self.turns.done(coder)
+        await self.until(lambda: bool(told) and told[-1] == b"RESTORED\n")
+        self.assertFalse(broker.units.out())
+        self.assertIsNotNone(broker.hold_lock)
 
     async def test_the_units_state_names_the_graphs_the_owner_has_computed(self) -> None:
         broker, owner = await self.lent_broker()
@@ -2018,7 +2017,7 @@ class ClaimAndDesktopTest(unittest.TestCase):
     def test_a_claim_takes_the_desktops_hold_and_its_use_is_never_the_desktops(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / ".gpu.lock"
-            desktop = watch.Desktop(busy_readings=2, clock=Clock())
+            desktop = watch.Desktop(busy_readings=2)
             desk = watch.DeskLock(path)
             for _ in range(2):
                 watch.desk_step(GAME, False, False, desktop, desk)
@@ -2029,7 +2028,7 @@ class ClaimAndDesktopTest(unittest.TestCase):
             claim = os.open(path, os.O_RDWR)
             fcntl.flock(claim, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-            fresh = watch.Desktop(busy_readings=2, clock=Clock())
+            fresh = watch.Desktop(busy_readings=2)
             for _ in range(5):
                 watch.desk_step(GAME, False, True, fresh, desk)
             self.assertFalse(fresh.taken)
@@ -2038,16 +2037,16 @@ class ClaimAndDesktopTest(unittest.TestCase):
 
 
 class LocalHoldUserTest(unittest.IsolatedAsyncioTestCase):
-    """A local hold naming the process group that uses the card, and what a YIELD it does not let go of in
-    time ends: an arbiter on a loopback port of its own, with no lock and no rpc-server, held locally the
-    way a process on its own node holds it."""
+    """A local hold naming the process group that uses the card, standing until its head lets go whatever it
+    is told, and a hold asked meanwhile waiting for it: an arbiter on a loopback port of its own, with no lock
+    and no rpc-server, held locally the way a process on its own node holds it."""
 
     KEY = "card-key-7a2f90"
 
     async def asyncSetUp(self) -> None:
         pieces = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(pieces))
-        self.card = card.Card(self.KEY, "127.0.0.1", None, [], pieces, yield_wait_s=0.2, stop_wait_s=0.5)
+        self.card = card.Card(self.KEY, "127.0.0.1", None, [], pieces)
         self.server = await asyncio.start_server(self.card.serve, "127.0.0.1", 0)
         self.port = self.server.sockets[0].getsockname()[1]
         # A process in a group of its own, standing in for whatever puts work on the card.
@@ -2075,27 +2074,55 @@ class LocalHoldUserTest(unittest.IsolatedAsyncioTestCase):
         await writer.drain()
         return await asyncio.wait_for(reader.readline(), 5)
 
-    async def yield_unanswered(self, reader: asyncio.StreamReader) -> None:
-        """A claim begins and the holder keeps the connection without letting go: YIELD comes, and the
-        arbiter ends the hold on its own once the wait for it has passed."""
-        self.card.claim_started("tester", "a task started (process 4242)")
-        self.assertEqual(await asyncio.wait_for(reader.readline(), 5), b"YIELD tester\n")
-        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
-        while self.card.held:
-            await asyncio.sleep(0.01)
+    async def until_let_go(self) -> None:
+        for _ in range(100):
+            if not self.card.held:
+                return
+            await asyncio.sleep(0.05)
+        self.fail("the hold was not let go within five seconds")
 
-    async def test_an_overdue_hold_ends_the_group_it_named(self) -> None:
+    async def test_a_hold_told_to_yield_stands_until_its_head_lets_go_and_ends_nothing(self) -> None:
         reader, writer = await self.hold()
         self.assertEqual(await self.name(reader, writer, str(self.user.pid)), f"USING {self.user.pid}\n".encode())
-        await self.yield_unanswered(reader)
-        self.assertEqual(await asyncio.to_thread(self.user.wait, 5), -15)
-        writer.close()
-
-    async def test_an_overdue_hold_that_named_nothing_ends_nothing(self) -> None:
-        reader, writer = await self.hold()
-        await self.yield_unanswered(reader)
+        self.card.claim_started("tester", "a task started (process 4242)")
+        self.assertEqual(await asyncio.wait_for(reader.readline(), 5), b"YIELD tester\n")
+        await asyncio.sleep(0.5)
+        self.assertTrue(self.card.held)
         self.assertIsNone(self.user.poll())
         writer.close()
+        await self.until_let_go()
+        self.assertIsNone(self.user.poll())
+        self.card.claim_ended("tester")
+
+    async def test_a_hold_asked_while_another_stands_waits_for_it_and_one_whose_head_leaves_takes_nothing(self) -> None:
+        _first, first = await self.hold()
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        writer.write(f"HOLD {self.KEY} local\n".encode())
+        await writer.drain()
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.readline(), 0.3)
+        leaving_reader, leaving = await asyncio.open_connection("127.0.0.1", self.port)
+        leaving.write(f"HOLD {self.KEY} local\n".encode())
+        await leaving.drain()
+        await asyncio.sleep(0.1)
+        leaving.close()
+        first.close()
+        self.assertEqual(await asyncio.wait_for(reader.readline(), 5), b"READY\n")
+        self.assertEqual(await asyncio.wait_for(leaving_reader.read(), 5), b"")
+        writer.close()
+        await self.until_let_go()
+
+    async def test_a_hold_asked_while_a_claim_stands_waits_for_its_end(self) -> None:
+        self.card.claim_started("tester", "a task started (process 4242)")
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        writer.write(f"HOLD {self.KEY} local\n".encode())
+        await writer.drain()
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.readline(), 0.3)
+        self.card.claim_ended("tester")
+        self.assertEqual(await asyncio.wait_for(reader.readline(), 5), b"READY\n")
+        writer.close()
+        await self.until_let_go()
 
     async def test_the_arbiters_own_group_and_what_is_no_group_are_refused(self) -> None:
         reader, writer = await self.hold()
@@ -2126,12 +2153,11 @@ class LocalHoldUserTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await asked(line), b"REFUSED\n")
         self.assertEqual(heard, [None])
 
-    async def test_a_hold_let_go_in_time_ends_nothing(self) -> None:
+    async def test_a_hold_let_go_ends_nothing(self) -> None:
         reader, writer = await self.hold()
         await self.name(reader, writer, str(self.user.pid))
         writer.close()
-        while self.card.held:
-            await asyncio.sleep(0.01)
+        await self.until_let_go()
         self.assertIsNone(self.user.poll())
 if __name__ == "__main__":
     unittest.main()

@@ -13,12 +13,6 @@ use bmo_node_client::NodeClient;
 use bmo_node_client::nodes::{LoginShell, NodeChanges, NodeKind, NodesQuery, Target};
 use tokio::process::Command;
 
-// A command is given one minute more than the hub streams one for, since the hub stops a command itself at
-// five; a transfer twenty times the slowest the tunnel has carried and a minute to open.
-const COMMAND_LIMIT: Duration = Duration::from_secs(6 * 60);
-const TRANSFER_OPEN: Duration = Duration::from_secs(60);
-const TRANSFER_BYTES_PER_SECOND: u64 = 1_000_000;
-
 /// A future boxed to be handed across a trait object.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -28,26 +22,20 @@ pub struct RunResult {
   pub code: i32,
   pub stdout: String,
   pub stderr: String,
-  /// Where the call outlived its limit and was killed, the limit in seconds.
-  pub timed_out: Option<u64>,
   /// How many times the call was made, where more than once.
   pub attempts: u32,
 }
 
 impl RunResult {
   pub fn ok(&self) -> bool {
-    self.code == 0 && self.timed_out.is_none()
+    self.code == 0
   }
 
-  /// Why the call came back as it did, never empty: the limit it outlived or its exit code, with the tail
-  /// of what it wrote.
+  /// Why the call came back as it did, never empty: its exit code, with the tail of what it wrote.
   pub fn fault(&self) -> String {
     let said =
       tail(if self.stderr.trim().is_empty() { self.stdout.trim() } else { self.stderr.trim() }, 300);
-    let why = match self.timed_out {
-      Some(seconds) => format!("timed out after {seconds} s"),
-      None => format!("exit code {}", self.code),
-    };
+    let why = format!("exit code {}", self.code);
     let whole = if said.is_empty() { format!("{why}, no output") } else { format!("{why}: {said}") };
     if self.attempts > 1 {
       format!("tried {} times, the last {whole}", self.attempts)
@@ -76,12 +64,11 @@ fn tail(text: &str, chars: usize) -> &str {
   &text[start..]
 }
 
-/// A program run to its end or to its limit, each line it writes to its standard output handed on as it
-/// comes and kept whole besides; killed where it outlives its limit.
+/// A program run to its end, however long it takes, each line it writes to its standard output handed on as
+/// it comes and kept whole besides.
 pub async fn run_streaming(
   argv: &[String],
   cwd: Option<&Path>,
-  limit: Duration,
   on_line: &(dyn Fn(&str) + Send + Sync),
 ) -> RunResult {
   use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -115,49 +102,38 @@ pub async fn run_streaming(
   };
   let stdout = child.stdout.take().expect("piped");
   let mut stderr = child.stderr.take().expect("piped");
-  let work = async {
-    let mut kept = String::new();
-    let mut lines = BufReader::new(stdout).lines();
-    let errors = tokio::spawn(async move {
-      let mut said = String::new();
-      let _ = stderr.read_to_string(&mut said).await;
-      said
-    });
-    while let Ok(Some(line)) = lines.next_line().await {
-      on_line(&line);
-      kept.push_str(&line);
-      kept.push('\n');
-    }
-    let status = child.wait().await;
-    let said = errors.await.unwrap_or_default();
-    (status, kept, said)
-  };
-  match tokio::time::timeout(limit, work).await {
-    Ok((Ok(status), stdout, stderr)) => RunResult {
+  let mut kept = String::new();
+  let mut lines = BufReader::new(stdout).lines();
+  let errors = tokio::spawn(async move {
+    let mut said = String::new();
+    let _ = stderr.read_to_string(&mut said).await;
+    said
+  });
+  while let Ok(Some(line)) = lines.next_line().await {
+    on_line(&line);
+    kept.push_str(&line);
+    kept.push('\n');
+  }
+  let status = child.wait().await;
+  let said = errors.await.unwrap_or_default();
+  match status {
+    Ok(status) => RunResult {
       code: status.code().unwrap_or(-1),
-      stdout,
-      stderr,
-      timed_out: None,
+      stdout: kept,
+      stderr: said,
       attempts: 1,
     },
-    Ok((Err(fault), stdout, _)) => RunResult {
+    Err(fault) => RunResult {
       code: -1,
-      stdout,
+      stdout: kept,
       stderr: fault.to_string(),
       attempts: 1,
-      ..RunResult::default()
-    },
-    Err(_) => RunResult {
-      code: -1,
-      timed_out: Some(limit.as_secs()),
-      attempts: 1,
-      ..RunResult::default()
     },
   }
 }
 
-/// A program run to its end or to its limit, killed where it outlives it.
-pub async fn run(argv: &[String], cwd: Option<&Path>, limit: Duration) -> RunResult {
+/// A program run to its end, however long it takes.
+pub async fn run(argv: &[String], cwd: Option<&Path>) -> RunResult {
   let Some((program, args)) = argv.split_first() else {
     return RunResult {
       code: -1,
@@ -185,24 +161,16 @@ pub async fn run(argv: &[String], cwd: Option<&Path>, limit: Duration) -> RunRes
       };
     }
   };
-  match tokio::time::timeout(limit, child.wait_with_output()).await {
-    Ok(Ok(done)) => RunResult {
+  match child.wait_with_output().await {
+    Ok(done) => RunResult {
       code: done.status.code().unwrap_or(-1),
       stdout: String::from_utf8_lossy(&done.stdout).into_owned(),
       stderr: String::from_utf8_lossy(&done.stderr).into_owned(),
-      timed_out: None,
       attempts: 1,
     },
-    Ok(Err(fault)) => RunResult {
+    Err(fault) => RunResult {
       code: -1,
       stderr: fault.to_string(),
-      attempts: 1,
-      ..RunResult::default()
-    },
-    // The child is dropped with the future and killed with it.
-    Err(_) => RunResult {
-      code: -1,
-      timed_out: Some(limit.as_secs()),
       attempts: 1,
       ..RunResult::default()
     },
@@ -304,8 +272,9 @@ pub fn connection_of(target: &Target) -> Result<Connection, String> {
 pub const NODE_URL: &str = "CARD_NODE_URL";
 pub const NODE_TOKEN: &str = "CARD_NODE_TOKEN";
 
-// How long one call of the node service may take.
-const NODE_CALL_LIMIT: Duration = Duration::from_secs(30);
+// The TCP keep-alive probes a call of the node service is watched by, which tell a node service gone without
+// closing; no call is cut short by a limit.
+const NODE_KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 /// The node service, reached through its published client (docs/api.md, 「The node service」).
 #[derive(Clone)]
@@ -332,7 +301,7 @@ impl NodeRegistry {
   /// The node service at `url`, asked with `token`.
   pub fn at(url: &str, token: &str) -> Result<Self, String> {
     let http = reqwest::Client::builder()
-      .timeout(NODE_CALL_LIMIT)
+      .tcp_keepalive(NODE_KEEP_ALIVE)
       .build()
       .map_err(|fault| format!("no HTTP client could be made: {fault}"))?;
     let client = NodeClient::with_http(url, token, http).map_err(|why| format!("{NODE_URL}: {why}"))?;
@@ -454,7 +423,7 @@ impl NodeShell {
 
   pub async fn exec(&self, command: &str) -> RunResult {
     match self.exec_argv(command) {
-      Ok(argv) => run(&argv, None, COMMAND_LIMIT).await,
+      Ok(argv) => run(&argv, None).await,
       Err(why) => RunResult::refused(why),
     }
   }
@@ -462,19 +431,17 @@ impl NodeShell {
   /// A file carried to the node, made once more where the first try failed, since what breaks one is most
   /// often the tunnel of the moment.
   pub async fn upload(&self, local: &Path, remote: &str) -> RunResult {
-    let bytes = std::fs::metadata(local).map_or(0, |meta| meta.len());
-    let limit = TRANSFER_OPEN + Duration::from_millis(bytes * 1000 / TRANSFER_BYTES_PER_SECOND);
     let argv = match self.upload_argv(local, remote) {
       Ok(argv) => argv,
       Err(why) => return RunResult::refused(why),
     };
-    let first = run(&argv, None, limit).await;
+    let first = run(&argv, None).await;
     if first.ok() {
       return first;
     }
     RunResult {
       attempts: 2,
-      ..run(&argv, None, limit).await
+      ..run(&argv, None).await
     }
   }
 }

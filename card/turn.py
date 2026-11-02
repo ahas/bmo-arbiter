@@ -1,12 +1,12 @@
 """Waiting a turn for the card through the node's card arbiter (docs/node-arbiter.md, 「The hold」), for an occupant
-that runs in a process of its own: an engine serving calls, a server with a bound of its own, a training run.
+that runs in a process of its own: an engine serving calls, a server answering calls, a training run.
 
 An occupant asks the arbiter on the node's loopback for a ticket under its own service name (docs/api.md,
 「Tickets」). The answer is 201 with `turn: true` where the card is its now, or 202 with its place in the queue
 and how long the wait is counted at; the answer is held open until the turn comes or a while passes, so the
-occupant hears of its
-turn the moment the card is handed on, then takes the node's card lock itself and gives the ticket back
-once it has let go. An occupant serving requests one after another asks after each whether its next request
+occupant hears of its turn the moment the card is handed on, then takes the node's card lock itself and gives
+the ticket back once it has let go. A turn is waited for for as long as it takes, and every ask waits for the
+arbiter's answer: its end is the answer, or a refused or broken connection. An occupant serving requests one after another asks after each whether its next request
 still stands first (`keep`), and carries on with the card where it does (docs/node-arbiter.md, 「One queue of
 requests」). A node whose arbiter does not answer keeps no queue, and the occupant takes the lock as it
 comes, as it always did.
@@ -49,8 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PORT = int(os.environ.get("CARD_TURN_PORT", "7439"))
-ASK_TIMEOUT_S = 2.0
-# How long a waiter has its answer held open at most.
+# How long a waiter has its answer held open at most before it asks again.
 HOLD_OPEN_S = 20.0
 # How long a waiter pauses before asking again where an answer came back early with no turn: an arbiter
 # that holds no answer open, or a lock taken in the moment between by a process that asks for no turns.
@@ -83,11 +82,13 @@ class TurnClient:
         self.ticket: int | None = None
         self.gives_way_s = gives_way_s
 
-    def _call(self, method: str, url: str, body: dict | None = None, held_s: float = 0.0) -> tuple[int, dict] | None:
+    def _call(self, method: str, url: str, body: dict | None = None) -> tuple[int, dict] | None:
+        """One call of the arbiter, waiting for its answer; None where no arbiter answers: the connection is
+        refused or broken."""
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(url, data=data, method=method, headers={"content-type": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=ASK_TIMEOUT_S + held_s) as answer:
+            with urllib.request.urlopen(request) as answer:
                 text = answer.read()
                 return answer.status, json.loads(text) if text else {}
         except urllib.error.HTTPError as refused:
@@ -105,7 +106,7 @@ class TurnClient:
         rest on the card once it is free. A service the node has no place for is told so as a refusal."""
         held_s = max(0.0, min(wait_s, HOLD_OPEN_S))
         query = f"?waitMs={round(held_s * 1000)}" if held_s > 0 else ""
-        answered = self._call("GET", f"{self.base}/{self.ticket}{query}", held_s=held_s) if self.ticket is not None else None
+        answered = self._call("GET", f"{self.base}/{self.ticket}{query}") if self.ticket is not None else None
         if answered is None or answered[0] == 404:
             asked: dict = {"serviceName": self.service}
             if self.gives_way_s is not None:
@@ -116,7 +117,7 @@ class TurnClient:
                 asked["rest"] = True
             if held_s > 0:
                 asked["waitMs"] = round(held_s * 1000)
-            answered = self._call("POST", self.base, asked, held_s=held_s)
+            answered = self._call("POST", self.base, asked)
         if answered is None:
             self.ticket = None
             return None
@@ -133,7 +134,7 @@ class TurnClient:
         most (docs/node-arbiter.md, 「Handing on」). It never asks for a new ticket: None where the arbiter no longer
         holds this one, and an OSError where no arbiter answers."""
         held_s = max(0.0, min(wait_s, HOLD_OPEN_S))
-        answered = self._call("GET", f"{self.base}/{ticket}?waitMs={round(held_s * 1000)}", held_s=held_s)
+        answered = self._call("GET", f"{self.base}/{ticket}?waitMs={round(held_s * 1000)}")
         if answered is None:
             raise OSError("the card arbiter did not answer")
         status, body = answered
@@ -194,16 +195,13 @@ def relock(fd: int) -> int | None:
         return None
 
 
-def hold(client: TurnClient, lock: Path | int, until: float | None = None, said=None,
-         waited_s: float | None = None) -> int | None:
-    """The occupant's turn waited for, with the answer held open, then the lock taken — at its path, or on the
-    descriptor given, which held it before; its descriptor, or None where `until` passed first. The ticket
-    stands by a request that has waited `waited_s` already. Each answer that is not yet a turn is handed to
-    `said`."""
+def hold(client: TurnClient, lock: Path | int, said=None, waited_s: float | None = None) -> int:
+    """The occupant's turn waited for, with the answer held open, for as long as it takes, then the lock taken
+    — at its path, or on the descriptor given, which held it before; its descriptor. The ticket stands by a
+    request that has waited `waited_s` already. Each answer that is not yet a turn is handed to `said`."""
     while True:
-        left = HOLD_OPEN_S if until is None else max(0.0, until - time.monotonic())
         asked_at = time.monotonic()
-        answered = client.ask(wait_s=left, waited_s=waited_s)
+        answered = client.ask(wait_s=HOLD_OPEN_S, waited_s=waited_s)
         waited_s = None
         if answered is None or answered.turn:
             fd = relock(lock) if isinstance(lock, int) else try_lock(lock)
@@ -211,12 +209,9 @@ def hold(client: TurnClient, lock: Path | int, until: float | None = None, said=
                 return fd
         elif said is not None:
             said(answered)
-        if until is not None and time.monotonic() >= until:
-            client.give_back()
-            return None
         # An answer that came back early with no turn, or a lock somebody took in the moment between, is
         # not asked again at once.
-        if answered is None or answered.turn or time.monotonic() - asked_at < min(left, HOLD_OPEN_S) - 0.05:
+        if answered is None or answered.turn or time.monotonic() - asked_at < HOLD_OPEN_S - 0.05:
             time.sleep(AGAIN_S)
 
 
@@ -328,7 +323,6 @@ def main() -> int:
     except PermissionError as refused:
         print(f"turn: {refused}", file=sys.stderr, flush=True)
         return 3
-    assert fd is not None
     lending = Lending(client, fd, Path(args.state)) if args.state else None
     try:
         return run_passing_stop(command, fd, lending)

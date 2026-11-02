@@ -554,7 +554,7 @@ impl Master {
       asking.spawn(async move {
         let reached = world.reach(&name).await;
         let asked = match &reached {
-          Ok(reached) => Some(reached.shell.exec(&format!("curl -s -m 3 {SLAVE}/card")).await),
+          Ok(reached) => Some(reached.shell.exec(&format!("curl -s {SLAVE}/card")).await),
           Err(_) => None,
         };
         (name, reached, asked)
@@ -658,7 +658,7 @@ impl Master {
       let Some(reached) = self.reached.get(&name).cloned() else { continue };
       asking.spawn(async move {
         let began = Instant::now();
-        let asked = reached.shell.exec(&format!("curl -s -m 3 {SLAVE}/card")).await;
+        let asked = reached.shell.exec(&format!("curl -s {SLAVE}/card")).await;
         (name, asked, began.elapsed().as_secs_f64() * 1000.0)
       });
     }
@@ -693,7 +693,7 @@ impl Master {
       let ran = reached
         .shell
         .exec(&format!(
-          "curl -s -m 300 -o /dev/stdout -w '\\n%{{http_code}}' -X PATCH -H 'content-type: application/json' -d '{body}' {SLAVE}/card-units/{path}"
+          "curl -s -o /dev/stdout -w '\\n%{{http_code}}' -X PATCH -H 'content-type: application/json' -d '{body}' {SLAVE}/card-units/{path}"
         ))
         .await;
       let (said, code) = ran.stdout.trim().rsplit_once('\n').unwrap_or(("", ran.stdout.trim()));

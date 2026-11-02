@@ -26,7 +26,7 @@ over the network brings its lend settings.
   |---|---|---|
   | Claims | the rules declare a claimant | gives the card to a claimant before anyone, once the others have given way |
   | The desktop | the machine is a person's desktop | takes its turn for the desktop while it uses the card |
-  | The keeper | always | ends a holder with no place among the occupants, and one below a claimant or the desktop past the grace |
+  | The keeper | always | ends a holder that declares a service with no place among the occupants |
   | The hold | always | keeps the queue and answers its API on the node's loopback |
   | Lending | lend settings stand on the node | lends the card to a borrowing engine's head over the inner network |
 
@@ -104,8 +104,9 @@ keeps its model on it until another asks for the card.
 - **What a holder may assume:** no other service that follows the lock runs on the card while it holds
   the lock, so it may use the whole card less the other services' contexts and what the desktop keeps.
 - **A claimant and the desktop take the lock first.** The arbiter takes it for as long as a claimant's
-  claim stands (「Claimants」), or the desktop uses the card; a service still keeping the lock twenty seconds
-  after a claim began is ended (「The keeper」).
+  claim stands (「Claimants」), or the desktop uses the card, the moment whoever holds it lets go. A holder
+  is told to give way where its turn gives way or rests, and is never ended for keeping the lock: the claim
+  waits until it lets go (「The keeper」).
 - **What the arbiter says:** one journal line when it takes the card and why, and one when it gives it
   back, in the journal of `bmo-card.service`.
 
@@ -199,46 +200,41 @@ keeps its model on it until another asks for the card.
   - `ram_free` — the host memory, in GiB, the node keeps available while it claims, or `all`, every dump
     kept in host memory written out (`docs/placement.md`, 「Host memory」).
 - **The claim** begins when a ticket of the claimant is asked for, a container of it is listed, or a
-  process of it is found on the card, and ends once the node has held none of them for ten seconds
-  (`CARD_CLAIM_SETTLE_S`); the tickets are looked at ten times a second (`CARD_CLAIM_POLL_S`), the
-  containers and the card every two seconds. A container running under a granted ticket is the same
-  claim, never a second one, and a ticket asked while the claim stands joins it. A claimant with no place
-  among the node's occupants claims nothing there.
+  process of it is found on the card, and ends at the first look that finds none of them: its last ticket
+  given back, its last container gone from the runtimes' list, its last process off the card. The tickets
+  are looked at ten times a second (`CARD_CLAIM_POLL_S`), the containers and the card every two seconds,
+  each reading of the runtimes and the card on a thread of its own, so a runtime slow to answer holds up
+  that reading alone and the claim stands as last read meanwhile. A container running under a granted
+  ticket is the same claim, never a second one, and a ticket asked while the claim stands joins it. A
+  claimant with no place among the node's occupants claims nothing there.
 - **A process of the claimant on the card** is a compute process the driver lists that lies in one of
   the claimant's containers, matched by the container's id against the names its runtime lists, or, where
   the rules name a cgroup, whose cgroup lies in that unit's. Where the driver cannot list the card's
   processes, the card is not read for claims.
-- **A claim kept by containers that never reach the card is given back.** Where a claim stands on
-  containers alone, and no process of the claimant has been on the card for ten minutes
-  (`CARD_CLAIM_IDLE_S`) since the claim began or since one last was, the containers listed then stop
-  counting, and the node is given back once the settle has passed.
-  - A container stops counting by its name. Any of its processes that comes onto the card claims again,
-    and a new container claims as any container does.
-  - A ticket is the claimant's own word that its work is held or running, and keeps its claim for as long
-    as it stands, until its agent gives it back, whatever is on the card.
-  - Where the card is not read, nothing is given back by this rule.
+- **Each ground claims for as long as it stands, whatever is on the card.** A container claims while it
+  runs, and its end is its leaving the runtimes' list; a ticket is the claimant's own word that its work
+  is held or running, and claims until its agent gives it back.
 - **What the arbiter does when a claim begins:** it gives no turn to anyone else while it stands; it has
   the owner of a hold's units unload them, each where the rules put it within the host memory the
   claimant leaves, and lets go of that hold's lock, the hold itself standing (`docs/placement.md`); it
   writes out dumps kept in host memory until what the claimant needs is available, and keeps it so while
-  the claim stands; where the units cannot be unloaded it tells the hold to `YIELD`, ending it if it has
-  not let go within five seconds (`CARD_YIELD_WAIT_S`); it takes the lock for the claim as soon as the
-  holder lets go; and a holder still keeping the lock twenty seconds after the claim began is ended with
-  its process group by the keeper. Once the claim ends it takes the hold's turn and lock again and loads
-  the units back.
+  the claim stands; where the units cannot be unloaded it tells the hold to `YIELD` and waits for it to let
+  go; it tells every turn that gives way, and every resting one, to give way; and it takes the lock for the
+  claim as soon as the holder lets go, however long that takes. A holder is never ended for keeping the
+  lock: a turn held to its end keeps the card to that end, and a process that asks for no turns keeps it
+  until it lets go. Once the claim ends it takes the hold's turn and lock again and loads the units back.
 - **A claimant's ticket is granted only once the card is the claim's,** that is once the arbiter holds
   the lock for it, so every other holder has let go, and the host memory the claimant needs is
-  available. Until then it is answered `202` with `Retry-After`, the wait counted at no more than the
-  twenty seconds the keeper gives a holder. Every such ticket waiting is granted together, and one asked
-  while the card is already the claim's is granted at once.
+  available. Until then it is answered `202` with `Retry-After`, the wait counted as any ticket's is
+  (「The hold」). Every such ticket waiting is granted together, and one asked while the card is already
+  the claim's is granted at once.
 - **A claimant never takes the lock itself:** the arbiter holds it for the whole claim, so a granted
   ticket never passes on for a lock not taken.
 - **A local hold names the process that uses the card:** a process on the node that holds its card
   through the arbiter (`HOLD <key> local`) — a borrowing engine's head, a stage of its training — may
   send `USES <group>` on the hold, answered `USING <group>`. The arbiter keeps a local hold's lock itself,
-  so the keeper never reaches the process using the card; a local hold told to `YIELD` that has not let
-  go within the five seconds has that process group ended with it, `SIGTERM` and then `SIGKILL` after ten
-  seconds. The arbiter's own group, or what is no group, is refused, and a lent hold names none.
+  and a process of the group named is known on the card as the lend service's. The arbiter's own group,
+  or what is no group, is refused, and a lent hold names none.
 - **A claimant knows nothing of the system:** its agent knows only the general protocol and the address
   its node's setting names, and the lock, the occupants and the keeper are the arbiter's alone.
 
@@ -257,11 +253,12 @@ games and the desktop whenever they like. `CARD_DESKTOP=1` switches the rule on.
   once where it cannot be read at all, since its use cannot then be told. NVML that will not open is
   tried again a minute later.
 - **The desktop waits its turn like any occupant in the queue,** standing where the occupants put it, and
-  takes the lock when its turn comes. A holder below it that is still on the card twenty seconds after
-  the desktop took the card is ended by the keeper: a game does not wait for the lock, so a holder that
-  stays only shares the card with it. A holder above it keeps the card until it lets go.
-- **Given back** once a minute (`DESKTOP_QUIET_S`) has passed with neither, read the same way, the lock
-  and the turn with it.
+  takes the lock when its turn comes. A holder keeps the card until it lets go, told to give way where its
+  turn gives way or rests; a game does not wait for the lock, so meanwhile the holder only shares the card
+  with it.
+- **Given back** at the first reading that finds neither, read the same way, the lock and the turn with
+  it: what the desktop runs lets its memory and its use go as it ends, and the reading that finds them
+  gone is the desktop's end.
 - **A claim and the desktop ask each other directly,** since they run in one process and the kernel's
   table of locks cannot tell their two holds apart: while a claim stands, a hold the desktop had is
   handed to it at once, and the card's use is the claimant's, never counted as the desktop's.
@@ -271,9 +268,8 @@ games and the desktop whenever they like. `CARD_DESKTOP=1` switches the rule on.
 Once a second the arbiter reads who holds the lock and what each holder declares.
 
 - **A holder declaring a service with no place among the occupants** is ended with its process group.
-- **A holder below an occupant that has claimed the card,** a claimant or the desktop, is ended once the
-  claim has stood twenty seconds (`CARD_LOCK_GRACE_S`). A holder declaring nothing counts as below every
-  occupant named.
+- **No holder is ended for keeping the lock.** One below a claim or the desktop is told to give way
+  through its ticket where its turn gives way or rests, and keeps the lock until it lets go.
 - **Each process is ended once,** known by its pid and the clock tick it started at, so a pid the kernel
   hands to a later process is that process's again. The arbiter never ends its own process group, and a
   holder whose declaration cannot be read, gone or another account's, declares nothing.
@@ -318,10 +314,11 @@ sequenceDiagram
   running, so an occupant empties its weights and its allocator's cache off the card first, at the end of
   its work as much as between two stretches of it; process exit is never what frees the card for the
   next.
-- **An answer about a ticket that cannot be delivered gives it back:** where the asker's connection is
-  gone by the time a `POST` or `GET` about a ticket is answered, a held-open answer above all, the
-  arbiter gives that ticket back as a `DELETE` would. No turn is then granted, and no other owner's units
-  unloaded for it, on behalf of an asker that has left.
+- **An asker that leaves gives its ticket back:** a held-open answer watches the asker's connection the
+  whole time it is held, and where that connection closes — the asker stopped asking, or its process
+  ended — or the answer to a `POST` or `GET` about a ticket cannot be delivered, the arbiter gives that
+  ticket back as a `DELETE` would, the moment it sees it. No turn is then granted, and no other owner's
+  units unloaded for it, on behalf of an asker that has left.
 - **The order of the line:** the ticket whose turn it is first, then by the occupants' ranks, which are
   their tiers (「The occupants」), those of one rank together, then by who asked first, and the tickets
   asking only to rest after all of them. A turn is given to the head only while no claim stands and no process holds the lock, and to
@@ -331,16 +328,12 @@ sequenceDiagram
   its holder letting the lock go, a holder that dies letting the lock go with it (「Handing on」). A
   claimant's ticket ends the same way, its agent giving it back once no task of its node is held or
   running.
+- **A turn given stays the ticket's** until its holder takes the lock and lets it go, gives the ticket
+  back, or is found gone, however long it goes untaken: the card waits for it meanwhile. An occupant that
+  asks only as it needs the card finds its turn at its next call, and one that waits after its turn for
+  the card's memory to take its model keeps it while it waits.
 - **`403`, no place:** an occupant answers it as the refusal it is, never as a wait; the turn client run
   as a command ends with code 3 for it.
-- **A turn not taken within five seconds** (`CARD_TURN_TAKE_S`) passes to the next in line once, and the
-  ticket waits again; a claimant's ticket's never does.
-  - **A turn passes only to someone waiting for it.** While no other ticket waits, the turn stays the
-    ticket's however long it goes untaken, so an occupant that asks only as it needs the card finds it at
-    its next call instead of a free card it is held back from.
-  - **A ticket whose turn passed waits only behind a ticket ready to take the card.** Where every ticket
-    in line has just had its turn pass, or the one it passed to has gone, the head is given the turn
-    again at once: a free card is never left ungiven for the five seconds.
 - **How a wait is counted:** each ticket ahead holds the card for as long as its service has typically
   held it in use here, a turn already given less what it has used, ten seconds for a service not yet
   seen, a resting turn its `givesWayMs` or one second, and ten more where a process that asks for no turns
@@ -404,8 +397,8 @@ sequenceDiagram
   place.
 - **The wait counted** for a ticket above such a holder is the holder's `givesWayMs`, not its typical
   hold, so the `Retry-After` an occupant above passes on says how long the holder takes to let go.
-- **Nothing is ended for giving way slowly.** The keeper's rules alone end a holder, and a claim's grace
-  counts from the claim as it always does.
+- **Nothing is ended for giving way slowly.** The keeper ends only a holder with no place among the
+  occupants, and a claim waits for a holder to let go however long that takes.
 - **A ticket asked without `givesWayMs`** holds its turn to its end, unless it rests.
 
 ### Resting
@@ -452,9 +445,9 @@ Each occupant chooses how it waits, inside the contract above:
   call for as long as the call's caller waits. Each call it serves is a request of the queue, and it
   carries on with the next while `nextWaitedMs` keeps it. Between calls it rests with its weights on the card,
   and comes back to them once the card is free after giving way.
-- **A server with a bound of its own** waits its turn within that bound and past it answers its caller
-  that the card stayed taken; a turn it is granted may wait further until the card's free memory takes
-  its model, so a holder that left its memory behind costs a refusal and never an out-of-memory failure.
+- **A server answering calls** waits its turn for as long as its caller waits, and a turn it is granted
+  may wait further, the turn its own meanwhile, until the card's free memory takes its model, so a holder
+  that left its memory behind costs a wait and never an out-of-memory failure.
 - **A batch of GPU work** asks for a turn before each piece and waits for it as long as it takes, holds
   the turn to the piece's end without giving way, and gives the ticket back after it, so another
   occupant's request asked meanwhile is served between two of its pieces. No place for it ends the run,
@@ -462,7 +455,7 @@ Each occupant chooses how it waits, inside the contract above:
 - **A training run** waits for its turn for as long as it takes and gives way while it holds the card.
 - **A lent hold** waits in the queue inside the arbiter as its lend service, saying
   `QUEUED <position> <seconds>` on the hold's connection whenever its place moves, then `READY`; the head
-  waits for it within its own bound for a hold (「Lending」). Once its units are out, it takes its place in
+  waits for it for as long as it keeps the connection (「Lending」). Once its units are out, it takes its place in
   the queue again through its own restore, on the head's `WANT`, and its turn passes to one of its rank at
   its request boundary, on `PASS` (「Lending」).
 - **A pipeline whose stages can pause** asks from each stage with `givesWayMs`, waits for the turn with
@@ -501,20 +494,29 @@ Each occupant chooses how it waits, inside the contract above:
   tensor cache (`CARD_RPC_CACHE`) and the slot pieces' folder (`CARD_SLOT_DIR`). Without them the arbiter
   opens no port on the inner network, and settings that lack any of them stop the arbiter at its start,
   saying which.
-- **A hold not packed beside the lock waits its turn** in the queue as the lend service for as long as
-  the head keeps its connection, saying where it stands (「Who waits how」); a packed hold takes no turn.
+- **A hold waits, and is never refused for a card that is taken.** One asked while another hold stands,
+  or while a claim stands, waits for that to end; one not packed beside the lock then waits its turn in
+  the queue as the lend service, saying where it stands (「Who waits how」), and once its turn is given waits
+  for whoever holds the lock to let go; and the rpc-server it starts is waited for until it answers on its
+  port, or ends, which fails the hold. Each of these waits lasts for as long as the head keeps its
+  connection, and ends the moment it closes. A packed hold takes no turn and no lock.
+- **A head that is gone is seen to be gone:** every connection on the lend address is watched by TCP
+  keep-alive probes, so a head whose machine or network went away without closing ends its connection,
+  and its hold, as a close does.
+- **A hold ends with its connection:** its rpc-server is asked to stop with `SIGTERM` and waited for until
+  it has ended, which empties the card, and the lock is let go then.
 - **The hold's turn follows its engine's use,** read off its units' owner with every read of the units:
-  - **in use** while a use of the card waits at its door, and otherwise until `CARD_LEND_QUIET_S` (10
-    seconds) after the owner's last graph, unless the head has said `QUIET` since;
-  - **resting** once that quiet has passed, as any resting turn does (「Resting」), or at once on `QUIET`,
-    until the owner's next graph or a use at its door puts it back in use;
+  - **in use** from its grant, and again from the owner's next graph or a use of the card waiting at its
+    door, until the head says `QUIET`;
+  - **resting** from the head's `QUIET`, as any resting turn does (「Resting」), until the owner's next graph
+    or a use at its door puts it back in use; no span without a graph rests it;
   - **`QUIET`** is a keyed line of its own, carrying nothing but the key: the head says it when its engine
     is to compute nothing for a while, with no tool, time or reason named. The arbiter reads the units
     first, so a graph computed before it counts as before it, and answers `QUIETED`; on a node with no
     turn standing for the hold it changes nothing;
   - **the count of graphs** the owner has computed stands in the units' own state beside its door
-    (`docs/placement.md`, 「Master and slaves」), so a reader of the node's state sees what the quiet is
-    measured against;
+    (`docs/placement.md`, 「Master and slaves」), so a reader of the node's state sees the graphs a use is
+    told by;
   - **a turn that gives way** (「Giving way」), its `givesWayMs` 3 seconds (`CARD_LEND_GIVES_WAY_S`), since
     its units unload with the engine waiting at its stage: to an occupant above it whenever one asks, and
     to any occupant while it rests. It gives way by having its units unloaded, which the master does for
@@ -604,11 +606,13 @@ node:
    else the card's memory once over), refusing a disk that spins, and says how many extents it lies in;
    a store at another size is made again only where the arbiter answers no unit `evicted` or `mixed`.
 7. Runs the node setup (`node-setup.sh`) detached and waits for `CARD-SETUP-DONE ok` or
-   `CARD-SETUP-DONE failed:<step>`; the setup installs uv into the account where it is missing, builds or
-   repairs the venv and installs the pins, and changes nothing that already stands.
+   `CARD-SETUP-DONE failed:<step>`, or for the setup's process to end without saying either, which stops
+   the install at the setup; the setup installs uv into the account where it is missing, builds or repairs
+   the venv and installs the pins, and changes nothing that already stands.
 8. Installs the unit, reloads the user manager, enables and restarts it.
-9. Waits until the unit's main process stays the same across five seconds, which a unit restarting over
-   and over does not.
+9. Waits until the arbiter's health answers ready (`docs/api.md`, 「Health」). A main process that ends
+   before it does — the unit failed, or waiting to start again — stops the install there, naming the
+   status it ended with.
 
 ### Lending the card
 
@@ -623,10 +627,11 @@ node:
 - `python3 -m unittest discover -s tests/card` on the system Python, which `cargo test` runs as one of its
   tests: the desktop rule, where a claimant's
   agent is found, the claimants and placing the rules declare, the occupants file and its history, the
-  keeper, the queue and its API, resting turns and the tickets asking only to rest, a claimant's tickets
-  and the one claim they make with its containers and its processes on the card, a process of its unit
-  that claims only on the card, containers that never reach the card given back, one added to the rules
-  alone, the lend settings and which
+  keeper, the queue and its API, resting turns and the tickets asking only to rest, a turn kept however
+  long it goes untaken, an asker that leaves giving its ticket back, a claimant's tickets and the one claim
+  they make with its containers and its processes on the card, a process of its unit that claims only on
+  the card, a claim ending at the first look that finds nothing of it, one added to the rules alone, a
+  hold waiting for the hold, the claim and the lock before it, the lend settings and which
   rules the settings switch on, the lent hold's turn following its engine's use and taken back by the
   request at its door or on `WANT`, its turn passed at its request boundary, two occupants of one rank
   taking the card in the order their requests arrived with no measure of time passing a turn, and

@@ -19,11 +19,10 @@ from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
-# A reading a second; the card is the desktop's after five busy readings in a row, and given back after
-# a minute without one.
+# A reading a second; the card is the desktop's after five busy readings in a row, and given back at the first
+# reading that finds it neither in use nor short of room: what the desktop runs lets both go as it ends.
 READ_EVERY_S = float(os.environ.get("DESKTOP_READ_EVERY_S", "1"))
 BUSY_READINGS = int(os.environ.get("DESKTOP_BUSY_READINGS", "5"))
-QUIET_S = float(os.environ.get("DESKTOP_QUIET_S", "60"))
 # A use at or above this share is the desktop's, and so is less free memory than a service needs to put
 # a model and its work beside it.
 BUSY_PERCENT = int(os.environ.get("DESKTOP_BUSY_PERCENT", "20"))
@@ -79,21 +78,16 @@ class Nvml:
 class Desktop:
     """Whether the card is the desktop's, from one reading at a time. A reading taken while a service of
     ours holds the lock says what that service does and is passed over; a card that cannot be read is
-    the desktop's, since its use cannot be told."""
+    the desktop's, since its use cannot be told. The first reading that finds the desktop neither using the
+    card nor short of room gives it back."""
 
-    def __init__(self, busy_percent: int = BUSY_PERCENT, room_mib: int = ROOM_MIB, busy_readings: int = BUSY_READINGS,
-                 quiet_s: float = QUIET_S, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, busy_percent: int = BUSY_PERCENT, room_mib: int = ROOM_MIB,
+                 busy_readings: int = BUSY_READINGS) -> None:
         self.busy_percent = busy_percent
         self.room_mib = room_mib
         self.busy_readings = busy_readings
-        self.quiet_s = quiet_s
-        self.clock = clock
         self.streak = 0
         self.taken = False
-        # When the desktop last took the card, which a holder below it in the node's occupants is given
-        # the grace from.
-        self.since: float | None = None
-        self.quiet_since: float | None = None
         self.why = ""
 
     def busy(self, reading: Reading) -> str | None:
@@ -111,19 +105,12 @@ class Desktop:
         why = "it cannot be read" if reading is None else self.busy(reading)
         if why is not None:
             self.streak += 1
-            self.quiet_since = None
             if not self.taken and (reading is None or self.streak >= self.busy_readings):
                 self.taken = True
-                self.since = self.clock()
                 self.why = why
             return self.taken
         self.streak = 0
-        if self.taken:
-            self.quiet_since = self.quiet_since if self.quiet_since is not None else self.clock()
-            if self.clock() - self.quiet_since >= self.quiet_s:
-                self.taken = False
-                self.since = None
-                self.quiet_since = None
+        self.taken = False
         return self.taken
 
 
@@ -186,7 +173,7 @@ def desk_step(reading: Reading | None, ours_on_card: bool, claimed: bool, deskto
     elif not wanted:
         if desk.fd is not None:
             desk.let_go()
-            say(f"desktop: the desktop has left the card for {desktop.quiet_s:g} s; the lock is let go")
+            say("desktop: the desktop has left the card; the lock is let go")
         turn.drop()
 
 

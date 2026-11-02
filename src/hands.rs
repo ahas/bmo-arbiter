@@ -3,7 +3,6 @@
 //! arbiter's install, and each service's adapter run as the command it is.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::install::{InstallOptions, Timing, install, rival_units_from_env};
 use crate::master::BoxFuture;
@@ -11,11 +10,6 @@ use crate::placement::{AdapterAnswer, Declaration, Hands, NodeRow, Say, declarat
 use crate::reach::{NodeRegistry, NodeShell, bun, run_streaming};
 use crate::rules::{NodeFacts, read_rules, rules_path};
 use crate::verbs::{SLAVE_UNITS, carry_rules, log_push, slave_desktop, with_declared};
-
-// How long each kind of call may take: an install builds environments and carries checkpoints.
-const ARBITER_LIMIT: Duration = Duration::from_secs(45 * 60);
-const ADAPTER_LIMIT: Duration = Duration::from_secs(3 * 60 * 60);
-const ASK_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 const OCCUPANTS: &str = ".config/bmo-card/occupants";
 const NONE_MARK: &str = "__BMO_NO_OCCUPANTS__";
@@ -167,9 +161,8 @@ impl Hands for LiveHands {
         timing: Timing::from_env(),
       };
       let told = |line: String| say(line);
-      let outcome = tokio::time::timeout(ARBITER_LIMIT, install(node, &shell, &options, &told))
-        .await
-        .map_err(|_| format!("the arbiter's install did not end within {} s", ARBITER_LIMIT.as_secs()))?;
+      // The install runs to its end, however long its environment and its checkpoints take to stand.
+      let outcome = install(node, &shell, &options, &told).await;
       if !outcome.ok {
         return Err(format!(
           "the arbiter was not stood: stopped at {}: {}",
@@ -211,16 +204,13 @@ impl Hands for LiveHands {
         argv.extend(["--node".to_owned(), node.to_owned()]);
       }
       argv.extend(["--placed".to_owned(), placed.join(",")]);
-      let limit = if verb == "install" || verb == "uninstall" { ADAPTER_LIMIT } else { ASK_LIMIT };
-      let ran = run_streaming(&argv, Some(Path::new(&declaration.dir)), limit, &|line| {
+      // An adapter runs to its own end, however long its verb takes (docs/api.md, 「Adapters」).
+      let ran = run_streaming(&argv, Some(Path::new(&declaration.dir)), &|line| {
         if !line.trim_start().starts_with('{') {
           say(line.to_owned());
         }
       })
       .await;
-      if let Some(seconds) = ran.timed_out {
-        return AdapterAnswer::refused(format!("{verb} did not end within {seconds} s"));
-      }
       answer_of(&ran.stdout, ran.code, &ran.stderr)
     })
   }

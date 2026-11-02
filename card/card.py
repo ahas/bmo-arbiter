@@ -4,22 +4,22 @@ highest first, as the node's own occupants file lists them, read again whenever 
 
 - Claims (docs/node-arbiter.md, 「Claimants」): an occupant the node's rules declare a claimant takes the card
   outright when a ticket of its own is asked of the hold, a container named with its prefix runs, or a
-  process of its own is on the card, a container that never reaches the card counting only for so long,
-  and nothing else that runs on the node claims; the node's card lock is taken for the claim for as long
-  as it stands, the units of a hold below it are unloaded (or the hold told to YIELD and ended if it is
-  not let go in time), dumps kept in host memory are lowered as far as the claimant needs, and its ticket
+  process of its own is on the card, and nothing else that runs on the node claims; the claim ends at the
+  first look that finds none of them. The node's card lock is taken for the claim as soon as whoever holds
+  it lets go, and kept for as long as the claim stands, the units of a hold below it are unloaded (or the
+  hold told to YIELD), dumps kept in host memory are lowered as far as the claimant needs, and its ticket
   is granted once the lock is held for it.
 - The desktop (`CARD_DESKTOP=1`, desktop.py): the lock held for a person's desktop while it uses the card.
 - The keeper: a holder of the lock that declares, in `BMO_CARD_SERVICE`, a service with no place among the
-  occupants is ended, and one below a claimant or the desktop that has claimed the card is ended past the
-  grace.
+  occupants is ended; no holder is ended for keeping the lock.
 - Lending (the lend settings give `LLM_KEY` and `CARD_ADDRESS`): the card lent to the service the settings
   name, whose engine's head asks for it over the inner network. The head opens one connection and asks for
-  the card with the service key; this takes the node's card lock where the card is not packed beside it,
-  starts llama.cpp's rpc-server on the card (or, for the head's own card, nothing but the control socket
-  its engine is to open) and says READY, and keeps both for as long as that connection stays open. When it
-  closes, however it closes, the rpc-server is stopped, which empties the card, and the lock is let go
-  (docs/node-arbiter.md, 「Lending」).
+  the card with the service key; this waits for any hold or claim standing, its turn and the node's card
+  lock where the card is not packed beside it, starts llama.cpp's rpc-server on the card (or, for the head's
+  own card, nothing but the control socket its engine is to open) and says READY, and keeps both for as
+  long as that connection stays open, TCP keep-alive probes telling a head that is gone. When it closes,
+  however it closes, the rpc-server is stopped and waited for until it ends, which empties the card, and the
+  lock is let go (docs/node-arbiter.md, 「Lending」).
 
 Run: the unit's settings files give every setting; python card.py
 """
@@ -34,8 +34,10 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -53,9 +55,6 @@ import units as units_mod
 # stands.
 HOLD_PORT = 50051
 RPC_PORT = 50052
-# A hold waits this long for the node's lock: a short call of another occupant lets go within it, and
-# a card whose lock stays held past it is left out of the engine's layout rather than waited on.
-LOCK_WAIT_S = float(os.environ.get("CARD_LOCK_WAIT_S", "10"))
 # Where a claimant's unit is looked for, where the rules name one: a system unit on some nodes, the account's
 # own user unit on others (docs/node-arbiter.md, 「Claimants」).
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -77,48 +76,36 @@ LOWER_POLL_S = 2.0
 # How often the occupants file is looked at, and the lock's holders read against it.
 OCCUPANTS_POLL_S = 1.0
 KEEP_POLL_S = 1.0
-# The hold (docs/node-arbiter.md, 「The hold」): the loopback port its API answers on, how long a turn given waits
-# for its lock to be taken, how long an answer is held open for a waiter, how often a waiter in this process
-# asks again, and what a hold is counted at before a service has held the card here.
+# The hold (docs/node-arbiter.md, 「The hold」): the loopback port its API answers on, how long an answer is held
+# open for a waiter before it says the ticket still waits, how often a waiter in this process asks again, and
+# what a hold is counted at before a service has held the card here.
 TURN_PORT = int(os.environ.get("CARD_TURN_PORT", "7439"))
-TURN_TAKE_S = float(os.environ.get("CARD_TURN_TAKE_S", "5"))
 TURN_HOLD_OPEN_S = float(os.environ.get("CARD_TURN_HOLD_OPEN_S", "20"))
-# How often a held answer looks again at a lock that may have freed with nobody giving a ticket back.
+# How often a held answer looks again at a lock that may have freed with nobody giving a ticket back, and at
+# its asker's connection.
 TURN_LOOK_S = 0.25
 TURN_POLL_S = 0.5
 DEFAULT_HOLD_S = 10.0
 # What a ticket waits behind a resting turn that said nothing of how long letting go takes it.
 REST_GIVE_WAY_S = 1.0
-# The lent hold's turn follows its engine's use (docs/node-arbiter.md, 「Lending」): in use while its units' owner has
-# computed within this many seconds or a use waits at its door, resting after; and a turn that gives way, its
-# units unloading in about this long with the engine waiting at its stage.
-LEND_QUIET_S = float(os.environ.get("CARD_LEND_QUIET_S", "10"))
+# The lent hold's turn gives way, its units unloading in about this long with the engine waiting at its stage
+# (docs/node-arbiter.md, 「Lending」).
 LEND_GIVES_WAY_S = float(os.environ.get("CARD_LEND_GIVES_WAY_S", "3"))
 # What a process of a service that puts work on a card declares itself by, in its own environment.
 SERVICE_VARIABLE = b"BMO_CARD_SERVICE"
-# How often a claimant's tickets are looked at, and how long it stays without a ticket, a container or a
-# process on the card before the node is given back.
+# How often a claimant's tickets are looked at, and how often the card and the containers are read for it
+# (docs/node-arbiter.md, 「Claimants」).
 CLAIM_POLL_S = float(os.environ.get("CARD_CLAIM_POLL_S", "0.1"))
-CLAIM_SETTLE_S = float(os.environ.get("CARD_CLAIM_SETTLE_S", "10"))
-# How long a claim kept by containers alone stands with no process of its claimant on the card before those
-# containers stop counting, and how often the card and the containers are read for a claimant
-# (docs/node-arbiter.md, 「Claimants」): a container readying its work does so well within the first, and one
-# left running idle never ends.
-CLAIM_IDLE_S = float(os.environ.get("CARD_CLAIM_IDLE_S", "600"))
 CLAIM_CARD_S = 2.0
-# How long a hold told to YIELD has to let go before its rpc-server is stopped under it: the head's
-# save of the slot takes a fraction of a second.
-YIELD_WAIT_S = float(os.environ.get("CARD_YIELD_WAIT_S", "5"))
-# How long another occupant may keep the card lock once a claim began before it is ended: a short call
-# lets go within it; a long run does not, and is resumed by its own contract once the node is given back.
-LOCK_GRACE_S = float(os.environ.get("CARD_LOCK_GRACE_S", "20"))
 # The container runtimes asked for the running containers, a claimant's named by its prefix.
 RUNTIMES = frozenset({"docker", "podman"})
 # A container's full id as it stands in the cgroup path of a process inside it.
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
-START_WAIT_S = 30.0
-STOP_WAIT_S = 10.0
-ASK_WAIT_S = 10.0
+# The TCP keep-alive probes every connection on the lend address is watched by, which tell a head gone without
+# closing: the seconds of silence before the first, between two, and how many go unanswered.
+KEEP_ALIVE_IDLE_S = 10
+KEEP_ALIVE_EVERY_S = 5
+KEEP_ALIVE_PROBES = 3
 POLL_S = 0.05
 CHUNK = 1 << 20
 
@@ -130,6 +117,10 @@ def say(line: str) -> None:
 @dataclass
 class Refused(Exception):
     answer: str
+
+
+class AskerGone(Exception):
+    """The asker of a held-open answer closed its connection while the answer was held, its ticket given back."""
 
 
 @dataclass(frozen=True)
@@ -167,7 +158,7 @@ def container_names() -> dict[str, str]:
             continue
         try:
             listed = subprocess.run([runtime, "ps", "--no-trunc", "--format", "{{.ID}} {{.Names}}"], capture_output=True,
-                                    text=True, timeout=5, stdin=subprocess.DEVNULL)
+                                    text=True, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError):
             continue
         for line in listed.stdout.splitlines():
@@ -440,51 +431,35 @@ class Occupants:
 
 class Keeper:
     """The order kept on the lock's holders once a second. A holder declaring a service the node has no
-    place for is ended at once; a holder below an occupant that has claimed the card — a claimant, the
-    desktop — is ended once the claim has stood the grace. A holder declaring nothing stands below every
-    occupant named. Each process is ended once, known by its pid and the tick it started at, so a pid the
-    kernel hands to a later process is that process's again."""
+    place for is ended at once; no holder is ended for keeping the lock, a claim or the desktop waiting until
+    it lets go. A holder declaring nothing stands below every occupant named and is never ended. Each process
+    is ended once, known by its pid and the tick it started at, so a pid the kernel hands to a later process
+    is that process's again."""
 
-    def __init__(self, occupants: Occupants, lock: Path, claims: Callable[[], list[tuple[str, float]]],
-                 grace_s: float = LOCK_GRACE_S, poll_s: float = KEEP_POLL_S,
+    def __init__(self, occupants: Occupants, lock: Path, poll_s: float = KEEP_POLL_S,
                  holders: Callable[[Path, int], list[int]] | None = None,
                  declared: Callable[[int], str | None] = declared_service,
                  end: Callable[[int, str, str], bool] = end_group,
-                 started: Callable[[int], int | None] | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 started: Callable[[int], int | None] | None = None) -> None:
         self.occupants = occupants
         self.lock = lock
-        self.claims = claims
-        self.grace_s = grace_s
         self.poll_s = poll_s
         self.holders = holders or lock_holders
         self.declared = declared
         self.end = end
         self.started = started or start_tick
-        self.clock = clock
         self.ended: set[tuple[int, int | None]] = set()
 
     def step(self) -> list[int]:
         """One reading of the lock's holders; the processes ended by it."""
-        claims = [(name, since) for name, since in self.claims() if self.occupants.present(name)]
         ended = []
         for pid in self.holders(self.lock, os.getpid()):
             service = self.declared(pid)
             which = (pid, self.started(pid))
-            if which in self.ended:
-                continue
-            said = None
-            if service is not None and self.occupants.rank(service) is None:
-                said = f"occupants: ended {{}} of {service}, which has no place on this node"
-            else:
-                for name, since in claims:
-                    if self.clock() - since >= self.grace_s and self.occupants.outranks(name, service):
-                        said = f"{name}: ended {{}} of {service or 'no declared service'}, which kept the card lock past {self.grace_s:g} s"
-                        break
-            if said is None:
+            if which in self.ended or service is None or self.occupants.rank(service) is not None:
                 continue
             self.ended.add(which)
-            if self.end(pid, said, "occupants"):
+            if self.end(pid, f"occupants: ended {{}} of {service}, which has no place on this node", "occupants"):
                 ended.append(pid)
         return ended
 
@@ -504,8 +479,6 @@ class Ticket:
     granted: float | None = None
     # Whether its holder has been seen holding the lock since its turn came: letting it go then ends the turn.
     took: bool = False
-    # When a turn given to it last passed on untaken, which lets the next in line before it once.
-    passed: float | None = None
     # A ticket of this process's own — the desktop's, a lent hold's — which takes the lock at once when
     # its turn comes and is given back by this process, never dropped for silence.
     local: bool = False
@@ -529,8 +502,8 @@ class Turns:
     queue, by the occupants' order and then by who asked first, is given its turn once no claim stands and
     nothing holds the lock; it then takes the lock itself and gives the ticket back once it has let go. No
     silence drops a ticket: it stands until it is given back, its asker is found gone, or its holder lets
-    the lock go; a turn not taken up within its take is passed on where another ticket waits, and kept
-    where none does. How long a wait will be is counted from how long each service has held the card before.
+    the lock go; a turn given stays its ticket's however long it goes untaken. How long a wait will be is
+    counted from how long each service has held the card before.
 
     The queue is one of requests (docs/node-arbiter.md, 「One queue of requests」): a ticket stands by the arrival
     of the request it is for, and a holder asks after each request whether its next one still stands
@@ -550,9 +523,7 @@ class Turns:
 
     def __init__(self, occupants: Occupants, lock: Path, claimed: Callable[[], str | None],
                  holders: Callable[[Path, int], list[int]] | None = None, clock: Callable[[], float] = time.monotonic,
-                 take_s: float = TURN_TAKE_S,
-                 claim_holds: Callable[[], bool] = lambda: False, claim_wait_s: float = LOCK_GRACE_S,
-                 hold_open_s: float = TURN_HOLD_OPEN_S,
+                 claim_holds: Callable[[], bool] = lambda: False, hold_open_s: float = TURN_HOLD_OPEN_S,
                  waiters: Callable[[Path, int], list[int]] | None = None,
                  declared: Callable[[int], str | None] = declared_service) -> None:
         self.occupants = occupants
@@ -560,14 +531,11 @@ class Turns:
         # The claimant whose claim stands, or None.
         self.claimed = claimed
         self.claim_holds = claim_holds
-        # The longest wait a claimant's ticket is told: the keeper ends a holder below it within it.
-        self.claim_wait_s = claim_wait_s
         self.holders = holders or lock_holders
         # The processes waiting for the lock: a service that asks for no turn, asking for the card.
         self.waiters = waiters or lock_waiters
         self.declared = declared
         self.clock = clock
-        self.take_s = take_s
         self.hold_open_s = hold_open_s
         self.tickets: dict[int, Ticket] = {}
         self.typical: dict[str, float] = {}
@@ -587,10 +555,9 @@ class Turns:
         return sorted(self.tickets.values(), key=where)
 
     def _tidy(self) -> None:
-        """A turn whose holder took the lock and let it go with no ticket given back — a holder that died — over,
-        and a turn given and never taken passed on where another ticket waits. A ticket waiting stays however
-        silent (docs/node-arbiter.md, 「The hold」)."""
-        now = self.clock()
+        """A turn whose holder took the lock and let it go with no ticket given back — a holder that died — over.
+        A ticket waiting, and a turn given and not yet taken, stay however silent (docs/node-arbiter.md, 「The
+        hold」)."""
         held = bool(self.holders(self.lock, os.getpid()))
         for ticket in list(self.tickets.values()):
             # This process's own tickets, and a claimant's, whose lock is ours, end only by being given back.
@@ -600,19 +567,11 @@ class Turns:
                 ticket.took = True
             elif ticket.took:
                 self._end(ticket)
-            elif now - ticket.granted > self.take_s and self._others_wait(ticket):
-                # Given its turn and never took the lock: its turn passes on, to the next in line before it.
-                ticket.granted = None
-                ticket.passed = now
 
     def _asking(self) -> list[Ticket]:
         """The tickets waiting for a turn for a request, in the queue's order: those asked only to rest wait
         for nobody."""
         return [ticket for ticket in self._order() if ticket.granted is None and not ticket.rest]
-
-    def _others_wait(self, ticket: Ticket) -> bool:
-        """Whether a ticket other than this one waits for a turn, which an untaken turn could pass to."""
-        return any(other is not ticket and other.granted is None and not other.rest for other in self.tickets.values())
 
     def _grant(self) -> None:
         claiming = [ticket for ticket in self.tickets.values() if self.occupants.claims_by_ticket(ticket.service)]
@@ -630,10 +589,8 @@ class Turns:
         now = self.clock()
         # A ticket asked only to rest has the card only where nobody asks for it for a request.
         order = self._asking() or self._order()
-        # A ticket whose turn just passed lets one ready to take the card before it, and nobody else.
-        ready = [ticket for ticket in order if ticket.passed is None or now - ticket.passed > self.take_s] or order
-        if ready:
-            granted = ready[0]
+        if order:
+            granted = order[0]
             granted.granted = now
             if granted.rest:
                 granted.resting, granted.rested_at, granted.busy_since = True, now, None
@@ -657,11 +614,13 @@ class Turns:
         mine = (self._rank(ticket), self.clock() - max(0.0, next_waited_s))
         return all((self._rank(other), other.asked) >= mine for other in waiting)
 
-    def _held_open(self, ticket: Ticket, wait_s: float, holding: bool = False) -> None:
+    def _held_open(self, ticket: Ticket, wait_s: float, holding: bool = False,
+                   gone: Callable[[], bool] | None = None) -> None:
         """The answer held until there is news for it or the wait passes: for a waiting ticket its turn given,
         looking again at a lock that may have freed with nobody saying so; for a turn that gives way and was
         already `holding` when asked after, the moment it is to give way (docs/node-arbiter.md, 「Handing on」).
-        Called under the guard, which the wait gives up meanwhile."""
+        An asker whose connection closes meanwhile (`gone`) gives its ticket back there and then, and hears
+        AskerGone. Called under the guard, which the wait gives up meanwhile."""
         deadline = time.monotonic() + min(max(0.0, wait_s), self.hold_open_s)
 
         def nothing_new() -> bool:
@@ -676,6 +635,11 @@ class Turns:
             if left <= 0:
                 return
             self.changed.wait(min(TURN_LOOK_S, left))
+            if gone is not None and gone() and self.tickets.get(ticket.id) is ticket:
+                self._end(ticket)
+                self._grant()
+                self.changed.notify_all()
+                raise AskerGone()
             self._tidy()
             self._grant()
 
@@ -732,8 +696,6 @@ class Turns:
         # A holder of the lock that asked for no turn holds it for as long as a hold is counted at.
         if not any(other.granted is not None for other in self.tickets.values()) and self.holders(self.lock, os.getpid()):
             wait += DEFAULT_HOLD_S
-        if self.occupants.claims_by_ticket(ticket.service):
-            wait = min(wait, self.claim_wait_s)
         return max(1.0, round(wait, 1))
 
     def answer(self, ticket: Ticket) -> dict:
@@ -753,10 +715,12 @@ class Turns:
         return self.last_id
 
     def ask(self, service: str, local: bool = False, need: dict | None = None, ref: str | None = None,
-            gives_way_s: float | None = None, waited_s: float = 0.0, wait_s: float = 0.0, rest: bool = False) -> dict | None:
+            gives_way_s: float | None = None, waited_s: float = 0.0, wait_s: float = 0.0, rest: bool = False,
+            gone: Callable[[], bool] | None = None) -> dict | None:
         """A new ticket for a service, standing by when its request arrived, `waited_s` ago, or asked only to
-        rest on a free card (`rest`); answered at once, or once its turn is given within `wait_s`. None where
-        the service has no place on the node."""
+        rest on a free card (`rest`); answered at once, or once its turn is given within `wait_s`, given back
+        where its asker leaves meanwhile (`gone`, AskerGone). None where the service has no place on the
+        node."""
         if self.occupants.rank(service) is None:
             return None
         with self.guard:
@@ -768,14 +732,15 @@ class Turns:
             self.changed.notify_all()
             self._tidy()
             self._grant()
-            self._held_open(ticket, wait_s)
+            self._held_open(ticket, wait_s, gone=gone)
             return self.answer(ticket)
 
-    def again(self, ticket_id: int, wait_s: float = 0.0, next_waited_s: float | None = None, rest: bool = False) -> dict | None:
+    def again(self, ticket_id: int, wait_s: float = 0.0, next_waited_s: float | None = None, rest: bool = False,
+              gone: Callable[[], bool] | None = None) -> dict | None:
         """A ticket asked after; None where it is no longer held. A waiting one may be answered once
-        its turn is given within `wait_s`; a turn asked with its next request's wait is told whether it keeps
-        the card for that request, which ends its rest where it does; a turn asked with `rest` rests from
-        then on."""
+        its turn is given within `wait_s`, given back where its asker leaves meanwhile (`gone`, AskerGone); a
+        turn asked with its next request's wait is told whether it keeps the card for that request, which ends
+        its rest where it does; a turn asked with `rest` rests from then on."""
         with self.guard:
             self._tidy()
             ticket = self.tickets.get(ticket_id)
@@ -786,7 +751,7 @@ class Turns:
             if rest and holding and not ticket.resting:
                 ticket.resting, ticket.rested_at = True, now
             self._grant()
-            self._held_open(ticket, wait_s, holding)
+            self._held_open(ticket, wait_s, holding, gone)
             # Given back or ended while its answer was held open: no ticket to answer for any more.
             if self.tickets.get(ticket_id) is not ticket:
                 return None
@@ -1030,8 +995,7 @@ class UnitsApi:
             return HTTPStatus.SERVICE_UNAVAILABLE, refusal("not-ready", "the arbiter is starting")
         verb = "evict" if to == units_mod.EVICTED else "restore"
         try:
-            outcomes = asyncio.run_coroutine_threadsafe(self.move(verb, [name], reason, not keeps_turn),
-                                                        self.loop).result(timeout=300)
+            outcomes = asyncio.run_coroutine_threadsafe(self.move(verb, [name], reason, not keeps_turn), self.loop).result()
         except units_mod.NoRoom as why:
             return HTTPStatus.CONFLICT, refusal("conflict", f"no room: {why}")
         except Exception as fault:  # noqa: BLE001 - said to the asker rather than ending the thread
@@ -1159,6 +1123,19 @@ def turns_handler(turns: Turns, units_api: UnitsApi | None = None, version: str 
         def _no_route(self) -> None:
             self._refuse(HTTPStatus.NOT_FOUND, "no-route", "no route answers this method and path")
 
+        def _gone(self) -> bool:
+            """Whether the asker has closed its end of the connection, so a held-open answer reaches nobody:
+            its socket reads as at its end. A request is read whole before it is answered, and nothing comes
+            after it on a connection that ends with its answer."""
+            try:
+                readable, _, _ = select.select([self.connection], [], [], 0)
+                return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+            except OSError:
+                return True
+
+        def _left(self, service: str) -> None:
+            say(f"turns: {service} left while its answer was held open; its ticket is given back")
+
         def _ticket_answer(self, answered: dict, status: int, retry_after: int | None = None) -> None:
             try:
                 self._send(status, answered, retry_after)
@@ -1186,7 +1163,10 @@ def turns_handler(turns: Turns, units_api: UnitsApi | None = None, version: str 
                     next_waited_s = asked_ms(query.get("nextWaitedMs", [None])[0], "nextWaitedMs")
                 except ValueError as why:
                     return self._refuse(HTTPStatus.BAD_REQUEST, "bad-request", str(why))
-                answered = turns.again(ticket_id, wait_s=wait_s or 0.0, next_waited_s=next_waited_s)
+                try:
+                    answered = turns.again(ticket_id, wait_s=wait_s or 0.0, next_waited_s=next_waited_s, gone=self._gone)
+                except AskerGone:
+                    return self._left(f"the asker of ticket {ticket_id}")
                 if answered is None:
                     return self._refuse(HTTPStatus.NOT_FOUND, "not-found", f"no ticket {ticket_id} is held; ask for a new one")
                 return self._ticket_answer(answered, HTTPStatus.OK)
@@ -1216,8 +1196,11 @@ def turns_handler(turns: Turns, units_api: UnitsApi | None = None, version: str 
                 return self._refuse(HTTPStatus.BAD_REQUEST, "bad-request",
                                     f"a body of serviceName and need, ref, givesWayMs, waitedMs, waitMs and rest is wanted: {why}")
             ref = None if body.get("ref") is None else str(body["ref"])
-            answered = turns.ask(service, need=need, ref=ref, gives_way_s=gives_way_s, waited_s=waited_s or 0.0,
-                                 wait_s=wait_s or 0.0, rest=rest)
+            try:
+                answered = turns.ask(service, need=need, ref=ref, gives_way_s=gives_way_s, waited_s=waited_s or 0.0,
+                                     wait_s=wait_s or 0.0, rest=rest, gone=self._gone)
+            except AskerGone:
+                return self._left(service)
             if answered is None:
                 return self._refuse(HTTPStatus.UNPROCESSABLE_ENTITY, "no-place", f"{service} has no place among this node's occupants")
             if answered["turn"]:
@@ -1285,40 +1268,33 @@ class ClaimWatch:
     """Every claimant's claim on the card, read every poll from its tickets standing (`asked`), and every two
     seconds from its containers running and its processes on the card, those in its containers or, where
     the rules name its unit, in that unit's cgroup: `started` is called, with the claimant and what was
-    seen, when any appears, and `ended` once the node has held none for the settle time. A container
-    running under a granted ticket is the same claim. A claim kept by containers alone with nothing of its
-    claimant on the card for the idle time has those containers stop counting, each by its name, until a
-    process of it comes onto the card. Nothing else that runs on the node claims. The claimants are the
+    seen, when any appears, and `ended` at the first poll that finds none of them. A container running under
+    a granted ticket is the same claim. Nothing else that runs on the node claims. The claimants are the
     rules' as they stand at each poll, so one added to the rules is watched within the poll and needs no
-    restart."""
+    restart. The runtimes and the card are read on a thread of their own, so one slow to answer holds up its
+    own reading alone, the claim standing as last read meanwhile."""
 
     def __init__(self, claimants: Callable[[], list[units_mod.Claimant]], started: Callable[[str, str], None],
-                 ended: Callable[[str], None], poll_s: float = CLAIM_POLL_S, settle_s: float = CLAIM_SETTLE_S,
+                 ended: Callable[[str], None], poll_s: float = CLAIM_POLL_S,
                  containers: Callable[[str], list[str]] = claim_containers,
                  asked: Callable[[str], bool] = lambda name: False,
                  cgroup: Callable[[str], Path | None] = claim_cgroup,
                  on_card: Callable[[Path | None, str | None], list[int] | None] = lambda cgroup, containers: None,
-                 idle_s: float = CLAIM_IDLE_S, card_every_s: float = CLAIM_CARD_S) -> None:
+                 card_every_s: float = CLAIM_CARD_S) -> None:
         self.claimants = claimants
         self.started = started
         self.ended = ended
         self.poll_s = poll_s
-        self.settle_s = settle_s
         self.containers = containers
         self.asked = asked
         self.cgroup = cgroup
         self.on_card = on_card
-        self.idle_s = idle_s
         self.card_every_s = card_every_s
         self.present: set[str] = set()
-        self.quiet_since: dict[str, float] = {}
         self.where: dict[str, Path] = {}
         self.missing: set[str] = set()
-        # The card and the containers as last read for each claimant, and when; since when a claim has had
-        # nothing on the card; and the containers that no longer count.
+        # The card and the containers as last read for each claimant, and when.
         self.card_read: dict[str, tuple[float, list[int] | None, list[str]]] = {}
-        self.card_since: dict[str, float] = {}
-        self.not_counted: dict[str, set[str]] = {}
 
     def _unit(self, claimant: units_mod.Claimant) -> Path | None:
         """The cgroup of the claimant's unit where the rules name one and it is there, said once where not."""
@@ -1337,70 +1313,64 @@ class ClaimWatch:
             self.missing.discard(name)
         return cgroup
 
-    def _read(self, claimant: units_mod.Claimant, now: float) -> tuple[list[int] | None, list[str]]:
-        """The claimant's processes on the card, None where the card cannot be read, and its containers
-        running, as read at most every two seconds."""
-        read = self.card_read.get(claimant.name)
-        if read is None or now - read[0] >= self.card_every_s:
+    def read(self, now: float) -> None:
+        """The card and the containers read for every claimant whose last reading is two seconds old: its
+        processes on the card, None where the card cannot be read, and its containers running."""
+        for claimant in self.claimants():
+            last = self.card_read.get(claimant.name)
+            if last is not None and now - last[0] < self.card_every_s:
+                continue
             unit = self._unit(claimant)
             if unit is None and not claimant.containers:
-                read = (now, [], [])
+                self.card_read[claimant.name] = (now, [], [])
             else:
-                read = (now, self.on_card(unit, claimant.containers),
-                        self.containers(claimant.containers) if claimant.containers else [])
-            self.card_read[claimant.name] = read
-        return read[1], read[2]
+                self.card_read[claimant.name] = (now, self.on_card(unit, claimant.containers),
+                                                 self.containers(claimant.containers) if claimant.containers else [])
 
-    def seen(self, claimant: units_mod.Claimant, now: float) -> str | None:
-        """What of the claimant claims the card now, said for the journal, or None."""
-        name = claimant.name
-        if claimant.tickets and self.asked(name):
-            self.card_since[name] = now
+    def seen(self, claimant: units_mod.Claimant) -> str | None:
+        """What of the claimant claims the card now, said for the journal, or None: a ticket standing, else
+        the card and the containers as last read."""
+        if claimant.tickets and self.asked(claimant.name):
             return "a ticket was asked for"
-        on_card, running = self._read(claimant, now)
+        _, on_card, running = self.card_read.get(claimant.name, (0.0, None, []))
         if on_card:
-            self.card_since[name] = now
             return f"a process of it is on the card (process {on_card[0]})"
-        # A container no longer counted is forgotten once it has gone.
-        stopped = self.not_counted.setdefault(name, set()) & set(running)
-        self.not_counted[name] = stopped
-        counted = [one for one in running if one not in stopped]
-        if not counted:
-            return None
-        if name in self.present and on_card is not None and now - self.card_since.setdefault(name, now) >= self.idle_s:
-            stopped.update(counted)
-            say(f"{name}: nothing of it on the card for {now - self.card_since[name]:.0f} s; its containers "
-                f"({', '.join(counted)}) no longer count until one comes onto the card")
-            return None
-        return f"a container of it runs ({counted[0]})"
+        if running:
+            return f"a container of it runs ({running[0]})"
+        return None
 
-    def step(self, now: float) -> None:
+    def weigh(self) -> None:
+        """Each claim begun where something of its claimant is seen, and ended where nothing is."""
         claimants = self.claimants()
         for claimant in claimants:
-            found = self.seen(claimant, now)
-            if found:
-                self.quiet_since.pop(claimant.name, None)
-                if claimant.name not in self.present:
-                    self.present.add(claimant.name)
-                    self.card_since[claimant.name] = now
-                    self.started(claimant.name, found)
-            elif claimant.name in self.present:
-                quiet = self.quiet_since.setdefault(claimant.name, now)
-                if now - quiet >= self.settle_s:
-                    self._end(claimant.name)
+            found = self.seen(claimant)
+            if found and claimant.name not in self.present:
+                self.present.add(claimant.name)
+                self.started(claimant.name, found)
+            elif not found and claimant.name in self.present:
+                self._end(claimant.name)
         # A claimant the rules no longer declare claims nothing.
         for name in self.present - {claimant.name for claimant in claimants}:
             self._end(name)
 
+    def step(self, now: float) -> None:
+        """One poll: the readings due taken, then the claims weighed."""
+        self.read(now)
+        self.weigh()
+
     def _end(self, name: str) -> None:
         self.present.discard(name)
-        self.quiet_since.pop(name, None)
-        self.card_since.pop(name, None)
         self.ended(name)
 
     async def run(self) -> None:
+        reading: asyncio.Future[None] | None = None
         while True:
-            self.step(time.monotonic())
+            if reading is None or reading.done():
+                if reading is not None:
+                    # A reading that failed fails the rule, as one on the loop would.
+                    reading.result()
+                reading = asyncio.ensure_future(asyncio.to_thread(self.read, time.monotonic()))
+            self.weigh()
             await asyncio.sleep(self.poll_s)
 
 
@@ -1409,8 +1379,7 @@ class Card:
     on while a claim stands, and the node's rules as pushed: its claimants and where its units go out to."""
 
     def __init__(self, key: str, address: str, lock_path: Path | None, rpc_argv: list[str], pieces: Path,
-                 lock_wait_s: float = LOCK_WAIT_S, start_wait_s: float = START_WAIT_S, rpc_port: int = RPC_PORT,
-                 packed: bool = False, yield_wait_s: float = YIELD_WAIT_S, stop_wait_s: float = STOP_WAIT_S,
+                 rpc_port: int = RPC_PORT, packed: bool = False,
                  claim_counts: Callable[[str], bool] = lambda name: True,
                  claim_yields: Callable[[str], bool] = lambda name: True) -> None:
         self.key = key.encode()
@@ -1418,13 +1387,9 @@ class Card:
         self.lock_path = lock_path
         self.rpc_argv = rpc_argv
         self.pieces = pieces
-        self.lock_wait_s = lock_wait_s
-        self.start_wait_s = start_wait_s
         self.rpc_port = rpc_port
         # A packed card's hold stands beside the node's lock rather than taking it.
         self.packed = packed
-        self.yield_wait_s = yield_wait_s
-        self.stop_wait_s = stop_wait_s
         # Whether a claimant has a place among the node's occupants at all, and whether it comes before the
         # service the card is lent to, read at the moment its claim begins.
         self.claim_counts = claim_counts
@@ -1446,13 +1411,14 @@ class Card:
         self.lowering: asyncio.Task[None] | None = None
         # Whether the dumps kept in host memory have been lowered as far as the claim standing needs.
         self.ram_ready = True
-        self.told_to_yield = asyncio.Event()
-        # The process group a local hold named as the one putting work on the card, ended with the hold
-        # when it does not let go of a YIELD in time.
+        # The claimant a hold not yet READY is to be told to YIELD for once it is.
+        self.yield_owed: str | None = None
+        # The process group a local hold named as the one putting work on the card, whose processes on the
+        # card are known as the lend service's.
         self.uses: int | None = None
         # The rpc-server the standing lent hold started, so its memory on the card is known as the lend
-        # service's.
-        self.server_pid: int | None = None
+        # service's, stopped when the hold ends.
+        self.server: asyncio.subprocess.Process | None = None
         # The node's lock as the standing hold took it, let go while its units are out and taken again
         # before they come back (docs/placement.md, 「Unloading and loading a unit」).
         self.hold_lock: int | None = None
@@ -1460,10 +1426,10 @@ class Card:
         self.units: units_mod.Units | None = None
         self.moving = asyncio.Lock()
         self.coming_back: asyncio.Task[None] | None = None
-        # The graphs the standing hold's owner had computed at the last read, and when it last computed, which
-        # its turn's use follows.
+        # The graphs the standing hold's owner had computed at the last read, and whether the head has said
+        # QUIET since its last use, which its turn's use follows.
         self.graphs_seen = 0
-        self.used_at = 0.0
+        self.quieted = False
         # The owners besides the borrower, whose dumps count with the lent ones and are lowered for a claim.
         self.owners: units_mod.Owners | None = None
         # Where the owner of a hold's units opens its control socket: the rpc-server this starts, or the
@@ -1507,7 +1473,7 @@ class Card:
             return declared
         if self.lent_to == ANY:
             return None
-        if pid == self.server_pid:
+        if self.server is not None and pid == self.server.pid:
             return self.lent_to
         try:
             return self.lent_to if self.uses is not None and os.getpgid(pid) == self.uses else None
@@ -1534,10 +1500,12 @@ class Card:
         graph; `WANT <key> <seconds>` asks the standing hold's units back for a request that has waited those
         seconds, and `UNWANT <key>` takes the ask back; `DROP <key> <file>…` removes the pieces of those slot
         files; `FETCH <key> <file>` sends them; `SPACE <key> [<file>]` says how many bytes the pieces' folder
-        has free and in all, and how many the named file's pieces take."""
+        has free and in all, and how many the named file's pieces take. The connection is watched by TCP
+        keep-alive probes, so a head gone without closing ends it as a close does."""
+        keep_alive(writer.get_extra_info("socket"))
         try:
-            asked = await asyncio.wait_for(reader.readline(), ASK_WAIT_S)
-        except (asyncio.TimeoutError, ConnectionError):
+            asked = await reader.readline()
+        except ConnectionError:
             writer.close()
             return
         verb, _, rest = asked.strip().partition(b" ")
@@ -1585,44 +1553,44 @@ class Card:
         return "FREE"
 
     async def _hold(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, local: bool) -> None:
-        if self.claims:
-            await self._answer(writer, f"CLAIMED {self.claimed()} claims this node")
+        """The card held for the head for as long as its connection stays open. A hold or a claim standing is
+        waited for first, then the hold's turn and the lock, then its rpc-server, each for as long as the head
+        keeps the connection: a hold is never refused for a card that is taken (docs/node-arbiter.md,
+        「Lending」)."""
+        try:
+            await self._unless_gone(reader, self._hold_free())
+        except ConnectionError:
+            say("card: the head left while another hold or a claim stood")
+            writer.close()
             return
-        if self.held:
-            await self._answer(writer, "BUSY the card is already held")
-            return
-        self.held = True
-        self.told_to_yield = asyncio.Event()
+        self.yield_owed = None
         self.uses = None
-        lock_fd: int | None = None
-        proc: asyncio.subprocess.Process | None = None
         began = time.monotonic()
         try:
-            lock_fd = await self._take_lock(reader, writer)
-            self.hold_lock = lock_fd
-            proc = None if local else await self._start()
-            self.server_pid = None if proc is None else proc.pid
-            if self.claims:
-                raise Refused(f"CLAIMED {self.claimed()} began a claim on this node")
+            await self._unless_gone(reader, self._ready(writer, local))
             # The hold is the one a claim's YIELD goes to from the moment READY is written, so a claim that
-            # begins while READY drains is still told, after it. A local hold is told where its engine is to
-            # open the control socket its units are unloaded through, where this node keeps a dump store.
+            # begins while READY drains is still told, after it, and one that began before it is told right
+            # after it. A local hold is told where its engine is to open the control socket its units are
+            # unloaded through, where this node keeps a dump store.
             self.holder = writer
             if local and self.units is not None and self.control is not None:
                 self.control.unlink(missing_ok=True)
                 writer.write(f"READY {self.control}\n".encode())
             else:
                 writer.write(b"READY\n")
+            if self.yield_owed is not None:
+                writer.write(f"YIELD {self.yield_owed}\n".encode())
+                self.yield_owed = None
             await writer.drain()
             say(f"card held{' for the head' if local else ''}: ready in {(time.monotonic() - began) * 1000:.0f} ms")
-            await self._until_let_go(reader, writer, proc)
+            await self._until_let_go(reader, writer)
         except Refused as refused:
             await self._answer(writer, refused.answer)
         except (ConnectionError, OSError) as fault:
             say(f"card: the hold ended on {type(fault).__name__}: {fault}")
         finally:
             self.holder = None
-            self.server_pid = None
+            self.yield_owed = None
             if self.coming_back is not None:
                 self.coming_back.cancel()
                 self.coming_back = None
@@ -1630,7 +1598,8 @@ class Card:
                 self.wanting.cancel()
                 self.wanting = None
             self.wanted_at = None
-            await self._stop(proc)
+            await self._stop(self.server)
+            self.server = None
             if self.units is not None:
                 await self.units.refresh()
             if self.hold_lock is not None:
@@ -1642,6 +1611,43 @@ class Card:
             self.held = False
             writer.close()
             say(f"card let go after {time.monotonic() - began:.1f} s")
+
+    @staticmethod
+    async def _unless_gone(reader: asyncio.StreamReader, work: Awaitable[None]) -> None:
+        """`work` waited for for as long as the head keeps its connection, and cancelled with ConnectionError the
+        moment the head closes it. The head says nothing before READY, so its connection reads only as
+        closed."""
+        waiting = asyncio.ensure_future(work)
+        gone = asyncio.ensure_future(reader.read(1))
+        try:
+            done, _ = await asyncio.wait({waiting, gone}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            waiting.cancel()
+            gone.cancel()
+            raise
+        if waiting in done:
+            gone.cancel()
+            await asyncio.gather(gone, return_exceptions=True)
+            waiting.result()
+            return
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        raise ConnectionError("the head left while the hold waited")
+
+    async def _hold_free(self) -> None:
+        """Until no other hold stands and no claim does, then the card held for this one in the same step, so two
+        heads waiting never both find it free: one hold at a time, and none while a claim stands."""
+        while self.held or self.claims:
+            await asyncio.sleep(POLL_S)
+        self.held = True
+
+    async def _ready(self, writer: asyncio.StreamWriter, local: bool) -> None:
+        """The hold's turn and the node's lock taken where it is not packed beside it, then its rpc-server
+        started and answering where it is not local. Each is kept as the hold's own as soon as it is had, so a
+        hold that ends at any point lets go of what it took."""
+        await self._take_lock(writer)
+        if not local:
+            await self._start()
 
     def drop(self, files: list[str]) -> int:
         """The pieces of the named slot files removed: each piece is its file's name, a dot and its
@@ -1688,12 +1694,12 @@ class Card:
             pass
         writer.close()
 
-    async def _take_lock(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int | None:
-        """The node's lock for a hold that is not packed beside it. Where the node keeps a hold queue, the
-        hold waits its turn there for as long as the head keeps the connection, saying `QUEUED <position>
-        <seconds>` whenever its place moves, before the lock is taken."""
+    async def _take_lock(self, writer: asyncio.StreamWriter) -> None:
+        """The node's lock for a hold that is not packed beside it, kept as the hold's own once taken. Where the
+        node keeps a hold queue, the hold waits its turn there first, saying `QUEUED <position> <seconds>`
+        whenever its place moves; then it waits for whoever holds the lock to let go."""
         if self.lock_path is None or self.packed:
-            return None
+            return
         if self.turns is not None:
             shown: int | None = None
 
@@ -1704,96 +1710,62 @@ class Card:
                     writer.write(f"QUEUED {answer['position']} {answer['waitMs'] / 1000:g}\n".encode())
                     await writer.drain()
 
-            waiting = asyncio.ensure_future(self.turns.wait(self.lent_to, queued, gives_way_s=LEND_GIVES_WAY_S))
-            gone = asyncio.ensure_future(reader.read(1))
-            done, _ = await asyncio.wait({waiting, gone}, return_when=asyncio.FIRST_COMPLETED)
-            if waiting not in done:
-                waiting.cancel()
-                await asyncio.gather(waiting, return_exceptions=True)
-                raise ConnectionError("the head left while the hold waited its turn")
-            gone.cancel()
-            self.ticket = waiting.result()
+            self.ticket = await self.turns.wait(self.lent_to, queued, gives_way_s=LEND_GIVES_WAY_S)
             if self.ticket is None:
                 raise Refused(f"REFUSED {self.lent_to} has no place among this node's occupants")
-            self.used_at = time.monotonic()
-        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o666)
-        deadline = time.monotonic() + self.lock_wait_s
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fd
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    os.close(fd)
-                    raise Refused("BUSY the card lock stayed held by another service")
-                await asyncio.sleep(POLL_S)
+            self.quieted = False
+        self.hold_lock = await take_lock(self.lock_path)
 
-    async def _start(self) -> asyncio.subprocess.Process:
+    async def _start(self) -> None:
+        """The hold's rpc-server started, kept as the hold's own, and waited for until it answers on its port;
+        FAILED where it ends first."""
         # Started evictable, with the control socket its units are unloaded through, where the arbiter keeps
         # a dump store; a build without the patch ignores both and its card is given back by YIELD alone.
         env = dict(os.environ)
         if self.units is not None and self.control is not None:
             self.control.unlink(missing_ok=True)
             env.update(GGML_CUDA_EVICTABLE="1", GGML_CUDA_CONTROL=str(self.control))
-        proc = await asyncio.create_subprocess_exec(
+        self.server = proc = await asyncio.create_subprocess_exec(
             *self.rpc_argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True, env=env)
-        deadline = time.monotonic() + self.start_wait_s
         while True:
             if proc.returncode is not None:
                 raise Refused(f"FAILED the rpc-server exited with {proc.returncode}")
             try:
                 _, probe = await asyncio.open_connection(self.address, self.rpc_port)
                 probe.close()
-                return proc
+                return
             except OSError:
                 pass
-            if time.monotonic() >= deadline:
-                await self._stop(proc)
-                raise Refused("FAILED the rpc-server did not come up in time")
             await asyncio.sleep(POLL_S)
 
-    async def _until_let_go(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                            proc: asyncio.subprocess.Process | None) -> None:
-        """Until the holder closes its connection, the rpc-server ends under it, or a hold told to YIELD
-        has not let go in time, when the process group a local hold named is ended with it: the arbiter
-        holds a local hold's lock itself, so the keeper never reaches the process using the card. A
-        local hold names that group with a `USES <group>` line, answered `USING <group>` or
-        `REFUSED <why>`."""
+    async def _until_let_go(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Until the holder closes its connection or the rpc-server ends under it. A hold told to YIELD lets go
+        by closing it, and is waited for however long that takes. A local hold names the process group that
+        uses the card with a `USES <group>` line, answered `USING <group>` or `REFUSED <why>`."""
+        server = self.server
 
         async def closed() -> None:
             while line := await reader.readline():
                 verb, _, group = line.strip().partition(b" ")
                 if verb != b"USES":
                     continue
-                writer.write(f"{self._name_user(group.decode(errors='replace'), local=proc is None)}\n".encode())
+                writer.write(f"{self._name_user(group.decode(errors='replace'), local=server is None)}\n".encode())
                 await writer.drain()
 
-        async def overdue() -> None:
-            await self.told_to_yield.wait()
-            await asyncio.sleep(self.yield_wait_s)
-
-        watching = [asyncio.ensure_future(closed()), asyncio.ensure_future(overdue())]
-        if proc is not None:
-            watching.append(asyncio.ensure_future(proc.wait()))
-        done, pending = await asyncio.wait(watching, return_when=asyncio.FIRST_COMPLETED)
+        watching = [asyncio.ensure_future(closed())]
+        if server is not None:
+            watching.append(asyncio.ensure_future(server.wait()))
+        _, pending = await asyncio.wait(watching, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
-        if watching[1] in done:
-            if proc is not None:
-                say(f"claim: the hold did not let go within {self.yield_wait_s:g} s of YIELD; its rpc-server is stopped")
-            elif self.uses is not None:
-                say(f"claim: the hold did not let go within {self.yield_wait_s:g} s of YIELD; process group {self.uses} is ended")
-                await self._end_group(self.uses)
-            else:
-                say(f"claim: the hold did not let go within {self.yield_wait_s:g} s of YIELD and named no process group")
-        elif proc is not None and proc.returncode is not None:
-            say(f"card: the rpc-server exited with {proc.returncode} while held")
+        if server is not None and server.returncode is not None:
+            say(f"card: the rpc-server exited with {server.returncode} while held")
 
     def _name_user(self, group: str, local: bool) -> str:
-        """The process group a local hold says puts work on the card, or why it is refused: a lent hold's
-        user is its rpc-server, and the arbiter's own group, or one that is no group at all, is never
-        ended."""
+        """The process group a local hold says puts work on the card, whose processes on the card are known as
+        the lend service's, or why it is refused: a lent hold's user is its rpc-server, and the arbiter's own
+        group, or one that is no group at all, is never named."""
         if not local:
             return "REFUSED a hold with an rpc-server names no process group"
         if not group.isdigit() or int(group) <= 1:
@@ -1803,34 +1775,21 @@ class Card:
         self.uses = int(group)
         return f"USING {group}"
 
-    async def _end_group(self, group: int) -> None:
-        """The process group sent SIGTERM, and SIGKILL where any of it is still there after the stop wait."""
-        try:
-            os.killpg(group, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError) as fault:
-            say(f"card: could not end process group {group}: {type(fault).__name__}")
-            return
-        deadline = time.monotonic() + self.stop_wait_s
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(group, 0)
-            except (ProcessLookupError, PermissionError):
-                return
-            await asyncio.sleep(POLL_S)
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-    async def _stop(self, proc: asyncio.subprocess.Process | None) -> None:
+    @staticmethod
+    async def _stop(proc: asyncio.subprocess.Process | None) -> None:
+        """The rpc-server asked to stop and waited for until it has ended, which empties the card
+        (docs/node-arbiter.md, 「Lending」)."""
         if proc is None or proc.returncode is not None:
             return
         proc.send_signal(signal.SIGTERM)
-        try:
-            await asyncio.wait_for(proc.wait(), STOP_WAIT_S)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        await proc.wait()
+
+    def _ask_yield(self, claimant: str) -> None:
+        """The standing hold told to YIELD for a claim; one not yet READY is told right after it is."""
+        if self.holder is not None:
+            self._tell(f"YIELD {claimant}")
+        elif self.held:
+            self.yield_owed = claimant
 
     def _tell(self, line: str) -> None:
         """A line on the standing hold, which the head reads as it reads YIELD."""
@@ -1860,8 +1819,9 @@ class Card:
 
     async def _take_lock_back(self, waits: bool = False) -> None:
         """The standing hold's turn and lock taken again before its units come back, saying `QUEUED <position>
-        <seconds>` on the hold whenever its place moves; NoRoom where another occupant keeps the lock past the
-        wait. A restore the head's WANT started (`waits`) waits for its turn however long it takes."""
+        <seconds>` on the hold whenever its place moves, the turn waited for however long it takes and the lock
+        until whoever holds it lets go. A restore the head's WANT started (`waits`) names the unit it brings
+        back."""
         if self.lock_path is None or self.packed or self.hold_lock is not None:
             return
         if self.turns is not None:
@@ -1884,28 +1844,14 @@ class Card:
             need = None if out is None else {"unitName": out["name"], "vramMiB": out["vramMiB"]}
             waiting = self.turns.wait(self.lent_to, queued, gives_way_s=LEND_GIVES_WAY_S, waited_s=waited_s,
                                       need=need)
-            try:
-                self.ticket = await (waiting if waits else asyncio.wait_for(waiting, self.lock_wait_s * 3))
-            except asyncio.TimeoutError:
-                raise units_mod.NoRoom("the turn did not come") from None
+            self.ticket = await waiting
             if self.ticket is None:
                 raise units_mod.NoRoom(f"{self.lent_to} has no place among this node's occupants")
-            self.used_at = time.monotonic()
-        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o666)
-        deadline = time.monotonic() + self.lock_wait_s
+            self.quieted = False
         try:
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self.hold_lock = fd
-                    return
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise units_mod.NoRoom("the card lock stayed held by another occupant") from None
-                    await asyncio.sleep(POLL_S)
+            self.hold_lock = await take_lock(self.lock_path)
         except BaseException:
-            # Not taken, or the WANT taken back meanwhile: neither the lock nor the turn is kept.
-            os.close(fd)
+            # The WANT taken back while the lock was waited for: the turn is not kept either.
             if self.turns is not None and self.ticket is not None:
                 self.turns.done(self.ticket)
                 self.ticket = None
@@ -1940,9 +1886,16 @@ class Card:
     async def restore(self, names: list[str] | None, waits: bool = False) -> list[dict]:
         """Units of the standing hold loaded back, its lock taken again first; NoRoom where it cannot be. One
         the head's WANT started (`waits`) waits for the turn however long it takes, and finds nothing to do
-        where another move brought the units back first."""
+        where another move brought the units back first. One asked otherwise while the hold's turn is not its
+        own takes the hold's place in the card's line as a WANT does, the units coming back when its turn
+        comes, and says so as NoRoom (docs/api.md, 「Card units」)."""
         if self.units is None:
             return []
+        if not waits and self._takes_turn():
+            if self.claims:
+                raise units_mod.NoRoom(f"{self.claimed()} claims this node")
+            self._queue_restore()
+            raise units_mod.NoRoom("the hold waits its turn in the card's line, and its units come back once it comes")
         aside = False if waits else await self._want_aside()
         try:
             async with self.moving:
@@ -1968,6 +1921,19 @@ class Card:
         finally:
             if aside:
                 self._start_wanting()
+
+    def _takes_turn(self) -> bool:
+        """Whether the standing hold's units wait for its turn and lock before they come back: a hold not packed
+        beside the lock, with units out and neither the lock nor the turn its own now."""
+        return (self.held and self.turns is not None and self.lock_path is not None and not self.packed
+                and self.hold_lock is None and self.units is not None and self.units.out())
+
+    def _queue_restore(self) -> None:
+        """The hold's units asked back through its place in the card's line, standing from now unless a WANT
+        already stands earlier."""
+        if self.wanted_at is None:
+            self.wanted_at = time.monotonic()
+        self._start_wanting()
 
     def want(self, seconds: float) -> None:
         """The head's request waits for this card, `seconds` so far (docs/node-arbiter.md, 「Lending」): a standing hold
@@ -2044,32 +2010,32 @@ class Card:
                 + "; ".join(f"{one['name']} #{one['buffer']} {'in ' + str(one['ms']) + ' ms' if one['ok'] else one['error']}" for one in outcomes))
         return outcomes
 
-    def follow_use(self, now: float | None = None) -> None:
+    def follow_use(self) -> None:
         """The standing hold's turn in use or resting as its engine's use says (docs/node-arbiter.md, 「Lending」): in use
-        while its units' owner has computed within the quiet or a use waits at its door, resting after."""
+        from its grant and from its units' owner's next graph or a use waiting at its door, resting from the
+        head's QUIET; no span without a graph rests it."""
         if self.turns is None or self.ticket is None or self.units is None or not self.units.connected:
             return
-        now = time.monotonic() if now is None else now
         door = self.units.stage
         if door.graphs != self.graphs_seen or door.waiting:
-            self.graphs_seen, self.used_at = door.graphs, now
-        self.turns.follow_use(self.ticket, now - self.used_at < LEND_QUIET_S)
+            self.graphs_seen, self.quieted = door.graphs, False
+        self.turns.follow_use(self.ticket, not self.quieted)
         # Passed at its request boundary to one of its rank whose request waits, once a turn, never on time.
         passing = self.turns.passes_to(self.ticket)
         if passing is not None and self.passed != self.ticket:
             self.passed = self.ticket
             self._tell(f"PASS {passing}")
 
-    async def quiet(self, now: float | None = None) -> None:
+    async def quiet(self) -> None:
         """The standing hold's owner said to compute nothing for a while (docs/node-arbiter.md, 「Lending」): the units are
         read first, so a graph computed before it counts as before it, and its turn rests at once, until the
         owner's next graph or a use waiting at its door."""
         if self.units is None:
             return
         await self.units.refresh()
-        self.follow_use(now)
-        self.used_at -= LEND_QUIET_S
-        self.follow_use(now)
+        self.follow_use()
+        self.quieted = True
+        self.follow_use()
 
     def claim_holds(self) -> bool:
         """Whether the card is the claim's: the lock held for it and the host memory it needs given back."""
@@ -2090,9 +2056,15 @@ class Card:
             self.ram_ready = True
 
     async def _back_after_claim(self) -> None:
-        """Every unit a claim put out loaded back once the node is given back, tried again while the card has
-        not the room."""
+        """Every unit a claim put out loaded back once the node is given back: through the hold's place in the
+        card's line where it takes turns, else tried again while the card has not the room."""
         while self.held and not self.claims and self.units is not None and self.units.out():
+            if self._takes_turn():
+                # This return hands itself over to the hold's place in the line, which it would otherwise stand
+                # in the way of.
+                self.coming_back = None
+                self._queue_restore()
+                return
             try:
                 await self.restore(None)
                 return
@@ -2105,14 +2077,13 @@ class Card:
         outcomes = await self.evict(None, name, claimant=name)
         if not outcomes or not all(one["ok"] for one in outcomes):
             say(f"{name}: the units could not all be unloaded; the hold is told to YIELD")
-            self._tell(f"YIELD {name}")
-            self.told_to_yield.set()
+            self._ask_yield(name)
 
     def claim_started(self, name: str, seen: str) -> None:
         """A claimant's claim on the node, `seen` saying what made it: the lent hold's units unloaded where its
         owner can (its lock let go for the claim) and the hold told to YIELD where it cannot, the claimant
         coming before it; dumps kept in host memory lowered as far as the claimant needs; and the node's lock
-        taken for the claim. A holder below it is ended past the grace by the keeper."""
+        taken for the claim once whoever holds it lets go."""
         if not self.claim_counts(name):
             say(f"{name}: {seen}, and it has no place among this node's occupants")
             return
@@ -2131,13 +2102,7 @@ class Card:
             # Units already out stay where they are; what is still on the card follows them.
             loop.create_task(self._evict_for_claim(name))
         elif self.claim_yields(name):
-            if self.holder is not None:
-                try:
-                    self.holder.write(f"YIELD {name}\n".encode())
-                except (ConnectionError, RuntimeError):
-                    pass
-            if self.held:
-                self.told_to_yield.set()
+            self._ask_yield(name)
         # Every claimant's ticket waits for the host memory it needs, a later one's for the next look.
         self.ram_ready = False
         if first or self.lowering is None or self.lowering.done():
@@ -2149,9 +2114,10 @@ class Card:
         since = self.claims.pop(name, None)
         if since is None:
             return
-        say(f"{name}: no ticket, task or process on the card for {CLAIM_SETTLE_S:g} s after {time.monotonic() - since:.0f} s")
+        say(f"{name}: no ticket, container or process of it on the card any more, {time.monotonic() - since:.0f} s after its claim began")
         if self.claims:
             return
+        self.yield_owed = None
         if self.units is not None and self.units.out() and self.held:
             self.coming_back = asyncio.get_running_loop().create_task(self._back_after_claim())
         if self.shutting_out is not None:
@@ -2166,9 +2132,8 @@ class Card:
         say("claim: the node is given back")
 
     async def _shut_out(self) -> None:
-        """The node's lock taken for as long as a claim stands, as soon as whoever holds it lets go; the
-        keeper ends a holder below the claimant once the grace has passed. This process's own lent hold lets
-        go of it by itself."""
+        """The node's lock taken for as long as a claim stands, as soon as whoever holds it lets go, however
+        long that takes: no holder is ended for it. This process's own lent hold lets go of it by itself."""
         assert self.lock_path is not None
         began = time.monotonic()
         fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o666)
@@ -2185,6 +2150,32 @@ class Card:
         finally:
             if fd >= 0:
                 os.close(fd)
+
+
+async def take_lock(path: Path) -> int:
+    """The node's lock taken as soon as whoever holds it lets go, looked at every poll, however long that
+    takes; its descriptor."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                await asyncio.sleep(POLL_S)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def keep_alive(sock: socket.socket | None) -> None:
+    """TCP keep-alive probes on a connection, which tell a peer gone without closing as a broken connection."""
+    if sock is None:
+        return
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, KEEP_ALIVE_IDLE_S)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, KEEP_ALIVE_EVERY_S)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, KEEP_ALIVE_PROBES)
 
 
 def rpc_argv(binary: str, address: str) -> list[str]:
@@ -2310,13 +2301,9 @@ def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> 
     units_api.read_rules()
     occupants.read()
 
-    def claims() -> list[tuple[str, float]]:
-        held = list(card.claims.items())
-        return held + ([(DESKTOP, seen.since)] if seen.taken and seen.since is not None else [])
-
     kept: list[tuple[str, Callable[[], Awaitable[None]]]] = [
         (f"occupants {' '.join(occupants.order)} from {path}", occupants.run),
-        ("the order kept on the lock's holders", Keeper(occupants, lock, claims).run),
+        ("the order kept on the lock's holders", Keeper(occupants, lock).run),
         (f"the hold queue on 127.0.0.1:{TURN_PORT}", lambda: serve_turns(turns, TURN_PORT, units_api)),
         (f"the units{' and the store at ' + str(store.path) if store is not None else ''}", units_api.run),
     ]

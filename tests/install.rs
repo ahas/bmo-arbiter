@@ -17,6 +17,14 @@ use bmo_arbiter::reach::{BoxFuture, NodeCalls, RunResult};
 const DESKTOP_PROBE: &str =
   "MACHINE_WSL=1\nMACHINE_CARD_MIB=10240\nMACHINE_CARD_NAME=NVIDIA GeForce RTX 3080\n";
 const RIVAL: &str = "older-arbiter.service";
+// The arbiter's unit as a healthy node reads it while it starts, and once its health answers ready.
+const STARTING: &str =
+  "ActiveState=activating\nSubState=start\nMainPID=4242\nExecMainStatus=0\nCARD-HEALTH \n";
+const READY: &str =
+  "ActiveState=active\nSubState=running\nMainPID=4242\nExecMainStatus=0\nCARD-HEALTH {\"ready\":true}\n";
+// More commands than any install runs: a wait that never ends on what the node answers fails the test
+// here rather than looking forever.
+const MOST_COMMANDS: usize = 500;
 
 fn answer(stdout: &str, code: i32) -> RunResult {
   RunResult {
@@ -32,7 +40,8 @@ fn answer(stdout: &str, code: i32) -> RunResult {
 struct Changes {
   probe: Option<&'static str>,
   rival: Option<&'static str>,
-  pids: Option<Vec<&'static str>>,
+  standing: Option<Vec<&'static str>>,
+  setup: Option<Vec<&'static str>>,
   store: Option<RunResult>,
   units: Option<String>,
   installed: Option<bool>,
@@ -40,20 +49,27 @@ struct Changes {
 }
 
 /// A node that answers the arbiter's install as a healthy one would, with what is changed; every command
-/// it runs and every file carried to it, with its text and mode, kept.
+/// it runs and every file carried to it, with its text and mode, kept. The setup's tail and the unit's
+/// standing are answered from a script, one reading at a time, the last repeated once the script runs out.
 struct Node {
   changes: Changes,
-  pids: Mutex<Vec<&'static str>>,
+  standing: Mutex<Vec<&'static str>>,
+  setup: Mutex<Vec<&'static str>>,
   commands: Mutex<Vec<String>>,
   carried: Mutex<HashMap<String, (String, u32)>>,
 }
 
 impl Node {
   fn new(changes: Changes) -> Self {
-    let pids = changes.pids.clone().unwrap_or_else(|| vec!["4242", "4242"]);
+    let standing = changes.standing.clone().unwrap_or_else(|| vec![STARTING, STARTING, READY]);
+    let setup = changes
+      .setup
+      .clone()
+      .unwrap_or_else(|| vec!["building the venv\n", "CARD-SETUP-DONE ok\n"]);
     Self {
       changes,
-      pids: Mutex::new(pids),
+      standing: Mutex::new(standing),
+      setup: Mutex::new(setup),
       commands: Mutex::new(Vec::new()),
       carried: Mutex::new(HashMap::new()),
     }
@@ -79,16 +95,16 @@ impl Node {
       answer(changes.probe.unwrap_or(DESKTOP_PROBE), 0)
     } else if command.contains(&format!("is-active {RIVAL}")) {
       answer(changes.rival.unwrap_or("inactive\n"), 0)
+    } else if command.contains("setup.pid") && command.contains("tail") {
+      answer(next(&self.setup), 0)
     } else if command.contains("setup.log") {
-      answer("CARD-SETUP-DONE ok\n", 0)
+      answer("launched\n", 0)
     } else if command.contains("7439/card") {
       answer(changes.units.as_deref().unwrap_or(""), 0)
     } else if command.contains("units.store") {
       changes.store.clone().unwrap_or_else(|| answer("STORE 3\n", 0))
     } else if command.contains("MainPID") {
-      let mut pids = self.pids.lock().unwrap();
-      let pid = if pids.is_empty() { "0" } else { pids.remove(0) };
-      answer(&format!("{pid}\n"), 0)
+      answer(next(&self.standing), 0)
     } else if command.contains("CARD-INSTALLED") {
       answer(if changes.installed == Some(false) { "" } else { "CARD-INSTALLED\n" }, 0)
     } else if command.starts_with("cat ~/.config/bmo-card/occupants") {
@@ -99,9 +115,22 @@ impl Node {
   }
 }
 
+/// The next reading of a script, the last one standing once the rest are read.
+fn next(script: &Mutex<Vec<&'static str>>) -> &'static str {
+  let mut script = script.lock().unwrap();
+  if script.len() > 1 { script.remove(0) } else { script.first().copied().unwrap_or("") }
+}
+
 impl NodeCalls for Node {
   fn exec<'a>(&'a self, command: &'a str) -> BoxFuture<'a, RunResult> {
-    self.commands.lock().unwrap().push(command.to_owned());
+    let mut commands = self.commands.lock().unwrap();
+    assert!(
+      commands.len() < MOST_COMMANDS,
+      "the install kept asking the node: {:?}",
+      commands.last()
+    );
+    commands.push(command.to_owned());
+    drop(commands);
     let answered = self.answer(command);
     Box::pin(async move { answered })
   }
@@ -122,7 +151,10 @@ fn options(role: Option<&str>, store_gib: Option<f64>) -> InstallOptions {
     code_root: PathBuf::from("/checkout"),
     store_gib,
     rival_units: vec![RIVAL.to_owned()],
-    timing: Timing::default(),
+    timing: Timing {
+      setup_every: std::time::Duration::from_millis(1),
+      running_every: std::time::Duration::from_millis(1),
+    },
   }
 }
 
@@ -296,7 +328,7 @@ async fn the_lend_step_writes_its_settings_privately_replaces_the_rival_unit_and
   });
   let settings = "LLM_KEY=k\nCARD_ADDRESS=192.0.2.10\nCARD_RPC_SERVER={home}/rpc\n";
 
-  lend("node-a", &at, Some(settings), &[RIVAL.to_owned()], &Timing::default(), &|_| {})
+  lend("node-a", &at, Some(settings), &[RIVAL.to_owned()], &options(None, None).timing, &|_| {})
     .await
     .unwrap();
 
@@ -311,14 +343,16 @@ async fn the_lend_step_writes_its_settings_privately_replaces_the_rival_unit_and
 #[tokio::test(start_paused = true)]
 async fn the_lend_step_takes_its_settings_off_and_refuses_a_node_with_no_arbiter() {
   let lent = Node::new(Changes::default());
-  lend("node-b", &lent, None, &[], &Timing::default(), &|_| {}).await.unwrap();
+  lend("node-b", &lent, None, &[], &options(None, None).timing, &|_| {}).await.unwrap();
   assert!(lent.commands().contains(&"rm -f ~/.config/bmo-card/lend.env".to_owned()));
 
   let bare = Node::new(Changes {
     installed: Some(false),
     ..Changes::default()
   });
-  let fault = lend("node-b", &bare, None, &[], &Timing::default(), &|_| {}).await.unwrap_err();
+  let fault = lend("node-b", &bare, None, &[], &options(None, None).timing, &|_| {})
+    .await
+    .unwrap_err();
   assert!(fault.contains("bmo-arbiter place"), "{fault}");
   assert!(!bare.ran("restart"));
 }
@@ -352,15 +386,44 @@ async fn a_machine_with_no_card_is_refused_before_anything_is_carried() {
 
 #[tokio::test(start_paused = true)]
 async fn a_unit_that_keeps_restarting_is_not_taken_for_one_standing() {
+  let replaced = "ActiveState=activating\nSubState=start\nMainPID=4300\nExecMainStatus=0\nCARD-HEALTH \n";
+  let waiting =
+    "ActiveState=activating\nSubState=auto-restart\nMainPID=0\nExecMainStatus=1\nCARD-HEALTH \n";
+  let failed = "ActiveState=failed\nSubState=failed\nMainPID=0\nExecMainStatus=203\nCARD-HEALTH \n";
+  for (script, status) in [
+    (vec![STARTING, replaced], None),
+    (vec![STARTING, waiting], Some("with status 1")),
+    (vec![failed], Some("with status 203")),
+  ] {
+    let at = Node::new(Changes {
+      standing: Some(script),
+      ..Changes::default()
+    });
+
+    let outcome = installed("desktop-pc", &at, &options(None, None)).await;
+
+    assert_eq!(outcome.step, Some(Step::Running));
+    let fault = outcome.fault.unwrap();
+    assert!(fault.contains("journalctl --user -u bmo-card.service"), "{fault}");
+    assert!(fault.contains("before its health answered ready"), "{fault}");
+    if let Some(status) = status {
+      assert!(fault.contains(status), "{fault}");
+    }
+  }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_setup_whose_process_ends_without_saying_how_stops_the_install_at_the_setup() {
   let at = Node::new(Changes {
-    pids: Some(vec!["4242", "4300"]),
+    setup: Some(vec!["building the venv\n", "building the venv\nCARD-SETUP-GONE\n"]),
     ..Changes::default()
   });
 
   let outcome = installed("desktop-pc", &at, &options(None, None)).await;
 
-  assert_eq!(outcome.step, Some(Step::Running));
-  assert!(outcome.fault.unwrap().contains("journalctl --user -u bmo-card.service"));
+  assert_eq!((outcome.ok, outcome.step), (false, Some(Step::Setup)));
+  assert!(outcome.fault.unwrap().contains("ended without saying how"));
+  assert!(!at.ran("systemctl --user enable"));
 }
 
 #[tokio::test(start_paused = true)]

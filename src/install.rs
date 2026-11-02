@@ -62,24 +62,22 @@ pub fn rival_units_from_env() -> Vec<String> {
 
 const RUNTIME: &str = "export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}";
 
-/// How long the install waits for the steps it watches: the setup, polled until it says it ended, and the
-/// unit, read until its main process stands and then once more after a while.
+/// How often the install looks at the steps it waits for: the setup, until it says it ended or its process
+/// is gone, and the arbiter, until its health answers ready or its main process has ended. Neither wait has
+/// a limit; these only pace the looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
-  pub setup_polls: u32,
   pub setup_every: Duration,
-  pub running_polls: u32,
   pub running_every: Duration,
-  pub running_settle: Duration,
 }
 
 /// The setting that sets every wait of the install alike (docs/api.md, 「Settings」).
 pub const INSTALL_POLL: &str = "CARD_INSTALL_POLL_MS";
 
 impl Timing {
-  /// As the environment sets it: `CARD_INSTALL_POLL_MS`, where it names a number of milliseconds, sets the
-  /// setup's polls, the unit's polls and the wait before its main process is read again alike, which a
-  /// check does to run an install quickly; else the defaults.
+  /// As the environment sets it: `CARD_INSTALL_POLL_MS`, where it names a number of milliseconds, sets how
+  /// often the setup and the arbiter's health are looked at alike, which a check does to run an install
+  /// quickly; else the defaults.
   pub fn from_env() -> Self {
     let named = std::env::var(INSTALL_POLL).ok().and_then(|value| value.trim().parse::<u64>().ok());
     match named {
@@ -88,8 +86,6 @@ impl Timing {
         Self {
           setup_every: every,
           running_every: every,
-          running_settle: every,
-          ..Self::default()
         }
       }
       None => Self::default(),
@@ -100,11 +96,8 @@ impl Timing {
 impl Default for Timing {
   fn default() -> Self {
     Self {
-      setup_polls: 80,
       setup_every: Duration::from_secs(5),
-      running_polls: 10,
       running_every: Duration::from_secs(1),
-      running_settle: Duration::from_secs(5),
     }
   }
 }
@@ -120,7 +113,7 @@ pub fn store_bytes(machine: &Machine, gib: Option<f64>) -> u64 {
 
 /// The arbiter's own account of its units, which says what lies out in the store.
 pub fn units_ask_command() -> String {
-  "curl -s -m 3 http://127.0.0.1:7439/card || true".to_owned()
+  "curl -s http://127.0.0.1:7439/card || true".to_owned()
 }
 
 /// The units out in the store, wholly or in part, out of the units' answer; none where no arbiter
@@ -228,37 +221,100 @@ pub fn active_command(unit: &str) -> String {
   format!("{RUNTIME}; systemctl --user is-active {unit} 2>/dev/null || true")
 }
 
-/// The unit's main process, read twice a few seconds apart: the same number both times is a unit that
-/// stays up rather than one restarting over and over.
-pub fn main_pid_command() -> String {
-  format!("{RUNTIME}; systemctl --user show {CARD_UNIT} -p MainPID --value")
-}
-
-/// The setup, started and let go of, so a hub that stops a long command it streams never stops it; it is
-/// read back out of its log.
-pub fn setup_launch_command() -> String {
+/// The arbiter's unit as the user manager has it, and its health: up once the health answers ready
+/// (docs/api.md, 「Health」), ended where its main process is gone before that.
+pub fn standing_command() -> String {
   format!(
-    "cd ~/{CARD_DIR} && chmod +x node-setup.sh && rm -f setup.log && \
-     setsid nohup bash node-setup.sh > setup.log 2>&1 < /dev/null & echo launched"
+    "{RUNTIME}; systemctl --user show {CARD_UNIT} -p ActiveState -p SubState -p MainPID -p ExecMainStatus; \
+     echo \"{HEALTH_MARK} $(curl -s http://127.0.0.1:7439/health || true)\""
   )
 }
 
-pub fn setup_tail_command() -> String {
-  format!("tail -n 40 ~/{CARD_DIR}/setup.log 2>/dev/null || true")
+const HEALTH_MARK: &str = "CARD-HEALTH";
+
+/// What the standing command read: the unit's state and main process, the status it last ended with, and
+/// whether the health answered ready.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Standing {
+  pub active: String,
+  pub sub: String,
+  pub main_pid: String,
+  pub status: String,
+  pub ready: bool,
 }
 
-/// How the setup ended, read off its log's last `CARD-SETUP-DONE` line.
+impl Standing {
+  /// The main process standing now, where one does.
+  pub fn pid(&self) -> Option<&str> {
+    Some(self.main_pid.as_str()).filter(|pid| !pid.is_empty() && *pid != "0")
+  }
+
+  /// Whether the unit's main process has ended: the unit failed or stopped, or waits to start again.
+  pub fn ended(&self) -> bool {
+    matches!(self.active.as_str(), "failed" | "inactive") || self.sub == "auto-restart"
+  }
+}
+
+pub fn parse_standing(text: &str) -> Standing {
+  let mut read = Standing::default();
+  for line in text.lines().map(str::trim) {
+    if let Some(health) = line.strip_prefix(HEALTH_MARK) {
+      read.ready = serde_json::from_str::<Value>(health.trim())
+        .ok()
+        .and_then(|answer| answer.get("ready").and_then(Value::as_bool))
+        .unwrap_or(false);
+      continue;
+    }
+    let Some((key, value)) = line.split_once('=') else { continue };
+    let value = value.trim().to_owned();
+    match key {
+      "ActiveState" => read.active = value,
+      "SubState" => read.sub = value,
+      "MainPID" => read.main_pid = value,
+      "ExecMainStatus" => read.status = value,
+      _ => {}
+    }
+  }
+  read
+}
+
+/// The setup, started and let go of, so a hub that stops a long command it streams never stops it, its
+/// process kept in `setup.pid`; it is read back out of its log.
+pub fn setup_launch_command() -> String {
+  format!(
+    "cd ~/{CARD_DIR} && chmod +x node-setup.sh && rm -f setup.log setup.pid && \
+     {{ setsid nohup bash node-setup.sh > setup.log 2>&1 < /dev/null & echo $! > setup.pid; }} && echo launched"
+  )
+}
+
+const SETUP_GONE: &str = "CARD-SETUP-GONE";
+
+/// Whether the setup's process still runs, looked at first, then its log's tail: a setup that ended after
+/// the look has written its last line before the log is read.
+pub fn setup_tail_command() -> String {
+  format!(
+    "cd ~/{CARD_DIR} && {{ kill -0 \"$(cat setup.pid 2>/dev/null)\" 2>/dev/null || gone=1; \
+     tail -n 40 setup.log 2>/dev/null; [ -z \"$gone\" ] || echo {SETUP_GONE}; }}"
+  )
+}
+
+/// How the setup ended, read off its log's last `CARD-SETUP-DONE` line, or its process gone without one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupEnd {
   Running,
   Ok,
   Failed(String),
+  Gone,
 }
 
 pub fn parse_setup_end(text: &str) -> SetupEnd {
   const MARKER: &str = "CARD-SETUP-DONE";
   let Some(line) = text.lines().map(str::trim).rfind(|line| line.starts_with(MARKER)) else {
-    return SetupEnd::Running;
+    return if text.lines().any(|line| line.trim() == SETUP_GONE) {
+      SetupEnd::Gone
+    } else {
+      SetupEnd::Running
+    };
   };
   let said = line[MARKER.len()..].trim();
   if said == "ok" {
@@ -460,20 +516,23 @@ pub async fn install(
   if launched.code != 0 {
     stop!(Step::Setup, format!("the setup did not start: {}", launched.fault()));
   }
-  let mut end = SetupEnd::Running;
-  for _ in 0..options.timing.setup_polls {
+  // The setup is waited for until it says how it ended or its process is gone, however long it takes.
+  let end = loop {
     tokio::time::sleep(options.timing.setup_every).await;
-    end = parse_setup_end(&calls.exec(&setup_tail_command()).await.stdout);
+    let end = parse_setup_end(&calls.exec(&setup_tail_command()).await.stdout);
     if end != SetupEnd::Running {
-      break;
+      break end;
     }
-  }
+  };
   match end {
-    SetupEnd::Ok => {}
+    SetupEnd::Ok | SetupEnd::Running => {}
     SetupEnd::Failed(step) => {
       stop!(Step::Setup, format!("the setup stopped at {step}; see ~/{CARD_DIR}/setup.log"));
     }
-    SetupEnd::Running => stop!(Step::Setup, format!("the setup did not end; see ~/{CARD_DIR}/setup.log")),
+    SetupEnd::Gone => stop!(
+      Step::Setup,
+      format!("the setup's process ended without saying how; see ~/{CARD_DIR}/setup.log")
+    ),
   }
   done.push(Step::Setup);
 
@@ -483,11 +542,8 @@ pub async fn install(
   }
   done.push(Step::Units);
 
-  if !stands_running(calls, &options.timing).await {
-    stop!(
-      Step::Running,
-      format!("{CARD_UNIT} does not stand; see journalctl --user -u {CARD_UNIT} on {node}")
-    );
+  if let Err(fault) = stands_up(calls, &options.timing).await {
+    stop!(Step::Running, format!("{fault}; see journalctl --user -u {CARD_UNIT} on {node}"));
   }
   done.push(Step::Running);
 
@@ -500,21 +556,32 @@ pub async fn install(
   }
 }
 
-/// Whether the unit's main process stays the same across a few seconds, which a unit restarting over and
-/// over does not.
-async fn stands_running(calls: &dyn NodeCalls, timing: &Timing) -> bool {
-  let pid = || async { calls.exec(&main_pid_command()).await.stdout.trim().to_owned() };
-  let standing = |pid: &str| !pid.is_empty() && pid != "0";
-  let mut first = String::new();
-  for _ in 0..timing.running_polls {
+/// The arbiter waited for until its health answers ready, however long that takes (docs/node-arbiter.md,
+/// 「Installing」); why not where its main process ends first — the unit failed or stopped, waiting to start
+/// again, or another process standing in the place of the first one seen.
+async fn stands_up(calls: &dyn NodeCalls, timing: &Timing) -> Result<(), String> {
+  let mut first: Option<String> = None;
+  loop {
     tokio::time::sleep(timing.running_every).await;
-    first = pid().await;
-    if standing(&first) {
-      break;
+    let read = parse_standing(&calls.exec(&standing_command()).await.stdout);
+    if read.ready {
+      return Ok(());
+    }
+    let replaced = matches!((&first, read.pid()), (Some(first), Some(now)) if first != now);
+    if read.ended() || replaced {
+      return Err(format!(
+        "{CARD_UNIT}'s main process ended{} before its health answered ready",
+        if read.status.is_empty() {
+          String::new()
+        } else {
+          format!(" with status {}", read.status)
+        }
+      ));
+    }
+    if first.is_none() {
+      first = read.pid().map(str::to_owned);
     }
   }
-  tokio::time::sleep(timing.running_settle).await;
-  standing(&first) && pid().await == first
 }
 
 /// Whether the arbiter's unit stands installed on the node.
@@ -585,11 +652,9 @@ pub async fn lend(
       "stands again with the new lend settings"
     }
   ));
-  if stands_running(calls, timing).await {
-    Ok(())
-  } else {
-    Err(format!("{CARD_UNIT} does not stand; see journalctl --user -u {CARD_UNIT} on {node}"))
-  }
+  stands_up(calls, timing)
+    .await
+    .map_err(|fault| format!("{fault}; see journalctl --user -u {CARD_UNIT} on {node}"))
 }
 
 /// The arbiter taken off a node: its unit stopped, disabled and removed, and its dump store and table with
