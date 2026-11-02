@@ -1,7 +1,7 @@
 //! The placement rules the master reads (docs/placement.md, 「The rules」): their parts read and checked,
 //! a fault naming what is wrong and where, patterns, and the part of them each node is pushed.
 
-mod fixtures;
+use crate::fixtures;
 
 use bmo_arbiter::rules::{
   Claimant, Dump, Eviction, NodeFacts, Num, RULES_FILE, RamFree, Rules, SeenBy, UnitKind, matches,

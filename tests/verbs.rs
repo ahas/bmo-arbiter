@@ -2,7 +2,7 @@
 //! misfits, what a slave says of its card and its machine, the tree the binary reads, and how a push names
 //! what it wrote.
 
-mod fixtures;
+use crate::fixtures;
 
 use std::path::Path;
 

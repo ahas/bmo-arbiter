@@ -2,7 +2,7 @@
 //! another language are a console's language pack. The ledger, `korean-ledger.json`, is a JSON object from
 //! each file's path to the lines with Korean it may hold; a file it does not name may hold none.
 
-mod support;
+use crate::support;
 
 use std::collections::BTreeMap;
 use std::fs;

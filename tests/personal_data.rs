@@ -1,6 +1,6 @@
 //! No file of the checkout holds personal data (docs/PERSONAL-DATA.md).
 
-mod support;
+use crate::support;
 
 use std::collections::BTreeSet;
 use std::fs;

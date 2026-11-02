@@ -11,7 +11,7 @@ languages = ["cargo", "bun"]
 setup = ["bun install --cwd packages/arbiter-client --frozen-lockfile"]
 
 [check]
-quick = ["layout", "dependencies", "korean"]
+quick = ["layout", "dependencies", "korean", "cargo-profile"]
 # No code file holds Korean, so the ledger allows none anywhere.
 korean_ledger = "korean-ledger.json"
 # The crates of other repositories the arbiter may build on: the base libraries every unit may, and the

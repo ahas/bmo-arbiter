@@ -2,7 +2,7 @@
 //! workspace's members, no other build tool's manifest at the root, no directory named after its parent, and
 //! one version.
 
-mod support;
+use crate::support;
 
 use std::fs;
 use std::path::Path;

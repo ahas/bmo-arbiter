@@ -1,7 +1,7 @@
 //! Dependencies: no other repository's crate but the base libraries every unit may build on and the
 //! published clients of the units this one calls, and no path out of the repository but to one of those.
 
-mod support;
+use crate::support;
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};

@@ -1,7 +1,7 @@
 //! The master's wire contract: started as a process on a free port over a world of stand-ins (`common`), and
 //! asked through its API as a reader asks it, every answer held to docs/openapi.json.
 
-use crate::common;
+use crate::integration::common;
 
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use common::{World, card, codes, connected, events, nodes, slave, unit, waiting}
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::contract_check::holds_to_contract;
+use crate::support::contract::holds_to_contract;
 
 /// A route asked once, its answer held to the document, its status and its JSON.
 async fn asked(world: &World, method: Method, path: &str, body: Option<&str>) -> (u16, Value) {

@@ -1,8 +1,6 @@
 //! An answer held to the committed OpenAPI document: a status its route states, and a body of the schema the
 //! document states for that status.
 
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::sync::LazyLock;
 

@@ -1,7 +1,7 @@
 //! The planner (docs/placement.md, 「The rules」): where an asked unit goes and what goes to make room, by
 //! the rules or by priority and size, and a hold where nothing fits.
 
-mod fixtures;
+use crate::fixtures;
 
 use bmo_arbiter::plan::{Decision, PictureNode, PictureUnit, Request, UnitState};
 use bmo_arbiter::rules::{NodeFacts, RULES_FILE, Rules, parse_rules};

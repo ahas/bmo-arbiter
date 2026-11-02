@@ -2,7 +2,7 @@
 //! `tests/card/`, run on the system's Python by this Cargo test, so one `cargo test` runs every test of the
 //! repository. Their output is shown where any fails.
 
-mod support;
+use crate::support;
 
 use std::process::Command;
 

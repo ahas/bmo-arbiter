@@ -3,16 +3,14 @@
 //! records is held here to the status and the schema the document states (docs/api.md, 「What the node
 //! arbiter serves」).
 
-#[path = "support/contract.rs"]
-mod contract;
-mod support;
+use crate::support;
 
 use std::process::Command;
 
 use serde_json::Value;
 use support::ROOT;
 
-use contract::holds_to_contract;
+use crate::support::contract::holds_to_contract;
 
 #[test]
 fn every_answer_of_the_node_arbiters_routes_is_the_documents() {

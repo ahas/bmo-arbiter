@@ -2,9 +2,6 @@
 //! role names the text model and a desktop group, the text model's, the router's and three voice units, and a
 //! desktop rule and a request rule.
 
-// Each test file is its own crate and uses only part of this module.
-#![allow(dead_code)]
-
 pub const RULES: &str = r#"
 occupants:
   - name: tester

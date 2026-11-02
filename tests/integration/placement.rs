@@ -3,7 +3,7 @@
 //! node's occupants file and a service's adapter, each run as the process it is (docs/placement.md, 「A
 //! request」).
 
-use crate::common;
+use crate::integration::common;
 
 use common::{World, connected, events, slave};
 use serde_json::json;

@@ -4,19 +4,16 @@
 //! its own process, spoken to over its pipes, beside stand-ins of the master and the node arbiter served in
 //! the test, and is taken down before the test ends.
 
-#[path = "support/contract.rs"]
-mod contract;
-
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::support::contract::CONTRACT;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use contract::CONTRACT;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
