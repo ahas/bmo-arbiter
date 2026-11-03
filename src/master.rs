@@ -6,6 +6,7 @@
 //! card.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
@@ -20,6 +21,7 @@ use bmo_arbiter_client::demands::{DemandCard, DemandReason, DemandWait};
 use futures_util::FutureExt;
 use futures_util::future::join_all;
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::demands::{Book, Demands, Held, Seat};
@@ -146,8 +148,38 @@ fn instance_of(answer: &AdapterAnswer) -> Option<Instance> {
   })
 }
 
-/// One instance's health as read: the service and node, and where it stands, or none where it does not.
-type Health = ((String, String), Option<Instance>);
+/// An adapter verb running beside the rounds: the service, the node and the verb.
+type RunKey = (String, String, &'static str);
+
+/// What a verb run beside the rounds is for, which says what its answer does once a round takes it.
+enum Purpose {
+  /// A `stop` that yields the card or hands it over, with why.
+  Down(Stop),
+  /// A `start` once nothing that made it yield stands, its `health` read after it.
+  Back,
+  /// A `health` read of a placed instance.
+  Health,
+}
+
+impl Purpose {
+  fn verb(&self) -> &'static str {
+    match self {
+      Purpose::Down(_) => "stop",
+      Purpose::Back => "start",
+      Purpose::Health => "health",
+    }
+  }
+}
+
+/// A verb's answer handed back to the rounds: whose and where, what it was for, what the adapter answered,
+/// and for a `start` that answered, the `health` read after it.
+struct Answered {
+  service: String,
+  node: String,
+  purpose: Purpose,
+  answer: AdapterAnswer,
+  health: Option<AdapterAnswer>,
+}
 
 /// Each card of a service's placement by node, with what it is to a demand of it.
 type Openings = Vec<(String, Opening)>;
@@ -186,6 +218,8 @@ enum Opening {
   Bring(Vec<Declaration>),
   /// In use by the services named.
   InUse(String),
+  /// The service's own `start` runs there beside the rounds.
+  Starting,
   /// Held by a claim or a ticket of a lower tier, named.
   Held(String),
   /// Open, but a card the service does not use while it uses as many as its ceiling lets it.
@@ -252,11 +286,15 @@ pub struct Master {
   // The demands the routes and the rounds share, and the book's version the picture last took in.
   demands: Option<Arc<Demands>>,
   demands_seen: u64,
-  // Where each service stands now, by service and node, as its adapter's health last said; the reading of
-  // every placed instance under way; and what moved since it began, which that reading leaves alone.
+  // Where each service stands now, by service and node, as its adapter's health last said; and what moved
+  // since a health read of it began, which that read's answer leaves alone.
   instances: BTreeMap<(String, String), Instance>,
-  sweep: Option<JoinHandle<Vec<Health>>>,
   touched: HashSet<(String, String)>,
+  // The adapter verbs running beside the rounds, by service, node and verb, and the way their answers come
+  // back to the rounds.
+  runs: HashSet<RunKey>,
+  answers_out: mpsc::UnboundedSender<Answered>,
+  answers_in: mpsc::UnboundedReceiver<Answered>,
   // A service being brought up for a demand, by node; the node each work key was last granted on; and why
   // a demand's last bring failed, until another begins.
   bringing: HashMap<String, Bringing>,
@@ -327,6 +365,7 @@ impl Master {
 
   pub fn new(world: Arc<dyn World>, rules_file: PathBuf, read_every_s: f64) -> Self {
     let started_at = world.clock();
+    let (answers_out, answers_in) = mpsc::unbounded_channel();
     let mut master = Master {
       world,
       rules_file,
@@ -343,8 +382,10 @@ impl Master {
       demands: None,
       demands_seen: 0,
       instances: BTreeMap::new(),
-      sweep: None,
       touched: HashSet::new(),
+      runs: HashSet::new(),
+      answers_out,
+      answers_in,
       bringing: HashMap::new(),
       work_cards: HashMap::new(),
       start_failed: HashMap::new(),
@@ -711,14 +752,167 @@ impl Master {
     (true, status)
   }
 
-  /// What the master unloaded to come back loaded back once its ticket is gone, every ticket naming a
-  /// unit placed by the rules, the occupants that yield by their process stopped and started, and the
-  /// demands' cards granted.
+  /// The answers of the verbs run beside the rounds that have come taken in, what the master unloaded to
+  /// come back loaded back once its ticket is gone, every ticket naming a unit placed by the rules, the
+  /// occupants that yield by their process stopped and started beside the rounds, and the demands' cards
+  /// granted.
   pub async fn act(&mut self) {
+    self.take_answers();
     self.restore_what_is_done().await;
     self.place_tickets().await;
-    self.yield_processes().await;
+    self.yield_processes();
     self.serve_demands();
+  }
+
+  /// An adapter verb run beside the rounds for the service on the node, its answer handed back to the
+  /// first round after it comes; none where that verb of the service runs there already. The verb runs to
+  /// its own end (docs/api.md, 「Adapters」).
+  fn run(&mut self, declaration: &Declaration, node: &str, placed: Vec<String>, purpose: Purpose) {
+    let verb = purpose.verb();
+    if !self.runs.insert((declaration.service.clone(), node.to_owned(), verb)) {
+      return;
+    }
+    let world = self.world.clone();
+    let declaration = declaration.clone();
+    let node = node.to_owned();
+    let out = self.answers_out.clone();
+    // The end of a start or a stop has the next round come at once.
+    let wake = self.demands.clone().filter(|_| verb != "health");
+    tokio::spawn(async move {
+      let ran = async {
+        let answer = world.adapter(&declaration, verb, &node, &placed).await;
+        // where a service started answers now, which a demand granted there hands on
+        let health = match purpose {
+          Purpose::Back if answer.ok => Some(world.adapter(&declaration, "health", &node, &placed).await),
+          _ => None,
+        };
+        (answer, health)
+      };
+      let (answer, health) = AssertUnwindSafe(ran)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| (AdapterAnswer::refused("the adapter's run broke off"), None));
+      let answered = Answered {
+        service: declaration.service,
+        node,
+        purpose,
+        answer,
+        health,
+      };
+      // A master that has ended takes no answer.
+      let _ = out.send(answered);
+      if let Some(demands) = wake {
+        demands.wake.notify_one();
+      }
+    });
+  }
+
+  /// The services whose `start` or `stop` runs beside the rounds on the node, each with the verb.
+  fn moving_on<'a>(&'a self, node: &'a str) -> impl Iterator<Item = (&'a str, &'static str)> + 'a {
+    self
+      .runs
+      .iter()
+      .filter(move |(_, at, verb)| at == node && *verb != "health")
+      .map(|(service, _, verb)| (service.as_str(), *verb))
+  }
+
+  /// Whether a `start` or a `stop` of the service runs beside the rounds on the node.
+  fn moving(&self, service: &str, node: &str) -> bool {
+    self.moving_on(node).any(|(one, _)| one == service)
+  }
+
+  /// Every answer of a verb run beside the rounds that has come, taken in and acted on.
+  fn take_answers(&mut self) {
+    let before = self.instances.clone();
+    while let Ok(answered) = self.answers_in.try_recv() {
+      self.take_answer(answered);
+    }
+    if self.instances != before {
+      self.revision += 1;
+    }
+  }
+
+  /// Every `start` and `stop` running beside the rounds waited for to its answer, and each answer taken: what
+  /// a master read only once does before it ends.
+  pub async fn finish_runs(&mut self) {
+    while self.runs.iter().any(|(_, _, verb)| *verb != "health") {
+      let Some(answered) = self.answers_in.recv().await else { return };
+      self.take_answer(answered);
+    }
+  }
+
+  /// One verb's answer acted on: a health read adopted where nothing moved the instance since it began, an
+  /// occupant's stop or start said and kept, or its failure said once and tried again at the next round.
+  fn take_answer(&mut self, answered: Answered) {
+    let Answered {
+      service,
+      node,
+      purpose,
+      answer,
+      health,
+    } = answered;
+    self.runs.remove(&(service.clone(), node.clone(), purpose.verb()));
+    let key = (service, node);
+    match purpose {
+      Purpose::Health => {
+        if self.touched.contains(&key) || self.bringing.contains_key(&key.1) {
+          return;
+        }
+        match instance_of(&answer) {
+          Some(instance) => self.standing_again(key, instance, "its health answering running"),
+          None => {
+            self.instances.remove(&key);
+          }
+        }
+      }
+      Purpose::Down(why) => {
+        let failed = (key.0.clone(), key.1.clone(), "stop");
+        if answer.ok {
+          self.yields_failed.remove(&failed);
+          let how = match why.kind {
+            StopKind::Yield => "to yield the card",
+            StopKind::Handover => "to hand the card over",
+          };
+          self.say(Some(&key.1), "occupant-stopped", format!("{} stopped {how}: {}", key.0, why.reason));
+          self.instances.remove(&key);
+          self.touched.insert(key.clone());
+          self.stopped.insert(key, why);
+          self.save_yields();
+        } else if self.yields_failed.get(&failed) != Some(&answer.detail) {
+          self.say(
+            Some(&key.1),
+            "occupant-stop-failed",
+            format!("{} was not stopped ({}); trying again", key.0, answer.detail),
+          );
+          self.yields_failed.insert(failed, answer.detail);
+        }
+      }
+      Purpose::Back => {
+        let failed = (key.0.clone(), key.1.clone(), "start");
+        if answer.ok {
+          self.yields_failed.remove(&failed);
+          self.say(
+            Some(&key.1),
+            "occupant-started",
+            format!("{} started again: the card is its turn", key.0),
+          );
+          self.stopped.remove(&key);
+          self.save_yields();
+          self.touched.insert(key.clone());
+          match health.as_ref().and_then(instance_of) {
+            Some(instance) => self.instances.insert(key, instance),
+            None => self.instances.remove(&key),
+          };
+        } else if self.yields_failed.get(&failed) != Some(&answer.detail) {
+          self.say(
+            Some(&key.1),
+            "occupant-start-failed",
+            format!("{} was not started ({}); trying again", key.0, answer.detail),
+          );
+          self.yields_failed.insert(failed, answer.detail);
+        }
+      }
+    }
   }
 
   /// Each service's nodes as the master's placement keeps them.
@@ -799,13 +993,14 @@ impl Master {
   }
 
   /// Where the service stands on the node now: on every node it is placed on for a service with no
-  /// adapter, else where its health last answered running and the master has not stopped it.
+  /// adapter, else where its health last answered running and the master has neither stopped it nor is
+  /// stopping it.
   fn stands(&self, declaration: &Declaration, node: &str) -> Option<Instance> {
     if declaration.adapter.is_none() {
       return Some(Instance::default());
     }
     let key = (declaration.service.clone(), node.to_owned());
-    if self.stopped.contains_key(&key) {
+    if self.stopped.contains_key(&key) || self.runs.contains(&(key.0.clone(), key.1.clone(), "stop")) {
       return None;
     }
     self.instances.get(&key).cloned()
@@ -862,6 +1057,17 @@ impl Master {
     }
     if let Some(bring) = self.bringing.get(node) {
       return Opening::InUse(bring.service.clone());
+    }
+    // a start or a stop running there: its own start has the service starting, another's keeps the card
+    let moving: Vec<(&str, &str)> = self.moving_on(node).collect();
+    if moving.contains(&(service, "start")) {
+      return Opening::Starting;
+    }
+    if let Some((other, _)) = moving.iter().find(|(one, _)| *one != service) {
+      return Opening::InUse((*other).to_owned());
+    }
+    if !moving.is_empty() {
+      return Opening::Closed;
     }
     // a turn of its tier or a lower one in use; an occupant yielding by its process is in use by its demands
     if let Some(turn) =
@@ -956,7 +1162,9 @@ impl Master {
         Seat::Starting(node.to_owned())
       }
       Opening::Stands(instance) => self.grant(held, node, &instance),
-      Opening::InUse(_) | Opening::Held(_) | Opening::Ceiling | Opening::Closed => Seat::Waiting,
+      Opening::InUse(_) | Opening::Starting | Opening::Held(_) | Opening::Ceiling | Opening::Closed => {
+        Seat::Waiting
+      }
     }
   }
 
@@ -1161,55 +1369,24 @@ impl Master {
     }
   }
 
-  /// Every placed instance's health read apart from the rounds, which take it in once it is read.
+  /// Every placed instance's health read beside the rounds, one read at a time for each service and node,
+  /// none where the service is being brought up, started or stopped there; each answer is taken by the
+  /// round after it comes.
   fn sweep_health(&mut self) {
-    self.collect_sweep();
-    if self.sweep.is_some() {
-      return;
-    }
     let placements = self.placements();
     let mut asks: Vec<(Declaration, String, Vec<String>)> = Vec::new();
     for one in self.declared.iter().filter(|one| one.adapter.is_some()) {
       let placed = placements.nodes_of(&one.service).to_vec();
       for node in &placed {
-        if !self.bringing.contains_key(node) {
+        let reading = self.runs.contains(&(one.service.clone(), node.clone(), "health"));
+        if !reading && !self.bringing.contains_key(node) && !self.moving(&one.service, node) {
           asks.push((one.clone(), node.clone(), placed.clone()));
         }
       }
     }
-    self.touched.clear();
-    let world = self.world.clone();
-    self.sweep = Some(tokio::spawn(async move {
-      join_all(asks.iter().map(|(one, node, placed)| {
-        let world = world.clone();
-        async move {
-          let answer = world.adapter(one, "health", node, placed).await;
-          ((one.service.clone(), node.clone()), instance_of(&answer))
-        }
-      }))
-      .await
-    }));
-  }
-
-  /// The health read taken in where it is read, leaving what moved since it began as it stands now; what
-  /// the master stopped and stands again has its stop let go.
-  fn collect_sweep(&mut self) {
-    let Some(handle) = self.sweep.take_if(|handle| handle.is_finished()) else { return };
-    let Some(Ok(read)) = handle.now_or_never() else { return };
-    let before = self.instances.clone();
-    for (key, instance) in read {
-      if self.touched.contains(&key) || self.bringing.contains_key(&key.1) {
-        continue;
-      }
-      match instance {
-        Some(instance) => self.standing_again(key, instance, "its health answering running"),
-        None => {
-          self.instances.remove(&key);
-        }
-      };
-    }
-    if self.instances != before {
-      self.revision += 1;
+    for (one, node, placed) in asks {
+      self.touched.remove(&(one.service.clone(), node.clone()));
+      self.run(&one, &node, placed, Purpose::Health);
     }
   }
 
@@ -1222,7 +1399,6 @@ impl Master {
     let Some(demands) = self.demands.clone() else { return };
     let rules = self.rules_now();
     let placements = self.placements();
-    self.collect_sweep();
     let brought = self.collect_brought();
     let mut book = demands.book.lock().unwrap();
     book.placed = placements.services.clone();
@@ -1329,6 +1505,7 @@ impl Master {
               && outer.service != held.service
               && seated.get(&card.node_name).is_some_and(|using| using.len() == 1)
               && !self.bringing.contains_key(&card.node_name)
+              && self.moving_on(&card.node_name).next().is_none()
               && self.held_by(&rules, tier, &card.node_name).is_none()
               && !Self::above_ceiling(&declaration, &used, &card.node_name)
               && (declaration.yield_by == YieldBy::Process
@@ -1356,7 +1533,9 @@ impl Master {
           }
           // its card back from the demand it was lent to, once its service is below its ceiling
           Seat::Returning(node)
-            if !self.bringing.contains_key(&node) && !Self::above_ceiling(&declaration, &used, &node) =>
+            if !self.bringing.contains_key(&node)
+              && self.moving_on(&node).next().is_none()
+              && !Self::above_ceiling(&declaration, &used, &node) =>
           {
             let handover: Vec<Declaration> = self
               .instances
@@ -1453,11 +1632,20 @@ impl Master {
       Opening::Held(who) => Some(who),
       _ => None,
     });
+    let starting = openings
+      .iter()
+      .find(|(_, opening)| matches!(opening, Opening::Starting))
+      .map(|(node, _)| node);
     // at its ceiling, no card it does not use is open to it, whatever else holds them
     let capped = declaration.cards.is_some_and(|ceiling| used.len() >= ceiling as usize)
       || openings.iter().any(|(_, opening)| matches!(opening, Opening::Ceiling));
     Some(if capped {
       ceiling()
+    } else if let Some(node) = starting {
+      DemandReason {
+        code: DemandWait::Starting,
+        text: format!("{service} is starting on {node}"),
+      }
     } else if !in_use.is_empty() {
       DemandReason {
         code: DemandWait::InUse,
@@ -1479,8 +1667,9 @@ impl Master {
   /// Every occupant that yields by its process stopped on a node where something of a lower tier, or a
   /// request of its own tier while no demand keeps its turn in use, wants the card, and started again once
   /// nothing does; one stopped for an occupant of its tier that yields by its process too hands the card
-  /// over and is not brought back (docs/placement.md, 「Yielding by the process」).
-  async fn yield_processes(&mut self) {
+  /// over and is not brought back (docs/placement.md, 「Yielding by the process」). Each stop and start runs
+  /// beside the rounds, none of a service on a node while one of it runs there.
+  fn yield_processes(&mut self) {
     let rules = self.rules_now();
     let placements = self.placements();
     let yields_by_process = |service: &str| {
@@ -1593,57 +1782,20 @@ impl Master {
       self.save_yields();
     }
     for (declaration, node, why) in down {
-      let placed = placements.nodes_of(&declaration.service).to_vec();
-      let answer = self.world.adapter(&declaration, "stop", &node, &placed).await;
-      let key = (declaration.service.clone(), node.clone());
-      if answer.ok {
-        self.yields_failed.remove(&(key.0.clone(), key.1.clone(), "stop"));
-        let how = match why.kind {
-          StopKind::Yield => "to yield the card",
-          StopKind::Handover => "to hand the card over",
-        };
-        self.say(Some(&node), "occupant-stopped", format!("{} stopped {how}: {}", key.0, why.reason));
-        self.instances.remove(&key);
-        self.touched.insert(key.clone());
-        self.stopped.insert(key, why);
-        self.save_yields();
-      } else if self.yields_failed.get(&(key.0.clone(), key.1.clone(), "stop")) != Some(&answer.detail) {
-        self.say(
-          Some(&node),
-          "occupant-stop-failed",
-          format!("{} was not stopped ({}); trying again", key.0, answer.detail),
-        );
-        self.yields_failed.insert((key.0, key.1, "stop"), answer.detail);
+      if self.moving(&declaration.service, &node) {
+        continue;
       }
+      let placed = placements.nodes_of(&declaration.service).to_vec();
+      self.touched.insert((declaration.service.clone(), node.clone()));
+      self.run(&declaration, &node, placed, Purpose::Down(why));
     }
     for (declaration, node) in up {
-      let placed = placements.nodes_of(&declaration.service).to_vec();
-      let answer = self.world.adapter(&declaration, "start", &node, &placed).await;
-      let key = (declaration.service.clone(), node.clone());
-      if answer.ok {
-        self.yields_failed.remove(&(key.0.clone(), key.1.clone(), "start"));
-        self.say(
-          Some(&node),
-          "occupant-started",
-          format!("{} started again: the card is its turn", key.0),
-        );
-        self.stopped.remove(&key);
-        self.save_yields();
-        self.touched.insert(key.clone());
-        // where it answers now, which a demand granted there hands on
-        let health = self.world.adapter(&declaration, "health", &node, &placed).await;
-        match instance_of(&health) {
-          Some(instance) => self.instances.insert(key, instance),
-          None => self.instances.remove(&key),
-        };
-      } else if self.yields_failed.get(&(key.0.clone(), key.1.clone(), "start")) != Some(&answer.detail) {
-        self.say(
-          Some(&node),
-          "occupant-start-failed",
-          format!("{} was not started ({}); trying again", key.0, answer.detail),
-        );
-        self.yields_failed.insert((key.0, key.1, "start"), answer.detail);
+      if self.moving(&declaration.service, &node) {
+        continue;
       }
+      let placed = placements.nodes_of(&declaration.service).to_vec();
+      self.touched.insert((declaration.service.clone(), node.clone()));
+      self.run(&declaration, &node, placed, Purpose::Back);
     }
   }
 

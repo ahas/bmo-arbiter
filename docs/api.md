@@ -477,8 +477,9 @@ The node arbiter reads the occupants and rules files again within a second of a 
   `running` may add `address`, where the instance answers its callers, and `keyFile`, the file its key is
   read from on the master's host. Lines before it are
   shown as what the adapter says on its way.
-- **An adapter runs to its own end:** the master waits for its last line however long the verb takes,
-  and sets no limit on it.
+- **An adapter runs to its own end:** the master takes its last line whenever it comes and sets no limit
+  on it. The verb runs beside the master's rounds, which go on meanwhile (`docs/placement.md`, 「Master
+  and slaves」).
 - **An adapter touches no role and no occupants;** it keeps its own service's placement alone.
 
 ### The rules file

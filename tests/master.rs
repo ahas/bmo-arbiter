@@ -70,6 +70,8 @@ struct Stand {
   /// The instances standing, as `<service> <node>`: `start` stands one, `stop` takes it down, and `health`
   /// answers `running` with its address and key file for one that stands.
   running: Mutex<HashSet<String>>,
+  /// The verbs the test holds, as `<service> <verb> <node>`: such a verb answers only once its gate opens.
+  gates: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 struct StandShell(Arc<Stand>, String);
@@ -145,34 +147,40 @@ impl World for StandWorld {
     node: &'a str,
     _placed: &'a [String],
   ) -> BoxFuture<'a, AdapterAnswer> {
-    let instance = format!("{} {node}", declaration.service);
-    let mut running = self.0.running.lock().unwrap();
-    let state = match verb {
-      "start" => {
-        running.insert(instance.clone());
-        "running"
-      }
-      "stop" => {
-        running.remove(&instance);
-        "stopped"
-      }
-      _ if running.contains(&instance) => "running",
-      _ => "stopped",
-    };
+    let call = format!("{} {verb} {node}", declaration.service);
     if verb != "health" {
-      self.0.adapted.lock().unwrap().push(format!("{} {verb} {node}", declaration.service));
+      self.0.adapted.lock().unwrap().push(call.clone());
     }
-    let standing = state == "running";
-    let answer = AdapterAnswer {
-      ok: true,
-      node: Some(node.to_owned()),
-      state: Some(state.to_owned()),
-      detail: "done".into(),
-      address: standing.then(|| format!("http://{node}.test/{}", declaration.service)),
-      key_file: standing.then(|| format!("keys/{node}.key")),
-      ..AdapterAnswer::default()
-    };
-    Box::pin(async move { answer })
+    let gate = self.0.gates.lock().unwrap().get(&call).cloned();
+    Box::pin(async move {
+      if let Some(gate) = gate {
+        gate.notified().await;
+      }
+      let instance = format!("{} {node}", declaration.service);
+      let mut running = self.0.running.lock().unwrap();
+      let state = match verb {
+        "start" => {
+          running.insert(instance.clone());
+          "running"
+        }
+        "stop" => {
+          running.remove(&instance);
+          "stopped"
+        }
+        _ if running.contains(&instance) => "running",
+        _ => "stopped",
+      };
+      let standing = state == "running";
+      AdapterAnswer {
+        ok: true,
+        node: Some(node.to_owned()),
+        state: Some(state.to_owned()),
+        detail: "done".into(),
+        address: standing.then(|| format!("http://{node}.test/{}", declaration.service)),
+        key_file: standing.then(|| format!("keys/{node}.key")),
+        ..AdapterAnswer::default()
+      }
+    })
   }
 }
 
@@ -238,6 +246,7 @@ fn master_of(
     declared: Mutex::new(Vec::new()),
     adapted: Mutex::new(Vec::new()),
     running: Mutex::new(HashSet::new()),
+    gates: Mutex::new(HashMap::new()),
   });
   (Master::new(Arc::new(StandWorld(stand.clone())), rules_file, 2.0), stand)
 }
@@ -837,8 +846,8 @@ async fn an_occupant_that_yields_by_its_process_goes_down_for_an_earlier_tier_an
   ];
   placed(&stand, &[("translator", &["a"]), ("trainer", &["a"]), ("song", &["a"])]);
   master.discover().await;
-  master.poll().await;
-  master.poll().await;
+  // The stop runs beside the rounds; the round after its answer comes takes it.
+  rounds(&mut master, 2).await;
   assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a"]);
   assert!(master.state().events.iter().any(|event| event.code == "occupant-stopped"));
   let kept = std::fs::read_to_string(stand.dir.join("process-yields.json")).unwrap();
@@ -848,7 +857,7 @@ async fn an_occupant_that_yields_by_its_process_goes_down_for_an_earlier_tier_an
   let mut again = Master::new(Arc::new(StandWorld(stand.clone())), stand.dir.join("card-rules.yaml"), 2.0);
   *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([]));
   again.discover().await;
-  again.poll().await;
+  rounds(&mut again, 2).await;
   assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a", "translator start a"]);
   assert!(again.state().events.iter().any(|event| event.code == "occupant-started"));
   assert!(
@@ -866,14 +875,14 @@ async fn a_resting_turn_does_not_keep_a_process_yield_occupant_down() {
     vec![declared("translator", 1.0, YieldBy::Process), declared("voice", 1.0, YieldBy::Turn)];
   placed(&stand, &[("translator", &["a"]), ("voice", &["a"])]);
   master.discover().await;
-  master.poll().await;
+  rounds(&mut master, 1).await;
   assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a"]);
   // The voice has spoken and rests on the card with its turn kept: the translator comes back and waits for
   // the lock, and the node's rest gives way to it (docs/node-arbiter.md, 「Resting」).
   let mut resting = ticket(1, "voice", true, None);
   resting["resting"] = json!(true);
   *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([resting]));
-  master.poll().await;
+  rounds(&mut master, 2).await;
   assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a", "translator start a"]);
   assert!(
     !std::fs::read_to_string(stand.dir.join("process-yields.json"))
@@ -897,14 +906,14 @@ async fn an_occupant_that_yields_by_its_process_stays_for_a_later_tier_and_a_req
   ];
   placed(&stand, &[("translator", &["a"])]);
   master.discover().await;
-  master.poll().await;
+  rounds(&mut master, 1).await;
   assert_eq!(master.state().nodes[0].link.state, LinkState::Connected);
   // The song stands at a later tier; the voice's request of its own tier fits in the free memory.
   assert!(stand.adapted.lock().unwrap().is_empty());
   // The same request that the free memory does not hold makes it yield.
   *stand.answer.lock().unwrap() =
     slave(5000.0, store_resident(), None, json!([waiting(2, "voice", Some(6000))]));
-  master.poll().await;
+  rounds(&mut master, 1).await;
   assert_eq!(*stand.adapted.lock().unwrap(), ["translator stop a"]);
 }
 
@@ -955,6 +964,15 @@ fn demand(demands: &Demands, id: i64) -> Demand {
 
 fn granted_on(demands: &Demands, id: i64) -> Vec<String> {
   demand(demands, id).cards.into_iter().map(|card| card.node_name).collect()
+}
+
+/// Whether the master said the code of the service.
+fn said(master: &Master, code: &str, service: &str) -> bool {
+  master
+    .state()
+    .events
+    .iter()
+    .any(|event| event.code == code && event.text.starts_with(service))
 }
 
 fn adapted(stand: &Stand) -> Vec<String> {
@@ -1120,9 +1138,10 @@ async fn an_engine_in_use_is_never_stopped_for_its_own_tier_and_a_lower_tier_tak
   assert_eq!((taken.state, taken.taken.as_deref()), (DemandState::Waiting, Some("bench")));
   assert_eq!(taken.reason.unwrap().code, DemandWait::Held);
 
-  // The bench gone, what it stopped comes back and the demand is granted there again.
+  // The bench gone, what it stopped comes back and the demand is granted there again: the round that takes
+  // the stop's answer runs the start, and the round after takes the start's.
   *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([]));
-  rounds(&mut master, 1).await;
+  rounds(&mut master, 2).await;
   assert_eq!(adapted(&stand), ["lab-arena stop a", "lab-arena start a"]);
   let back = demand(&demands, held);
   assert_eq!((back.state, back.taken), (DemandState::Granted, None));
@@ -1186,9 +1205,10 @@ async fn a_stop_is_let_go_once_its_service_stands_again_by_its_health_or_by_a_pl
     demanding(both, two_engines(), &[("lab-arena", both), ("coder", both)], &["lab-arena a", "lab-arena b"]).await;
   let board = Arc::new(Mutex::new(Board::default()));
   master.attach(board.clone());
-  // The coder asks both cards: each idle lab-arena hands its card over, and the hand-overs are kept.
+  // The coder asks both cards: each idle lab-arena hands its card over, and the hand-overs are kept once the
+  // round after the stops answer takes them.
   *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([waiting(1, "coder", None)]));
-  rounds(&mut master, 1).await;
+  rounds(&mut master, 2).await;
   assert_eq!(adapted(&stand), ["lab-arena stop a", "lab-arena stop b"]);
   *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([]));
   let kept = || std::fs::read_to_string(stand.dir.join("process-yields.json")).unwrap();
@@ -1405,4 +1425,64 @@ async fn the_master_makes_no_room_for_a_ticket_that_would_put_its_service_above_
   let evicted = sent(&stand, "evict");
   assert_eq!(evicted.len(), 1, "{evicted:?}");
   assert!(evicted[0].contains("/card-units/model%2Fstore"), "{evicted:?}");
+}
+
+#[tokio::test]
+async fn a_start_that_never_answers_holds_no_round_and_a_claim_meanwhile_stops_the_occupant_there() {
+  let (_, stand) = master_of(slave(9000.0, store_resident(), None, json!([])), &["a"], None);
+  *stand.declared.lock().unwrap() = vec![
+    declared("lab-arena", 2.0, YieldBy::Process),
+    declared("coder", 2.0, YieldBy::Process),
+    declared("trainer", 0.5, YieldBy::Turn),
+  ];
+  placed(&stand, &[("lab-arena", &["a"]), ("coder", &["a"])]);
+  stand.running.lock().unwrap().insert("lab-arena a".into());
+  // The coder was stopped to yield a, and nothing that made it yield stands: its start is held by the test.
+  let yields = json!({ "stopped": [
+    { "serviceName": "coder", "nodeName": "a", "reason": "trainer claims the card", "kind": "yield" },
+  ] });
+  std::fs::write(stand.dir.join("process-yields.json"), yields.to_string()).unwrap();
+  let gate = Arc::new(tokio::sync::Notify::new());
+  stand.gates.lock().unwrap().insert("coder start a".into(), gate.clone());
+  let mut master = Master::new(Arc::new(StandWorld(stand.clone())), stand.dir.join("card-rules.yaml"), 2.0);
+  let demands = Arc::new(Demands::default());
+  master.attach_demands(demands.clone());
+  master.discover().await;
+  let reads = || {
+    stand
+      .commands
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|command| command.ends_with("/card"))
+      .count()
+  };
+  rounds(&mut master, 1).await;
+  let coder = ask(&demands, "coder", None, None);
+
+  // Every round reads the node while the start hangs, the start is run once, and a demand of the coder waits
+  // on it, starting there.
+  let before = reads();
+  rounds(&mut master, 5).await;
+  assert_eq!(reads(), before + 5);
+  assert_eq!(adapted(&stand), ["coder start a"]);
+  let waiting = demand(&demands, coder);
+  assert_eq!(waiting.state, DemandState::Waiting);
+  assert_eq!(waiting.reason.unwrap().code, DemandWait::Starting);
+
+  // A claim of a lower tier comes while it hangs: the lab-arena standing there is stopped for it.
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), Some("trainer"), json!([]));
+  rounds(&mut master, 2).await;
+  assert_eq!(reads(), before + 7);
+  assert_eq!(adapted(&stand), ["coder start a", "lab-arena stop a"]);
+  assert!(said(&master, "occupant-stopped", "lab-arena"));
+  assert!(!said(&master, "occupant-started", "coder"));
+
+  // The start answers at last: the round after takes it, and the coder, standing now, yields to the claim
+  // as well.
+  gate.notify_one();
+  rounds(&mut master, 3).await;
+  assert!(said(&master, "occupant-started", "coder"));
+  assert!(said(&master, "occupant-stopped", "coder"));
+  assert_eq!(adapted(&stand), ["coder start a", "lab-arena stop a", "coder stop a"]);
 }

@@ -671,6 +671,7 @@ pub async fn once(mut master: Master) -> String {
   master.read_rules_if_changed();
   master.discover().await;
   master.poll().await;
+  master.finish_runs().await;
   let mut out = Vec::new();
   let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
   let mut serializer = serde_json::Serializer::with_formatter(&mut out, formatter);

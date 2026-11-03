@@ -246,10 +246,20 @@ sequenceDiagram
   - **It makes an occupant that yields by its process go down and come back** (「Yielding by the
     process」).
   - **How often it reads:** every two seconds, and the node service once a minute, each placed service's
-    adapter's `health` on each of its nodes read with it, apart from the rounds, for where the service
-    stands now; a service it starts is read there again once started, and one it stops stands nowhere it
-    stopped it;
+    adapter's `health` on each of its nodes read with it, for where the service stands now;
     `CARD_MASTER_READ_EVERY_MS` and `CARD_MASTER_DISCOVER_EVERY_MS` set them otherwise.
+  - **Every adapter verb runs beside the rounds, never inside one.** A `start`, `stop` or `health` the
+    master runs is a run of its own, one at a time for each service, node and verb: a round that would run
+    a verb already running for that service on that node leaves it be, and the first round after its
+    answer comes takes that answer and does what it calls for. The rounds go on meanwhile, every node read
+    at each, so a verb that takes long, or does not end, holds no node's read, no other verb and nothing
+    else a round does, and a node whose `health` does not answer holds no other node's.
+  - **A service it starts stands `starting` on that node until its `health` answers,** read there as soon
+    as the `start` answers: a demand of it waits on that start, and no other start of it is run there
+    meanwhile. **One it stops is stopping there until its `stop` answers,** and stands nowhere it stopped
+    it once it has. While either runs, the card is chosen for no other demand.
+  - **The round after a `start` or a `stop` ends comes at once,** not after `CARD_MASTER_READ_EVERY_MS`,
+    so what its answer calls for is done without waiting out the rest.
   - **A node whose slave gives no card is lost,** and read again at every round all the same, so it is
     connected at the first read that gives one. It is said once in the notes when it is lost, a node never
     reached since the master started among them, with why: the shell's error, or what the slave answered
@@ -292,13 +302,18 @@ sequenceDiagram
   use, and the demands granted there are told so. No measure of time makes it yield.
 - **A hand-over between two such occupants of one tier** happens only where the standing one rests, or
   where the one caller using it lends its card within a demand of its own (「Demands」).
-- **Down:** the master runs the adapter's `stop` for that node alone, says `occupant-stopped`, and keeps
-  the stop in `placements/process-yields.json` beside the rules, so a master restarted meanwhile still
-  brings it back. A stop for an occupant of its own tier that yields by its process as well is kept as a
-  hand-over; every other stop is kept as a yield.
+- **Down:** the master runs the adapter's `stop` for that node alone, beside the rounds (「Master and
+  slaves」), and once it answers says `occupant-stopped` and keeps the stop in
+  `placements/process-yields.json` beside the rules, so a master restarted meanwhile still brings it back.
+  A stop for an occupant of its own tier that yields by its process as well is kept as a hand-over; every
+  other stop is kept as a yield.
 - **Back:** once nothing that made a yield stands on the node — the ticket gone, the claim ended — the
-  master runs the adapter's `start` there and says `occupant-started`. A `stop` or `start` that fails is
-  said once and tried again at the next round.
+  master runs the adapter's `start` there, beside the rounds, then its `health`, and once the `start`
+  answers says `occupant-started`. A `stop` or `start` that fails is said once and tried again at the next
+  round.
+- **One `stop` or `start` of a service on a node at a time:** while one runs, the rounds go on — a claim
+  or a ticket that comes meanwhile stops any other occupant there as it would otherwise — and neither verb
+  of that service is run on that node again until its answer is taken.
 - **A hand-over is not given back.** Its stop is kept as a hand-over, and the master starts the occupant
   that handed the card over on that node only for a demand of its own or as the return of a lent turn
   (「Demands」), never because the occupant it handed to went down. Where a ticket of a lower tier or a
@@ -373,8 +388,10 @@ sequenceDiagram
 - **Granted card by card.** A card is granted on a node of the service's placement once the service stands
   there for the demand:
   - a service that yields by its process is started there by its adapter's `start` where it does not
-    stand, and stands once its `health` answers `running`; the round after that bring ends comes at once,
-    not after `CARD_MASTER_READ_EVERY_MS`, so the card is granted as soon as its `health` answers;
+    stand, the occupants it takes the card from stopped first, every verb run beside the rounds, one bring
+    on a card at a time (「Master and slaves」); it stands once its `health` answers `running`, and the
+    round after that bring ends comes at once, not after `CARD_MASTER_READ_EVERY_MS`, so the card is
+    granted as soon as its `health` answers;
   - a service that yields by its turn stands where its server runs, its model loading on its own ticket
     as it serves;
   - a service with no adapter, such as the bench, stands where its tier lets it take the card, and its
@@ -394,10 +411,11 @@ sequenceDiagram
   another」 below); a caller that holds none waits in the line, behind the demands asked before it, until a
   card frees — its last demand given back, a claim or a lower tier gone. That line is the order demands
   were asked in, nothing more: nothing in use is taken for a waiting demand, no time ends the wait and
-  none makes anything give way. Its answer says what it waits on, one reason at a time: the service
-  starting on a card; its ceiling, naming the cards the service uses; every card in use, naming the
-  services using them; a claim or a ticket of a lower tier; a `start` that failed, tried again at the next
-  round.
+  none makes anything give way. A card where a `start` or `stop` of another service runs is in use by that
+  service until its answer is taken, and one where the asked service's own `start` runs has it starting
+  there. Its answer says what it waits on, one reason at a time: the service starting on a card; its
+  ceiling, naming the cards the service uses; every card in use, naming the services using them; a claim
+  or a ticket of a lower tier; a `start` that failed, tried again at the next round.
 - **A lower tier still takes a card.** Where a claim or a ticket of a lower tier stops the service on a
   granted card, every answer to the demand says so, naming the occupant, and the card is granted again
   once the service stands there again or another card opens, its work key preferring the same card.
