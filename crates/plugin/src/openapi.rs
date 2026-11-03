@@ -509,7 +509,7 @@ fn routes(generator: &mut SchemaGenerator) -> Vec<Route> {
       "/demands/{demandId}",
       Master,
       "getDemand",
-      "A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it.",
+      "A demand as it stands, holding the answer open with waitMs while it waits, or in any state with watch; never dropped for it.",
       read::<Demand>(generator),
     )
     .at::<i64>(generator, "demandId", DEMAND)

@@ -17,7 +17,7 @@ use bmo_arbiter_client::cluster::{
   CardStage, CardTurn, Cluster, ClusterCard, ClusterNode, ClusterUnit, DeclaredUnit, Group, MasterInfo,
   NodeLink, Note, OccupantTier, QueuedTicket,
 };
-use bmo_arbiter_client::demands::{DemandCard, DemandReason, DemandWait};
+use bmo_arbiter_client::demands::{DemandCard, DemandPool, DemandReason, DemandWait};
 use futures_util::FutureExt;
 use futures_util::future::join_all;
 use serde_json::Value;
@@ -224,8 +224,27 @@ enum Opening {
   Held(String),
   /// Open, but a card the service does not use while it uses as many as its ceiling lets it.
   Ceiling,
+  /// Open, but a card the demand's pool does not use while it uses as many as its limit lets it.
+  Pool,
   /// Not a card the service can be had on now.
   Closed,
+}
+
+/// What holds a demand back from a card it does not use yet: the cards its service uses and, where it stands
+/// in a pool, that pool with the cards it uses of the service.
+struct Limits {
+  used: BTreeSet<String>,
+  pool: Option<(DemandPool, BTreeSet<String>)>,
+}
+
+impl Limits {
+  /// Whether the card on the node would put the demand's pool above its limit.
+  fn above_pool(&self, node: &str) -> bool {
+    self
+      .pool
+      .as_ref()
+      .is_some_and(|(pool, using)| !using.contains(node) && using.len() >= pool.cards as usize)
+  }
 }
 
 /// One note of the picture: when, in the master's clock's seconds, on which node, the code a reader
@@ -352,6 +371,7 @@ impl Master {
   /// A service standing on the node, its instance kept; a stop the master kept of it there let go, as it
   /// stands again whatever brought it up (docs/placement.md, 「Yielding by the process」).
   fn standing_again(&mut self, key: (String, String), instance: Instance, how: &str) {
+    self.yields_failed.remove(&(key.0.clone(), key.1.clone(), "start"));
     if self.stopped.remove(&key).is_some() {
       self.save_yields();
       self.say(
@@ -970,6 +990,25 @@ impl Master {
     used
   }
 
+  /// What holds the demand back: its service's cards and its pool's, the demand's own counted by `seats`.
+  fn limits(&self, held: &Held, book: &Book, seats: &[Seat]) -> Limits {
+    let used = self.cards_used(&held.service, Some(book), Some((held.id, seats)));
+    let pool = held.pool.clone().map(|pool| {
+      let using = book
+        .held
+        .values()
+        .filter(|one| one.id != held.id && one.service == held.service)
+        .filter(|one| one.pool.as_ref().is_some_and(|theirs| theirs.key == pool.key))
+        .flat_map(|one| one.seats.iter())
+        .chain(seats.iter())
+        .filter_map(Seat::uses)
+        .map(str::to_owned)
+        .collect();
+      (pool, using)
+    });
+    Limits { used, pool }
+  }
+
   /// Whether the card on the node is one the service may not take: one it does not use while it uses as many
   /// as its declaration's ceiling lets it.
   fn above_ceiling(declaration: &Declaration, used: &BTreeSet<String>, node: &str) -> bool {
@@ -1106,7 +1145,7 @@ impl Master {
 
   /// The card a demand of the service is granted next by the one rule — where it stands idle, else where it
   /// can be brought up, the card its work key was last granted on first among those equally open, then the
-  /// placement's order, never a card that would put it above its ceiling, `used` being the cards it uses —
+  /// placement's order, never a card that would put it above its ceiling or its pool above its limit —
   /// with every card's opening, which says what it waits on where none is open.
   #[allow(clippy::too_many_arguments)]
   fn choose(
@@ -1115,7 +1154,7 @@ impl Master {
     declaration: &Declaration,
     work_key: Option<&str>,
     seated: &HashMap<String, Vec<String>>,
-    used: &BTreeSet<String>,
+    limits: &Limits,
     placements: &Placements,
   ) -> (Option<(String, Opening)>, Openings) {
     let openings: Openings = placements
@@ -1123,7 +1162,10 @@ impl Master {
       .iter()
       .map(|node| {
         let opening = match self.opening(rules, declaration, node, seated) {
-          Opening::Stands(_) | Opening::Bring(_) if Self::above_ceiling(declaration, used, node) => {
+          Opening::Stands(_) | Opening::Bring(_) if limits.above_pool(node) => Opening::Pool,
+          Opening::Stands(_) | Opening::Bring(_)
+            if Self::above_ceiling(declaration, &limits.used, node) =>
+          {
             Opening::Ceiling
           }
           opening => opening,
@@ -1164,9 +1206,101 @@ impl Master {
         Seat::Starting(node.to_owned())
       }
       Opening::Stands(instance) => self.grant(held, node, &instance),
-      Opening::InUse(_) | Opening::Starting | Opening::Held(_) | Opening::Ceiling | Opening::Closed => {
-        Seat::Waiting
-      }
+      Opening::InUse(_)
+      | Opening::Starting
+      | Opening::Held(_)
+      | Opening::Ceiling
+      | Opening::Pool
+      | Opening::Closed => Seat::Waiting,
+    }
+  }
+
+  /// The card a waiting demand takes from demands of a worse rank (docs/placement.md, 「A demand's rank」), where
+  /// one may be taken: every demand on it at a worse rank and holding it plainly, within the demand's limits,
+  /// and the service to be had there were those demands gone. Their worst rank first; then a card where the
+  /// service stands, so no engine stops; then its work key's; then the one whose demand was asked last.
+  #[allow(clippy::too_many_arguments)]
+  fn outrank(
+    &self,
+    rules: &Rules,
+    declaration: &Declaration,
+    held: &Held,
+    book: &Book,
+    seated: &HashMap<String, Vec<String>>,
+    limits: &Limits,
+    placements: &Placements,
+  ) -> Option<(String, Opening)> {
+    let last = held.work_key.as_ref().and_then(|key| self.work_cards.get(key));
+    placements
+      .nodes_of(&declaration.service)
+      .iter()
+      .filter(|node| !limits.above_pool(node) && !Self::above_ceiling(declaration, &limits.used, node))
+      .filter_map(|node| {
+        let on: Vec<&Held> = book
+          .held
+          .values()
+          .filter(|one| one.seats.iter().any(|seat| seat.node() == Some(node.as_str())))
+          .collect();
+        let plain = |seat: &Seat| {
+          seat.node() != Some(node.as_str()) || matches!(seat, Seat::Granted(_) | Seat::Lent(_))
+        };
+        if on.is_empty() || !on.iter().all(|one| one.rank > held.rank && one.seats.iter().all(plain)) {
+          return None;
+        }
+        let mut gone = seated.clone();
+        gone.remove(node);
+        let opening = self.opening(rules, declaration, node, &gone);
+        let stands = match opening {
+          Opening::Stands(_) => 0,
+          Opening::Bring(_) => 1,
+          _ => return None,
+        };
+        let worst = on.iter().map(|one| one.rank).max()?;
+        let latest = on.iter().map(|one| one.id).max()?;
+        let rank = (
+          std::cmp::Reverse(worst),
+          stands,
+          u8::from(Some(node) != last),
+          std::cmp::Reverse(latest),
+        );
+        Some((rank, (node.clone(), opening)))
+      })
+      .min_by_key(|(rank, _)| *rank)
+      .map(|(_, chosen)| chosen)
+  }
+
+  /// Every demand on the node put back in the line, its seat there given up to the demand of a better rank
+  /// that takes the card; each said, so how often a card is taken can be read.
+  fn take_seats(&mut self, book: &mut Book, node: &str, taker: &Held) {
+    let by = taker.reference.clone().unwrap_or_else(|| format!("a demand of rank {}", taker.rank));
+    let losing: Vec<Held> = book
+      .held
+      .values()
+      .filter(|one| one.seats.iter().any(|seat| seat.node() == Some(node)))
+      .cloned()
+      .collect();
+    for one in losing {
+      let seats = one
+        .seats
+        .iter()
+        .map(|seat| {
+          if seat.node() == Some(node) {
+            Seat::Outranked { by: by.clone() }
+          } else {
+            seat.clone()
+          }
+        })
+        .collect();
+      book.seat(one.id, seats, one.reason.clone());
+      let named = one.reference.as_deref().unwrap_or("a demand");
+      self.say(
+        Some(node),
+        "card-outranked",
+        format!(
+          "{named} of {} (rank {}) gave its card to {by} (rank {})",
+          one.service, one.rank, taker.rank
+        ),
+      );
     }
   }
 
@@ -1313,6 +1447,7 @@ impl Master {
     let started = match brought.started {
       Ok(instance) => {
         self.say(Some(&node), "occupant-started", format!("{service} started for a demand"));
+        self.yields_failed.remove(&(service.clone(), node.clone(), "start"));
         self.instances.insert(key, instance.clone());
         Ok(instance)
       }
@@ -1418,8 +1553,10 @@ impl Master {
         seated.entry(node.to_owned()).or_default().push(held.service.clone());
       }
     }
-    let ids: Vec<i64> = book.held.keys().copied().collect();
-    for id in ids {
+    // the line: by rank, then by the order demands were asked in
+    let mut line: Vec<(u32, i64)> = book.held.values().map(|held| (held.rank, held.id)).collect();
+    line.sort_unstable();
+    for (_, id) in line {
       let Some(held) = book.held.get(&id).cloned() else { continue };
       let Some(declaration) = self.declaration(&held.service).cloned() else {
         let reason = DemandReason {
@@ -1441,7 +1578,7 @@ impl Master {
           .filter(|(one, _)| *one != at)
           .map(|(_, seat)| seat.clone())
           .collect();
-        let used = self.cards_used(&held.service, Some(&*book), Some((id, &others)));
+        let limits = self.limits(&held, &book, &others);
         match seats[at].clone() {
           Seat::Granted(card) => {
             if let Some(by) = self.held_by(&rules, tier, &card.node_name) {
@@ -1462,7 +1599,7 @@ impl Master {
               continue;
             }
             let (chosen, seen) =
-              self.choose(&rules, &declaration, held.work_key.as_deref(), &seated, &used, &placements);
+              self.choose(&rules, &declaration, held.work_key.as_deref(), &seated, &limits, &placements);
             openings = Some(seen);
             if let Some((to, opening)) = chosen {
               if let Some(using) = seated.get_mut(&node)
@@ -1475,7 +1612,7 @@ impl Master {
               seats[at] = Seat::Taken { node, by: holder };
             }
           }
-          Seat::Waiting if !failed_now.contains(&id) => {
+          Seat::Waiting | Seat::Outranked { .. } if !failed_now.contains(&id) => {
             let outer_card = outer.as_ref().and_then(|outer| {
               outer.seats.iter().find_map(|seat| match seat {
                 Seat::Granted(card) => Some(card.clone()),
@@ -1496,7 +1633,7 @@ impl Master {
               continue;
             }
             let (chosen, seen) =
-              self.choose(&rules, &declaration, held.work_key.as_deref(), &seated, &used, &placements);
+              self.choose(&rules, &declaration, held.work_key.as_deref(), &seated, &limits, &placements);
             openings = Some(seen);
             if let Some((to, opening)) = chosen {
               seats[at] = self.take_card(&held, &declaration, &to, opening, &placements, &mut seated);
@@ -1509,7 +1646,8 @@ impl Master {
               && !self.bringing.contains_key(&card.node_name)
               && self.moving_on(&card.node_name).next().is_none()
               && self.held_by(&rules, tier, &card.node_name).is_none()
-              && !Self::above_ceiling(&declaration, &used, &card.node_name)
+              && !Self::above_ceiling(&declaration, &limits.used, &card.node_name)
+              && !limits.above_pool(&card.node_name)
               && (declaration.yield_by == YieldBy::Process
                 || self.stands(&declaration, &card.node_name).is_some())
             {
@@ -1531,13 +1669,23 @@ impl Master {
               seated.entry(node.clone()).or_default().push(held.service.clone());
               self.bring(id, &declaration, &node, handover, &placements);
               seats[at] = Seat::Starting(node);
+              continue;
+            }
+            // no card open and none to lend: one taken from demands of a worse rank
+            if let Some((to, opening)) =
+              self.outrank(&rules, &declaration, &held, &book, &seated, &limits, &placements)
+            {
+              self.take_seats(&mut book, &to, &held);
+              seated.remove(&to);
+              seats[at] = self.take_card(&held, &declaration, &to, opening, &placements, &mut seated);
             }
           }
           // its card back from the demand it was lent to, once its service is below its ceiling
           Seat::Returning(node)
             if !self.bringing.contains_key(&node)
               && self.moving_on(&node).next().is_none()
-              && !Self::above_ceiling(&declaration, &used, &node) =>
+              && !limits.above_pool(&node)
+              && !Self::above_ceiling(&declaration, &limits.used, &node) =>
           {
             let handover: Vec<Declaration> = self
               .instances
@@ -1552,8 +1700,9 @@ impl Master {
           _ => {}
         }
       }
-      let used = self.cards_used(&held.service, Some(&*book), Some((id, &seats)));
-      let reason = self.reason(&held, &seats, openings, &rules, &declaration, &seated, &used, &placements);
+      let limits = self.limits(&held, &book, &seats);
+      let reason =
+        self.reason(&held, &seats, openings, &rules, &declaration, &seated, &limits, &placements);
       book.seat(id, seats, reason);
     }
     let version = book.version;
@@ -1575,7 +1724,7 @@ impl Master {
     rules: &Rules,
     declaration: &Declaration,
     seated: &HashMap<String, Vec<String>>,
-    used: &BTreeSet<String>,
+    limits: &Limits,
     placements: &Placements,
   ) -> Option<DemandReason> {
     let service = &held.service;
@@ -1588,6 +1737,7 @@ impl Master {
         text: format!("{service} did not start ({why}); it is tried again at the next round"),
       });
     }
+    let used = &limits.used;
     let ceiling = || DemandReason {
       code: DemandWait::Ceiling,
       text: ceiling_text(declaration, used),
@@ -1617,8 +1767,20 @@ impl Master {
         text: format!("{by} holds the card {service} was granted on {node}"),
       });
     }
+    // a start that keeps failing on a node of its placement, which a demand would otherwise read as starting
+    let failing = placements.nodes_of(service).iter().find_map(|node| {
+      let reached = self.nodes.get(node).is_some_and(|view| view.link.state == LinkState::Connected);
+      let why = self.yields_failed.get(&(service.clone(), node.clone(), "start")).filter(|_| reached)?;
+      Some((node, why))
+    });
+    if let Some((node, why)) = failing {
+      return Some(DemandReason {
+        code: DemandWait::StartFailed,
+        text: format!("{service} did not start on {node} ({why}); it is tried again at the next round"),
+      });
+    }
     let openings = openings.unwrap_or_else(|| {
-      self.choose(rules, declaration, held.work_key.as_deref(), seated, used, placements).1
+      self.choose(rules, declaration, held.work_key.as_deref(), seated, limits, placements).1
     });
     let named = |pick: fn(&Opening) -> Option<&String>| -> Vec<String> {
       openings
@@ -1641,7 +1803,23 @@ impl Master {
     // at its ceiling, no card it does not use is open to it, whatever else holds them
     let capped = declaration.cards.is_some_and(|ceiling| used.len() >= ceiling as usize)
       || openings.iter().any(|(_, opening)| matches!(opening, Opening::Ceiling));
-    Some(if capped {
+    let pooled = limits.pool.as_ref().filter(|(pool, using)| {
+      using.len() >= pool.cards as usize
+        || openings.iter().any(|(_, opening)| matches!(opening, Opening::Pool))
+    });
+    Some(if let Some((pool, using)) = pooled {
+      let names: Vec<&str> = using.iter().map(String::as_str).collect();
+      DemandReason {
+        code: DemandWait::Pool,
+        text: format!(
+          "the pool {} uses {} cards of {service} and its limit is {}: {}",
+          pool.key,
+          using.len(),
+          pool.cards,
+          names.join(", ")
+        ),
+      }
+    } else if capped {
       ceiling()
     } else if let Some(node) = starting {
       DemandReason {

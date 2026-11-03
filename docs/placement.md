@@ -299,11 +299,12 @@ sequenceDiagram
   ceiling」).
 - **Its turn is in use while a demand for it stands on the node,** and rests while none does
   (「Demands」). The node ticket its own turn client holds says only that it stands.
-- **In use, it is never stopped for an occupant of its own tier.** A ticket of its own tier waits until
+- **In use, it is never stopped for a ticket of its own tier.** A ticket of its own tier waits until
   the last demand on it is given back; only a claim or a ticket of a lower tier stops it while it is in
   use, and the demands granted there are told so. No measure of time makes it yield.
-- **A hand-over between two such occupants of one tier** happens only where the standing one rests, or
-  where the one caller using it lends its card within a demand of its own (「Demands」).
+- **A hand-over between two such occupants of one tier** happens only where the standing one rests, where
+  the one caller using it lends its card within a demand of its own, or where a demand of a better rank for
+  the other occupant takes the card (「A demand's rank」).
 - **Down:** the master runs the adapter's `stop` for that node alone, beside the rounds (「Master and
   slaves」), and once it answers says `occupant-stopped` and keeps the stop in
   `placements/process-yields.json` beside the rules, so a master restarted meanwhile still brings it back.
@@ -386,7 +387,8 @@ sequenceDiagram
   a card. It takes no card itself: on each card granted, the service's own process takes the card through
   the node's queue as every occupant does.
 - **What it names:** the service; how many cards, one where it names none; and, as the caller says, the
-  demand it is asked within, the key of the work it continues, and a reference that is only shown.
+  demand it is asked within, the key of the work it continues, a reference that is only shown, its rank
+  (「A demand's rank」) and its pool (「A pool」).
 - **Granted card by card.** A card is granted on a node of the service's placement once the service stands
   there for the demand:
   - a service that yields by its process is started there by its adapter's `start` where it does not
@@ -402,22 +404,26 @@ sequenceDiagram
   The answer names each card's node and, where the service's adapter reports them (「An adapter's
   verbs」), the address its callers reach it at and the file its key is read from. The caller sends there
   and gives the demand back once its work ends.
-- **One rule for every caller.** A card is granted where the service stands with no demand on it; else
+- **One rule for every caller, in the line's order.** The line is by rank, then by the order demands were
+  asked in. A card is granted where the service stands with no demand on it; else
   on a card that is free, or whose standing occupant of the service's tier has no demand on it and a turn
   not in use, which is made to yield — by its process as a hand-over, else by its units or its turn as the
   rules say — and the service is brought up there. Among cards equally open, the one the master last
   granted the demand's work key on comes first, so work that left its state on a card goes back to it. A
   card a claim or a ticket of a lower tier holds is never chosen, a card holds one demand at a time, and
-  no card is chosen that would put the service above its ceiling (「A service's ceiling」 below).
+  no card is chosen that would put the service above its ceiling or the demand's pool above its limit
+  (「A service's ceiling」, 「A pool」 below).
 - **Where no card is open:** a caller that holds a card hands its own over (「A demand asked within
-  another」 below); a caller that holds none waits in the line, behind the demands asked before it, until a
-  card frees — its last demand given back, a claim or a lower tier gone. That line is the order demands
-  were asked in, nothing more: nothing in use is taken for a waiting demand, no time ends the wait and
-  none makes anything give way. A card where a `start` or `stop` of another service runs is in use by that
+  another」 below); a demand of a better rank takes a card from demands of a worse one (「A demand's rank」
+  below); any other waits in the line, behind the demands ahead of it, until a card frees — its last demand
+  given back, a claim or a lower tier gone. Between demands of one rank the line is the order they were
+  asked in, nothing more: nothing in use is taken for a waiting demand of the same rank, no time ends the
+  wait and none makes anything give way. A card where a `start` or `stop` of another service runs is in use by that
   service until its answer is taken, and one where the asked service's own `start` runs has it starting
-  there. Its answer says what it waits on, one reason at a time: the service starting on a card; its
-  ceiling, naming the cards the service uses; every card in use, naming the services using them; a claim
-  or a ticket of a lower tier; a `start` that failed, tried again at the next round.
+  there. Its answer says what it waits on, one reason at a time: a `start` that failed, whether for this
+  demand or to bring the service back on a node of its placement, tried again at the next round; the service
+  starting on a card; its pool's limit, naming the cards the pool uses; its ceiling, naming the cards the
+  service uses; every card in use, naming the services using them; a claim or a ticket of a lower tier.
 - **A lower tier still takes a card.** Where a claim or a ticket of a lower tier stops the service on a
   granted card, every answer to the demand says so, naming the occupant, and the card is granted again
   once the service stands there again or another card opens, its work key preferring the same card.
@@ -431,6 +437,8 @@ sequenceDiagram
   bounds any of it. A card is lent, and comes back, only within the ceilings: X is lent only where the
   asked service is below its own, and X comes back to the caller's service only once that service is below
   its own, waiting meanwhile with the ceiling as its reason.
+- **A rank never reaches a node and never passes a tier:** what a claim or a ticket of a lower tier takes,
+  it takes whatever a demand's rank, and what a rank takes is only ever the seat of another demand.
 - **Given back by its caller alone.** A demand stands until its caller gives it back; nothing drops it
   for silence. A caller keeps the ids of the demands it holds and gives back, at its own start, those its
   work no longer needs; the cluster shows every demand, and a person may give one back through the same
@@ -439,6 +447,43 @@ sequenceDiagram
 - **The rules' unit of a service yielding by its process** — its `on-demand` unit — is its card
   accounting; a demand is what asks for it, and the rules plan nothing for it.
 - **Shown** in the cluster, each demand with its service, its cards, its state and its reason.
+
+#### A demand's rank
+
+- **A demand asks at a rank,** a whole number of zero or more, the lower first; one that names none is
+  asked at the rank of the demand it is asked within, else at `1`. Which caller asks at which rank is the
+  caller's own setting; the master keeps only the number and knows no caller.
+- **A waiting demand takes a card from demands of a worse rank where no card is open to it** and its own
+  caller's card is not lent to it. A card can be taken only where every demand on it, one lent the card among
+  them, stands at a worse rank; where the service could be had there were those demands gone; and where
+  taking it puts neither the service above its ceiling nor the demand's pool above its limit. No card a
+  claim or a ticket of a lower tier holds is taken, and none where a `start` or a `stop` runs.
+- **Which card:** where those demands stand at the worst rank; then one where the asked service stands, so
+  no engine stops; then the one the demand's work key was last granted on; then the one whose demand was
+  asked last, which has done least.
+- **The engine stops only where the asker wants another.** Where the asked service stands on the card, the
+  seat changes and nothing runs on the node. Where another stands there, it is made to yield as a hand-over
+  and the asked service is brought up, as for any other card (「Yielding by the process」).
+- **A demand that loses its card keeps its place in the line** and holds no card meanwhile: it uses no card
+  of its service's ceiling or its pool's limit, it answers `taken` naming the reference of the demand that
+  took the card, and it is granted again by the one rule, its work key preferring that card. What its caller
+  had in hand is the caller's to stop: the master touches nothing of a request on the engine.
+- **Said** among the notes as `card-outranked`, one for each demand that loses a card, so how often a card
+  is taken can be read.
+
+#### A pool
+
+- **A demand may name a pool:** a key that means nothing to the master and the most cards the demands of
+  that key use of one service at once. One that names none is in the pool of the demand it is asked within,
+  where that one is in one. How a caller keys its work and what limit it asks are the caller's own settings.
+- **The cards a pool uses of a service** are each card a demand of that key and that service holds, as a
+  service's ceiling counts them, a demand's and a lent card's alike.
+- **No card is chosen, lent or brought back that would put the pool above its limit:** a demand at its limit
+  takes only a card its pool uses already, and otherwise waits in the line with the limit as its reason,
+  never holding back a demand behind it of another pool or none. Each demand answers to the limit it asked.
+- **A limit takes nothing in use and ends no wait,** as a ceiling does.
+- **A demand held to a pool's limit is told so** (`pool` among its answer's reasons), and its answer carries
+  its pool.
 
 #### A service's ceiling
 

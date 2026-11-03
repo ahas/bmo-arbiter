@@ -340,6 +340,12 @@ async fn a_demand_is_granted_waits_in_line_while_its_card_is_in_use_and_is_given
     asked(&world, Method::POST, "/demands", Some(r#"{"serviceName":"demo","within":7}"#)).await;
   assert_eq!((status, refused["code"].as_str()), (404, Some("not-found")));
 
+  for pool in [r#"{"key":"","cards":1}"#, r#"{"key":"k","cards":0}"#] {
+    let body = format!(r#"{{"serviceName":"demo","pool":{pool}}}"#);
+    let (status, refused) = asked(&world, Method::POST, "/demands", Some(&body)).await;
+    assert_eq!((status, refused["code"].as_str()), (400, Some("bad-request")), "{pool}");
+  }
+
   // The service is brought up on a for the first; the answer is held open until it is granted.
   let (status, first) = asked(
     &world,
@@ -365,6 +371,13 @@ async fn a_demand_is_granted_waits_in_line_while_its_card_is_in_use_and_is_given
     asked(&world, Method::GET, &format!("/demands/{first_id}?waitMs=10000"), None).await;
   assert_eq!((status, again["state"].as_str()), (200, Some("granted")));
   assert!(began.elapsed() < Duration::from_secs(1), "{:?}", began.elapsed());
+  assert_eq!((again["rank"].as_u64(), again["pool"].as_str()), (Some(1), None));
+  // A caller standing on the card asks to be held until it moves.
+  let began = std::time::Instant::now();
+  let (status, watched) =
+    asked(&world, Method::GET, &format!("/demands/{first_id}?waitMs=300&watch=true"), None).await;
+  assert_eq!((status, watched["state"].as_str()), (200, Some("granted")));
+  assert!(began.elapsed() >= Duration::from_millis(300), "{:?}", began.elapsed());
 
   // The one card is in use: the next waits, its answer held only as long as asked, and it stands.
   let (status, second) = asked(&world, Method::POST, "/demands", Some(r#"{"serviceName":"demo"}"#)).await;

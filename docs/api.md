@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.10**.
+This document states version **0.1.0-rev.11**.
 
 ## The wire format
 
@@ -238,27 +238,30 @@ A demand asks for cards of a service that stands on several nodes; which node an
 master's to decide (`docs/placement.md`, 「Demands」).
 
 - **`POST /demands`** with `serviceName`, and optionally `count?` (how many cards, one where absent),
-  `within?` (the id of a granted demand of the caller's it is asked within), `workKey?` (the key of the work it continues), `ref?` (shown) and `waitMs?` (how long to hold the answer
+  `within?` (the id of a granted demand of the caller's it is asked within), `workKey?` (the key of the work it continues), `ref?` (shown), `rank?` (a whole number, zero or more, the lower first; absent, the rank of the demand it is asked within, else `1`: `docs/placement.md`, 「A demand's rank」), `pool?` (`key`, a text that is not empty, and `cards`, the most cards the demands of that key use of one service at once, one or more; absent, the pool of the demand it is asked within, else none: `docs/placement.md`, 「A pool」) and `waitMs?` (how long to hold the answer
   open).
   - `201` with the demand where every card it asks is granted, `202` with the demand where it waits for
     any, with a `Retry-After` header of 1. `waitMs` holds the answer open as `GET` does.
-  - `400` `bad-request`: a body that does not name a service, a `count` of nought, or a field of the wrong
-    kind. `422` `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not
+  - `400` `bad-request`: a body that does not name a service, a `count` of nought, a pool with an empty
+    `key` or `cards` of nought, or a field of the wrong kind. `422` `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not
     hold.
 - **`GET /demands`** — `200` with a page of every demand the master holds, in the order they were asked.
 - **`GET /demands/{demandId}`** — `200` with the demand. `waitMs` holds the answer open only while the
-  caller still waits on it: a demand `waiting`, its service `starting` on a card among them, with no card
-  `taken`. Such an answer is held until a card is granted, granted again, lent, or taken by a lower tier,
+  caller still waits on it: a demand `waiting`, its service `starting` on a card among them, a card of it
+  `taken` or not. Such an answer is held until a card is granted, granted again, lent, or taken,
   or the time runs out, when it is answered as it stands and the caller asks again; the demand itself is
-  never dropped for it. A demand `granted`, `partly` or `lent`, or one with a card `taken`, is answered
-  at once, whatever `waitMs` asks. `404` `not-found`, at once: a demand the master does not hold, one
-  given back among them, so a new one is asked for.
+  never dropped for it. A demand `granted`, `partly` or `lent` is answered
+  at once, whatever `waitMs` asks, unless `watch=true`, which holds the answer open the same way in every
+  state, for a caller standing on a card that wants to hear the moment it is taken. `404` `not-found`, at
+  once: a demand the master does not hold, one given back among them, so a new one is asked for.
 - **`DELETE /demands/{demandId}`** — gives it back, every card of it: `204`, or `404` `not-found`. The
   caller alone gives a demand back; nothing else drops one.
-- **A demand** is `id`, `serviceName`, `count`, `cards` (each card granted: `nodeName`, `address?` and
+- **A demand** is `id`, `serviceName`, `count`, `rank`, `pool?` (`key`, `cards`), `cards` (each card granted: `nodeName`, `address?` and
   `keyFile?` as the service's adapter reports them), `state` (`waiting`, `granted`, `partly` or `lent`),
-  `taken?` (the claimant or lower-tier occupant that stopped the service on one of its cards), `reason?`
-  (while a card waits: `code` — `starting`, `ceiling` (the service uses as many cards as its ceiling
+  `taken?` (the claimant or lower-tier occupant that stopped the service on one of its cards, or the
+  reference of the demand of a better rank that took one), `reason?`
+  (while a card waits: `code` — `starting`, `pool` (its pool uses as many cards as its limit lets it),
+  `ceiling` (the service uses as many cards as its ceiling
   lets it), `in-use`, `held`, `start-failed` — and `text`, an English sentence), `waitedMs`, `within?`,
   `workKey?` and `ref?`.
 - **Its id** is a positive signed 64-bit integer, each larger than the last the master gave and never
@@ -609,6 +612,7 @@ carried.
   | `occupant-stop-failed` | the adapter's `stop` failed and is tried again |
   | `occupant-start-failed` | the adapter's `start` failed and is tried again |
   | `occupant-standing` | an occupant the master had stopped stands on the node again, its `health` answering `running` or a placement of it there done, so the master keeps no stop of it there |
+  | `card-outranked` | a demand lost its card to a demand of a better rank; the text names both |
 - **The codes of the placement:**
 
   | Code | What happened |

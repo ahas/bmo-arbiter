@@ -917,6 +917,23 @@
             "format": "int64",
             "type": "integer"
           },
+          "pool": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemandPool"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The pool it stands in."
+          },
+          "rank": {
+            "description": "Its rank, the lower first.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "reason": {
             "anyOf": [
               {
@@ -941,7 +958,7 @@
             "$ref": "#/components/schemas/DemandState"
           },
           "taken": {
-            "description": "The claimant or lower-tier occupant that stopped the service on one of its cards.",
+            "description": "The claimant or lower-tier occupant that stopped the service on one of its cards, or the reference of\nthe demand of a better rank that took one.",
             "type": [
               "string",
               "null"
@@ -970,6 +987,8 @@
           "id",
           "serviceName",
           "count",
+          "rank",
+          "pool",
           "cards",
           "state",
           "taken",
@@ -986,6 +1005,26 @@
         "properties": {
           "count": {
             "description": "How many cards; one where absent.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pool": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemandPool"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its pool; absent, the pool of the demand it is asked within, else none."
+          },
+          "rank": {
+            "description": "Its rank, the lower first; absent, the rank of the demand it is asked within, else one.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -1079,6 +1118,24 @@
         ],
         "type": "object"
       },
+      "DemandPool": {
+        "description": "A pool a demand stands in: a key that means nothing to the master, and the most cards the demands of that\nkey use of one service at once.",
+        "properties": {
+          "cards": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "cards"
+        ],
+        "type": "object"
+      },
       "DemandReason": {
         "description": "Why a card of a demand waits: its code, and an English sentence for a person.",
         "properties": {
@@ -1126,6 +1183,11 @@
           {
             "const": "starting",
             "description": "The service is starting on a card.",
+            "type": "string"
+          },
+          {
+            "const": "pool",
+            "description": "Its pool uses as many cards as its limit lets it.",
             "type": "string"
           },
           {
@@ -2354,7 +2416,7 @@
   "info": {
     "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes, grants cards of a service as demands ask them and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.10"
+    "version": "0.1.0-rev.11"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2619,7 +2681,7 @@
             }
           },
           {
-            "description": "How long to hold the answer open, while the demand waits with no card taken, until a card is granted,\ngranted again, lent, or taken by a lower tier, or the time runs out; any other demand is answered at\nonce.",
+            "description": "How long to hold the answer open, while the demand waits, until a card is granted, granted again, lent,\nor taken, or the time runs out; any other demand is answered at once unless `watch` is set.",
             "in": "query",
             "name": "waitMs",
             "required": false,
@@ -2627,6 +2689,15 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "description": "Holds the answer open the same way whatever the demand's state, for a caller standing on a card.",
+            "in": "query",
+            "name": "watch",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
@@ -2639,7 +2710,7 @@
                 }
               }
             },
-            "description": "A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it."
+            "description": "A demand as it stands, holding the answer open with waitMs while it waits, or in any state with watch; never dropped for it."
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2651,7 +2722,7 @@
             "$ref": "#/components/responses/NotFound"
           }
         },
-        "summary": "A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it.",
+        "summary": "A demand as it stands, holding the answer open with waitMs while it waits, or in any state with watch; never dropped for it.",
         "tags": [
           "master"
         ]

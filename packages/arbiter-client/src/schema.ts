@@ -97,7 +97,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it. */
+        /** A demand as it stands, holding the answer open with waitMs while it waits, or in any state with watch; never dropped for it. */
         get: operations["getDemand"];
         put?: never;
         post?: never;
@@ -449,12 +449,22 @@ export interface components {
             count: number;
             /** Format: int64 */
             id: number;
+            /** @description The pool it stands in. */
+            pool: components["schemas"]["DemandPool"] | null;
+            /**
+             * Format: uint32
+             * @description Its rank, the lower first.
+             */
+            rank: number;
             /** @description While a card waits, what it waits on. */
             reason: components["schemas"]["DemandReason"] | null;
             ref: string | null;
             serviceName: string;
             state: components["schemas"]["DemandState"];
-            /** @description The claimant or lower-tier occupant that stopped the service on one of its cards. */
+            /**
+             * @description The claimant or lower-tier occupant that stopped the service on one of its cards, or the reference of
+             *     the demand of a better rank that took one.
+             */
             taken: string | null;
             /**
              * Format: int64
@@ -472,6 +482,13 @@ export interface components {
              * @description How many cards; one where absent.
              */
             count?: number | null;
+            /** @description Its pool; absent, the pool of the demand it is asked within, else none. */
+            pool?: components["schemas"]["DemandPool"] | null;
+            /**
+             * Format: uint32
+             * @description Its rank, the lower first; absent, the rank of the demand it is asked within, else one.
+             */
+            rank?: number | null;
             /** @description A reference; shown. */
             ref?: string | null;
             serviceName: string;
@@ -503,6 +520,15 @@ export interface components {
             /** @description Whether anything stands past the last item. */
             more: boolean;
         };
+        /**
+         * @description A pool a demand stands in: a key that means nothing to the master, and the most cards the demands of that
+         *     key use of one service at once.
+         */
+        DemandPool: {
+            /** Format: uint32 */
+            cards: number;
+            key: string;
+        };
         /** @description Why a card of a demand waits: its code, and an English sentence for a person. */
         DemandReason: {
             code: components["schemas"]["DemandWait"];
@@ -511,7 +537,7 @@ export interface components {
         /** @description Where a demand stands. */
         DemandState: "waiting" | "granted" | "partly" | "lent";
         /** @description What a card of a demand waits on. */
-        DemandWait: "starting" | "ceiling" | "in-use" | "held" | "start-failed";
+        DemandWait: "starting" | "pool" | "ceiling" | "in-use" | "held" | "start-failed";
         /** @description What a service says of its units, by each unit's name, `<service>/<part>`. */
         Description: {
             units: {
@@ -1215,11 +1241,12 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description How long to hold the answer open, while the demand waits with no card taken, until a card is granted,
-                 *     granted again, lent, or taken by a lower tier, or the time runs out; any other demand is answered at
-                 *     once.
+                 * @description How long to hold the answer open, while the demand waits, until a card is granted, granted again, lent,
+                 *     or taken, or the time runs out; any other demand is answered at once unless `watch` is set.
                  */
                 waitMs?: number;
+                /** @description Holds the answer open the same way whatever the demand's state, for a caller standing on a card. */
+                watch?: boolean;
             };
             header?: never;
             path: {
@@ -1230,7 +1257,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A demand as it stands, holding the answer open with waitMs while it waits; never dropped for it. */
+            /** @description A demand as it stands, holding the answer open with waitMs while it waits, or in any state with watch; never dropped for it. */
             200: {
                 headers: {
                     [name: string]: unknown;

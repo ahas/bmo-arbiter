@@ -9,8 +9,11 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use bmo_arbiter_client::ErrorCode;
-use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandCard, DemandReason, DemandState};
+use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandCard, DemandPool, DemandReason, DemandState};
 use tokio::sync::{Notify, watch};
+
+/// The rank of a demand that names none and is asked within none.
+pub const DEFAULT_RANK: u32 = 1;
 
 /// Where one card of a demand stands.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +26,8 @@ pub enum Seat {
   Granted(DemandCard),
   /// Granted, and the service stopped there by a claim or a ticket of a lower tier, named.
   Taken { node: String, by: String },
+  /// Its card taken by a demand of a better rank, named: in the line again, holding no card.
+  Outranked { by: String },
   /// Its card lent to a demand asked within it.
   Lent(String),
   /// Its card coming back from the demand it was lent to, its own service being brought up there again.
@@ -33,7 +38,7 @@ impl Seat {
   /// The node this seat holds, where it holds one.
   pub fn node(&self) -> Option<&str> {
     match self {
-      Seat::Waiting => None,
+      Seat::Waiting | Seat::Outranked { .. } => None,
       Seat::Starting(node) | Seat::Lent(node) | Seat::Returning(node) => Some(node),
       Seat::Granted(card) => Some(&card.node_name),
       Seat::Taken { node, .. } => Some(node),
@@ -58,6 +63,8 @@ pub struct Held {
   pub within: Option<i64>,
   pub work_key: Option<String>,
   pub reference: Option<String>,
+  pub rank: u32,
+  pub pool: Option<DemandPool>,
   /// When it was asked, in epoch milliseconds.
   pub asked_at: i64,
   /// One seat for every card it asks.
@@ -93,8 +100,10 @@ impl Held {
       id: self.id,
       service_name: self.service.clone(),
       count: self.seats.len() as u32,
+      rank: self.rank,
+      pool: self.pool.clone(),
       taken: self.seats.iter().find_map(|seat| match seat {
-        Seat::Taken { by, .. } => Some(by.clone()),
+        Seat::Taken { by, .. } | Seat::Outranked { by } => Some(by.clone()),
         _ => None,
       }),
       reason: if state == DemandState::Granted { None } else { self.reason.clone() },
@@ -142,11 +151,18 @@ impl Book {
     if self.placed.get(&ask.service_name).is_none_or(Vec::is_empty) {
       return Err((ErrorCode::NoPlace, format!("{} is placed on no node", ask.service_name)));
     }
-    if let Some(within) = ask.within
-      && !self.held.contains_key(&within)
-    {
-      return Err((ErrorCode::NotFound, format!("the master holds no demand {within}")));
+    if ask.pool.as_ref().is_some_and(|pool| pool.key.trim().is_empty() || pool.cards == 0) {
+      return Err((ErrorCode::BadRequest, "a pool names a key and a limit of one card or more".into()));
     }
+    let outer = match ask.within {
+      Some(within) => match self.held.get(&within) {
+        Some(outer) => Some(outer),
+        None => return Err((ErrorCode::NotFound, format!("the master holds no demand {within}"))),
+      },
+      None => None,
+    };
+    let rank = ask.rank.or(outer.map(|outer| outer.rank)).unwrap_or(DEFAULT_RANK);
+    let pool = ask.pool.clone().or_else(|| outer.and_then(|outer| outer.pool.clone()));
     self.last_id = (self.last_id + 1).max(now_ms);
     let held = Held {
       id: self.last_id,
@@ -154,6 +170,8 @@ impl Book {
       within: ask.within,
       work_key: ask.work_key.clone(),
       reference: ask.reference.clone(),
+      rank,
+      pool,
       asked_at: now_ms,
       seats: vec![Seat::Waiting; count as usize],
       reason: None,

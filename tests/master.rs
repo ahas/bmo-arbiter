@@ -15,7 +15,7 @@ use bmo_arbiter::placement::{AdapterAnswer, Board, Declaration, Placements, Spre
 use bmo_arbiter::reach::RunResult;
 use bmo_arbiter::rules::Num;
 use bmo_arbiter_client::cluster::{self as wire, LinkState, PlacedService};
-use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandState, DemandWait};
+use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandPool, DemandState, DemandWait};
 use serde_json::{Value, json};
 
 const RULES: &str = r#"
@@ -72,6 +72,8 @@ struct Stand {
   running: Mutex<HashSet<String>>,
   /// The verbs the test holds, as `<service> <verb> <node>`: such a verb answers only once its gate opens.
   gates: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+  /// The verbs that fail, as `<service> <verb> <node>`.
+  refused: Mutex<HashSet<String>>,
 }
 
 struct StandShell(Arc<Stand>, String);
@@ -152,9 +154,13 @@ impl World for StandWorld {
       self.0.adapted.lock().unwrap().push(call.clone());
     }
     let gate = self.0.gates.lock().unwrap().get(&call).cloned();
+    let refused = self.0.refused.lock().unwrap().contains(&call);
     Box::pin(async move {
       if let Some(gate) = gate {
         gate.notified().await;
+      }
+      if refused {
+        return AdapterAnswer::refused("the helper is missing");
       }
       let instance = format!("{} {node}", declaration.service);
       let mut running = self.0.running.lock().unwrap();
@@ -247,6 +253,7 @@ fn master_of(
     adapted: Mutex::new(Vec::new()),
     running: Mutex::new(HashSet::new()),
     gates: Mutex::new(HashMap::new()),
+    refused: Mutex::new(HashSet::new()),
   });
   (Master::new(Arc::new(StandWorld(stand.clone())), rules_file, 2.0), stand)
 }
@@ -953,6 +960,32 @@ fn ask(demands: &Demands, service: &str, within: Option<i64>, work_key: Option<&
     within,
     work_key: work_key.map(str::to_owned),
     reference: None,
+    rank: None,
+    pool: None,
+    wait_ms: None,
+  };
+  demands.book.lock().unwrap().ask(&ask, 1000).unwrap().id
+}
+
+/// A demand asked at a rank, in a pool where one is named, its reference naming it.
+fn ask_ranked(
+  demands: &Demands,
+  service: &str,
+  rank: u32,
+  pool: Option<(&str, u32)>,
+  reference: &str,
+) -> i64 {
+  let ask = DemandAsk {
+    service_name: service.into(),
+    count: None,
+    within: None,
+    work_key: None,
+    reference: Some(reference.into()),
+    rank: Some(rank),
+    pool: pool.map(|(key, cards)| DemandPool {
+      key: key.into(),
+      cards,
+    }),
     wait_ms: None,
   };
   demands.book.lock().unwrap().ask(&ask, 1000).unwrap().id
@@ -1320,6 +1353,252 @@ async fn a_service_at_its_ceiling_takes_no_other_card_and_its_demands_wait_in_li
   assert_eq!(granted_on(&demands, third), ["a"]);
   assert_eq!(demand(&demands, fourth).reason.unwrap().code, DemandWait::Ceiling);
   assert_eq!(adapted(&stand), ["lab-arena stop c", "coder start c"]);
+}
+
+#[tokio::test]
+async fn a_better_rank_takes_a_card_of_its_own_engine_with_no_engine_stopped_and_the_loser_comes_back() {
+  let (mut master, stand, demands) = demanding(
+    &["a"],
+    vec![capped("lab-arena", YieldBy::Process, 3)],
+    &[("lab-arena", &["a"])],
+    &["lab-arena a"],
+  )
+  .await;
+  let low = ask_ranked(&demands, "lab-arena", 1, None, "low");
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, low), ["a"]);
+
+  let high = ask_ranked(&demands, "lab-arena", 0, None, "high");
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, high), ["a"]);
+  let lost = demand(&demands, low);
+  assert_eq!((lost.state, lost.taken.as_deref()), (DemandState::Waiting, Some("high")));
+  assert!(adapted(&stand).is_empty(), "the engine stays up: {:?}", adapted(&stand));
+  let said = master.state().events;
+  assert!(
+    said.iter().any(|note| note.code == "card-outranked" && note.text.contains("low")),
+    "{said:?}"
+  );
+
+  // Nothing more moves while the better rank holds it.
+  rounds(&mut master, 5).await;
+  assert_eq!(granted_on(&demands, high), ["a"]);
+  assert_eq!(demand(&demands, low).reason.unwrap().code, DemandWait::InUse);
+
+  assert!(demands.book.lock().unwrap().give_back(high));
+  rounds(&mut master, 1).await;
+  let back = demand(&demands, low);
+  assert_eq!((back.state, back.taken), (DemandState::Granted, None));
+  assert!(adapted(&stand).is_empty());
+}
+
+#[tokio::test]
+async fn a_better_rank_for_the_other_engine_stops_the_one_standing_as_a_hand_over() {
+  let (mut master, stand, demands) =
+    demanding(&["a"], two_engines(), &[("lab-arena", &["a"]), ("coder", &["a"])], &["lab-arena a"]).await;
+  let low = ask_ranked(&demands, "lab-arena", 1, None, "low");
+  rounds(&mut master, 1).await;
+  let high = ask_ranked(&demands, "coder", 0, None, "high");
+  rounds(&mut master, 3).await;
+  assert_eq!(adapted(&stand), ["lab-arena stop a", "coder start a"]);
+  assert_eq!(granted_on(&demands, high), ["a"]);
+  assert_eq!(demand(&demands, low).taken.as_deref(), Some("high"));
+
+  // Once it is given back the loser's engine is brought up again for it, its seat in the line kept.
+  assert!(demands.book.lock().unwrap().give_back(high));
+  rounds(&mut master, 3).await;
+  assert_eq!(adapted(&stand), ["lab-arena stop a", "coder start a", "coder stop a", "lab-arena start a"]);
+  assert_eq!(granted_on(&demands, low), ["a"]);
+}
+
+#[tokio::test]
+async fn demands_of_one_rank_wait_in_the_order_asked_and_nothing_is_taken_between_them() {
+  let (mut master, stand, demands) = demanding(
+    &["a"],
+    vec![declared("lab-arena", 2.0, YieldBy::Process)],
+    &[("lab-arena", &["a"])],
+    &["lab-arena a"],
+  )
+  .await;
+  let first = ask_ranked(&demands, "lab-arena", 1, None, "first");
+  rounds(&mut master, 1).await;
+  let second = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 3).await;
+  assert_eq!(granted_on(&demands, first), ["a"]);
+  assert_eq!(demand(&demands, first).taken, None);
+  assert_eq!(demand(&demands, second).reason.unwrap().code, DemandWait::InUse);
+  assert_eq!(demand(&demands, second).rank, 1, "a demand naming no rank stands at one");
+  assert!(adapted(&stand).is_empty());
+}
+
+#[tokio::test]
+async fn no_rank_takes_a_card_a_claim_or_the_bench_holds_and_a_claim_takes_a_card_from_any_rank() {
+  let services = vec![declared("lab-arena", 2.0, YieldBy::Process), declared("bench", 1.0, YieldBy::Turn)];
+  let both: &[&str] = &["a", "b"];
+  let (mut master, stand, demands) =
+    demanding(both, services, &[("lab-arena", both)], &["lab-arena a", "lab-arena b"]).await;
+  let on_a = ask_ranked(&demands, "lab-arena", 0, None, "best-on-a");
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, on_a), ["a"]);
+
+  // A claim stops the engine under a demand of the best rank, as ever; so does the bench's ticket.
+  stand
+    .answers
+    .lock()
+    .unwrap()
+    .insert("a".into(), slave(9000.0, store_resident(), Some("trainer"), json!([])));
+  std::fs::write(
+    stand.dir.join("card-rules.yaml"),
+    format!("{RULES}\noccupants:\n  - name: trainer\n    tier: 0\n    claims: true\n"),
+  )
+  .ok();
+  rounds(&mut master, 1).await;
+  assert_eq!(adapted(&stand), ["lab-arena stop a"]);
+  assert_eq!(demand(&demands, on_a).taken.as_deref(), Some("trainer"));
+
+  // b is held by the bench's ticket: a demand of the best rank is granted neither card.
+  stand
+    .answers
+    .lock()
+    .unwrap()
+    .insert("b".into(), slave(9000.0, store_resident(), None, json!([waiting(2, "bench", None)])));
+  let best = ask_ranked(&demands, "lab-arena", 0, None, "best");
+  rounds(&mut master, 2).await;
+  assert!(granted_on(&demands, best).is_empty());
+  assert_eq!(demand(&demands, best).reason.unwrap().code, DemandWait::Held);
+  assert_eq!(demand(&demands, on_a).taken.as_deref(), Some("trainer"));
+}
+
+#[tokio::test]
+async fn a_better_rank_at_its_ceiling_takes_a_card_its_service_uses_and_never_a_further_one() {
+  let all: &[&str] = &["a", "b", "c"];
+  let services = vec![capped("lab-arena", YieldBy::Process, 2)];
+  let (mut master, stand, demands) =
+    demanding(all, services, &[("lab-arena", all)], &["lab-arena a", "lab-arena b", "lab-arena c"]).await;
+  let first = ask_ranked(&demands, "lab-arena", 1, None, "first");
+  let second = ask_ranked(&demands, "lab-arena", 2, None, "second");
+  rounds(&mut master, 1).await;
+  let high = ask_ranked(&demands, "lab-arena", 0, None, "high");
+  rounds(&mut master, 1).await;
+  // the worst rank loses, on a card its service uses, and c stays above the ceiling
+  assert_eq!(granted_on(&demands, high), ["b"]);
+  assert_eq!(granted_on(&demands, first), ["a"]);
+  assert_eq!(demand(&demands, second).taken.as_deref(), Some("high"));
+  assert!(adapted(&stand).is_empty());
+}
+
+#[tokio::test]
+async fn a_pool_holds_its_demands_to_its_limit_of_each_service_and_no_other_demand_waits_for_it() {
+  let all: &[&str] = &["a", "b", "c"];
+  let services = vec![declared("lab-arena", 2.0, YieldBy::Process), declared("coder", 2.0, YieldBy::Process)];
+  let (mut master, stand, demands) =
+    demanding(all, services, &[("lab-arena", all), ("coder", all)], &["lab-arena a", "lab-arena b", "lab-arena c"])
+      .await;
+  let first = ask_ranked(&demands, "lab-arena", 1, Some(("mine", 1)), "first");
+  let second = ask_ranked(&demands, "lab-arena", 1, Some(("mine", 1)), "second");
+  let other = ask_ranked(&demands, "lab-arena", 1, None, "other");
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, first), ["a"]);
+  assert!(granted_on(&demands, second).is_empty());
+  let reason = demand(&demands, second).reason.unwrap();
+  assert_eq!(reason.code, DemandWait::Pool);
+  assert!(
+    reason.text.contains("the pool mine uses 1 cards of lab-arena and its limit is 1: a"),
+    "{}",
+    reason.text
+  );
+  assert_eq!(granted_on(&demands, other), ["b"], "a demand of no pool is not held back");
+
+  // The limit is of each service: the other engine's demand of the pool has a card of its own.
+  let on_coder = ask_ranked(&demands, "coder", 1, Some(("mine", 1)), "on-coder");
+  rounds(&mut master, 2).await;
+  assert_eq!(granted_on(&demands, on_coder), ["c"]);
+  assert_eq!(adapted(&stand), ["lab-arena stop c", "coder start c"]);
+
+  // A card of the pool given back opens the limit to the next of it.
+  assert!(demands.book.lock().unwrap().give_back(first));
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, second), ["a"]);
+}
+
+#[tokio::test]
+async fn a_demand_asked_within_takes_its_outers_rank_and_pool_and_loses_its_shared_card_with_it() {
+  let (mut master, stand, demands) = demanding(
+    &["a"],
+    vec![declared("lab-arena", 2.0, YieldBy::Process)],
+    &[("lab-arena", &["a"])],
+    &["lab-arena a"],
+  )
+  .await;
+  let outer = ask_ranked(&demands, "lab-arena", 2, Some(("mine", 1)), "outer");
+  rounds(&mut master, 1).await;
+  let beside = ask(&demands, "lab-arena", Some(outer), None);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, beside), ["a"]);
+  let told = demand(&demands, beside);
+  assert_eq!((told.rank, told.pool.map(|pool| pool.key)), (2, Some("mine".to_owned())));
+
+  // Both lose the card to a better rank, the card holding every demand on it to the same rank.
+  let high = ask_ranked(&demands, "lab-arena", 1, None, "high");
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, high), ["a"]);
+  assert_eq!(demand(&demands, outer).taken.as_deref(), Some("high"));
+  assert_eq!(demand(&demands, beside).taken.as_deref(), Some("high"));
+  assert!(adapted(&stand).is_empty());
+}
+
+#[tokio::test]
+async fn a_demand_outranked_uses_no_card_of_its_pool_or_its_ceiling() {
+  let (mut master, _stand, demands) = demanding(
+    &["a", "b"],
+    vec![capped("lab-arena", YieldBy::Process, 1)],
+    &[("lab-arena", &["a", "b"])],
+    &["lab-arena a", "lab-arena b"],
+  )
+  .await;
+  let board = Arc::new(Mutex::new(Board::default()));
+  master.attach(board.clone());
+  let low = ask_ranked(&demands, "lab-arena", 2, Some(("mine", 1)), "low");
+  rounds(&mut master, 1).await;
+  let high = ask_ranked(&demands, "lab-arena", 1, None, "high");
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, high), ["a"]);
+  assert_eq!(shown(&board, &master, "lab-arena").cards_in_use, ["a"]);
+  // The next of its pool may have the card its pool no longer holds; the ceiling keeps it waiting on it.
+  let next = ask_ranked(&demands, "lab-arena", 2, Some(("mine", 1)), "next");
+  rounds(&mut master, 1).await;
+  assert_eq!(demand(&demands, next).reason.unwrap().code, DemandWait::Ceiling);
+  assert_eq!(demand(&demands, low).reason.unwrap().code, DemandWait::Ceiling);
+}
+
+#[tokio::test]
+async fn a_return_start_that_keeps_failing_is_the_reason_a_demand_reads_rather_than_starting() {
+  let (mut master, stand, demands) = demanding(
+    &["a"],
+    vec![declared("lab-arena", 2.0, YieldBy::Process)],
+    &[("lab-arena", &["a"])],
+    &["lab-arena a"],
+  )
+  .await;
+  // the bench's ticket stops it, and once it is gone the start back fails
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([waiting(2, "bench", None)]));
+  *stand.declared.lock().unwrap() =
+    vec![declared("lab-arena", 2.0, YieldBy::Process), declared("bench", 1.0, YieldBy::Turn)];
+  rounds(&mut master, 2).await;
+  assert_eq!(adapted(&stand), ["lab-arena stop a"]);
+  stand.refused.lock().unwrap().insert("lab-arena start a".into());
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([]));
+  rounds(&mut master, 3).await;
+  let waiting_one = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 3).await;
+  let reason = demand(&demands, waiting_one).reason.unwrap();
+  assert_eq!(reason.code, DemandWait::StartFailed);
+  assert!(reason.text.contains("the helper is missing"), "{}", reason.text);
+
+  // Once it starts the demand is granted and the failure is forgotten.
+  stand.refused.lock().unwrap().clear();
+  rounds(&mut master, 3).await;
+  assert_eq!(granted_on(&demands, waiting_one), ["a"]);
 }
 
 #[tokio::test]

@@ -23,20 +23,37 @@ pub struct DemandAsk {
   /// A reference; shown.
   #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
   pub reference: Option<String>,
+  /// Its rank, the lower first; absent, the rank of the demand it is asked within, else one.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub rank: Option<u32>,
+  /// Its pool; absent, the pool of the demand it is asked within, else none.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pool: Option<DemandPool>,
   /// How long to hold the answer open.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub wait_ms: Option<u64>,
+}
+
+/// A pool a demand stands in: a key that means nothing to the master, and the most cards the demands of that
+/// key use of one service at once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DemandPool {
+  pub key: String,
+  pub cards: u32,
 }
 
 /// How a demand is asked after.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DemandQuery {
-  /// How long to hold the answer open, while the demand waits with no card taken, until a card is granted,
-  /// granted again, lent, or taken by a lower tier, or the time runs out; any other demand is answered at
-  /// once.
+  /// How long to hold the answer open, while the demand waits, until a card is granted, granted again, lent,
+  /// or taken, or the time runs out; any other demand is answered at once unless `watch` is set.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub wait_ms: Option<u64>,
+  /// Holds the answer open the same way whatever the demand's state, for a caller standing on a card.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub watch: Option<bool>,
 }
 
 /// Where a demand stands.
@@ -69,6 +86,8 @@ pub struct DemandCard {
 pub enum DemandWait {
   /// The service is starting on a card.
   Starting,
+  /// Its pool uses as many cards as its limit lets it.
+  Pool,
   /// The service uses as many cards as its ceiling lets it.
   Ceiling,
   /// Every card it may have is in use.
@@ -94,10 +113,15 @@ pub struct Demand {
   pub id: i64,
   pub service_name: String,
   pub count: u32,
+  /// Its rank, the lower first.
+  pub rank: u32,
+  /// The pool it stands in.
+  pub pool: Option<DemandPool>,
   /// Each card granted.
   pub cards: Vec<DemandCard>,
   pub state: DemandState,
-  /// The claimant or lower-tier occupant that stopped the service on one of its cards.
+  /// The claimant or lower-tier occupant that stopped the service on one of its cards, or the reference of
+  /// the demand of a better rank that took one.
   pub taken: Option<String>,
   /// While a card waits, what it waits on.
   pub reason: Option<DemandReason>,

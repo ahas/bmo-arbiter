@@ -62,9 +62,9 @@ The owner's covenant for the card. Every rule below realises it, on each node an
   - **An occupant with neither,** whose declaration says it yields by its process, goes down through its
     adapter's `stop` and comes back through its `start` once nothing that made it yield stands on its node
     (`docs/placement.md`, 「Yielding by the process」). Two such occupants of one tier hand a card to each
-    other only where the standing one has no demand on it or its caller lends it within a demand of its
-    own, and the one that handed it over is not brought back by the other going (`docs/placement.md`,
-    「Demands」).
+    other only where the standing one has no demand on it, its caller lends it within a demand of its own,
+    or a demand of a better rank takes the card, and the one that handed it over is not brought back by the
+    other going (`docs/placement.md`, 「Demands」).
 - **Only what the request needs comes down.** A ticket is asked on one node's arbiter and stands for that
   node's card; a request that needs several cards asks a ticket on each, its units one group of the rules.
   On each card the master unloads only what the ticket's unit needs there, so an occupant spread over
