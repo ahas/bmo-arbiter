@@ -123,6 +123,10 @@ pub struct Demand {
   /// The claimant or lower-tier occupant that stopped the service on one of its cards, or the reference of
   /// the demand of a better rank that took one.
   pub taken: Option<String>,
+  /// Whether what took a card of it is a demand of a better rank, its engine perhaps still standing, rather
+  /// than a claim or a lower tier, which stopped the engine.
+  #[serde(default)]
+  pub outranked: bool,
   /// While a card waits, what it waits on.
   pub reason: Option<DemandReason>,
   /// How long it has stood.

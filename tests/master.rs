@@ -1372,7 +1372,10 @@ async fn a_better_rank_takes_a_card_of_its_own_engine_with_no_engine_stopped_and
   rounds(&mut master, 1).await;
   assert_eq!(granted_on(&demands, high), ["a"]);
   let lost = demand(&demands, low);
-  assert_eq!((lost.state, lost.taken.as_deref()), (DemandState::Waiting, Some("high")));
+  assert_eq!(
+    (lost.state, lost.taken.as_deref(), lost.outranked),
+    (DemandState::Waiting, Some("high"), true)
+  );
   assert!(adapted(&stand).is_empty(), "the engine stays up: {:?}", adapted(&stand));
   let said = master.state().events;
   assert!(
@@ -1388,7 +1391,7 @@ async fn a_better_rank_takes_a_card_of_its_own_engine_with_no_engine_stopped_and
   assert!(demands.book.lock().unwrap().give_back(high));
   rounds(&mut master, 1).await;
   let back = demand(&demands, low);
-  assert_eq!((back.state, back.taken), (DemandState::Granted, None));
+  assert_eq!((back.state, back.taken, back.outranked), (DemandState::Granted, None, false));
   assert!(adapted(&stand).is_empty());
 }
 
@@ -1455,6 +1458,7 @@ async fn no_rank_takes_a_card_a_claim_or_the_bench_holds_and_a_claim_takes_a_car
   rounds(&mut master, 1).await;
   assert_eq!(adapted(&stand), ["lab-arena stop a"]);
   assert_eq!(demand(&demands, on_a).taken.as_deref(), Some("trainer"));
+  assert!(!demand(&demands, on_a).outranked, "a claim is no rank's");
 
   // b is held by the bench's ticket: a demand of the best rank is granted neither card.
   stand

@@ -259,7 +259,8 @@ master's to decide (`docs/placement.md`, 「Demands」).
 - **A demand** is `id`, `serviceName`, `count`, `rank`, `pool?` (`key`, `cards`), `cards` (each card granted: `nodeName`, `address?` and
   `keyFile?` as the service's adapter reports them), `state` (`waiting`, `granted`, `partly` or `lent`),
   `taken?` (the claimant or lower-tier occupant that stopped the service on one of its cards, or the
-  reference of the demand of a better rank that took one), `reason?`
+  reference of the demand of a better rank that took one), `outranked` (whether a demand of a better rank took
+  it: its engine may stand and nothing has cut what its caller has in hand, which is the caller's to stop), `reason?`
   (while a card waits: `code` — `starting`, `pool` (its pool uses as many cards as its limit lets it),
   `ceiling` (the service uses as many cards as its ceiling
   lets it), `in-use`, `held`, `start-failed` — and `text`, an English sentence), `waitedMs`, `within?`,

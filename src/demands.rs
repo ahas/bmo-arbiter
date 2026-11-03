@@ -106,6 +106,7 @@ impl Held {
         Seat::Taken { by, .. } | Seat::Outranked { by } => Some(by.clone()),
         _ => None,
       }),
+      outranked: self.seats.iter().any(|seat| matches!(seat, Seat::Outranked { .. })),
       reason: if state == DemandState::Granted { None } else { self.reason.clone() },
       cards,
       state,

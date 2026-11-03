@@ -917,6 +917,11 @@
             "format": "int64",
             "type": "integer"
           },
+          "outranked": {
+            "default": false,
+            "description": "Whether what took a card of it is a demand of a better rank, its engine perhaps still standing, rather\nthan a claim or a lower tier, which stopped the engine.",
+            "type": "boolean"
+          },
           "pool": {
             "anyOf": [
               {
@@ -992,6 +997,7 @@
           "cards",
           "state",
           "taken",
+          "outranked",
           "reason",
           "waitedMs",
           "within",

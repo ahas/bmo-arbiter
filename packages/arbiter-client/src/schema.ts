@@ -449,6 +449,12 @@ export interface components {
             count: number;
             /** Format: int64 */
             id: number;
+            /**
+             * @description Whether what took a card of it is a demand of a better rank, its engine perhaps still standing, rather
+             *     than a claim or a lower tier, which stopped the engine.
+             * @default false
+             */
+            outranked: boolean;
             /** @description The pool it stands in. */
             pool: components["schemas"]["DemandPool"] | null;
             /**
