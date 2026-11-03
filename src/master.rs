@@ -938,8 +938,9 @@ impl Master {
   }
 
   /// The nodes whose card the service uses now (docs/placement.md, 「A service's ceiling」): each card one of
-  /// its demands holds, a card lent counting for the demand it is lent to, and each card where its turn is
-  /// in use. The demand `own` names is counted by the seats given for it rather than by the book's.
+  /// its demands holds, a card lent counting for the demand it is lent to, and each card of a node the master
+  /// reaches where its turn is in use. The demand `own` names is counted by the seats given for it rather than
+  /// by the book's.
   fn cards_used(
     &self,
     service: &str,
@@ -949,6 +950,7 @@ impl Master {
     let mut used: BTreeSet<String> = self
       .nodes
       .values()
+      .filter(|view| view.link.state == LinkState::Connected)
       .filter(|view| {
         view
           .cards

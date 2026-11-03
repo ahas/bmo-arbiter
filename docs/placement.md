@@ -263,7 +263,9 @@ sequenceDiagram
   - **A node whose slave gives no card is lost,** and read again at every round all the same, so it is
     connected at the first read that gives one. It is said once in the notes when it is lost, a node never
     reached since the master started among them, with why: the shell's error, or what the slave answered
-    where that answer is no card, as an arbiter of another release answers a route it does not serve.
+    where that answer is no card, as an arbiter of another release answers a route it does not serve. Its
+    last reading stays in the picture as what was last read; no card of it is chosen for a demand, and no turn
+    in that reading counts toward a ceiling (「A service's ceiling」).
   - **A node's role is the node service's as last read,** lost or connected: a role changed in the node
     service shows, and chooses the node's group, from the next discovery on.
 - **The slave hands the card on only once every unit asked for is out.** The master asks for each unit
@@ -450,6 +452,13 @@ sequenceDiagram
   lent within a demand counts for the service it is lent to while it is lent, and for the caller's service
   again once it comes back. A card where the service stands with no demand on it and its turn not in use
   is not used.
+- **A turn counts only as a node the master reaches reads it.** The last reading of a lost node says what
+  was true then and nothing of what runs there now, and no event would ever end a count taken from it, so a
+  turn in that reading uses no card. A demand's seat on a lost node still counts: it is the master's own
+  word, and it stands until its caller gives it back.
+- **A node that comes back still holding the service counts again from its first reading,** which may put
+  the service above its ceiling. That is the case below: nothing it uses is taken, and it is given only the
+  cards it already uses until it is below its ceiling again.
 - **Nothing the master does puts a service above its ceiling,** and where the service is at its ceiling
   the master gives it only a card it already uses:
   - a demand of it is granted no card it does not use, nor lent one: it waits in the line, its reason the

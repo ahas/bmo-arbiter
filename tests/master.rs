@@ -1323,6 +1323,56 @@ async fn a_service_at_its_ceiling_takes_no_other_card_and_its_demands_wait_in_li
 }
 
 #[tokio::test]
+async fn a_lost_nodes_last_reading_counts_toward_no_ceiling_and_the_node_counts_again_once_it_is_read() {
+  let all: &[&str] = &["a", "b", "c"];
+  let services = vec![capped("lab-arena", YieldBy::Process, 2)];
+  let (mut master, stand, demands) =
+    demanding(all, services, &[("lab-arena", all)], &["lab-arena a", "lab-arena b", "lab-arena c"]).await;
+  let board = Arc::new(Mutex::new(Board::default()));
+  master.attach(board.clone());
+  let mut using = ticket(1, "lab-arena", true, None);
+  using["inUse"] = json!(true);
+  let in_use_on_c = slave(9000.0, store_resident(), None, json!([using]));
+  stand.answers.lock().unwrap().insert("c".into(), in_use_on_c.clone());
+  rounds(&mut master, 1).await;
+  assert_eq!(shown(&board, &master, "lab-arena").cards_in_use, ["c"]);
+
+  // c is lost with its turn in use in its last reading: that card counts no more, so both others are open.
+  let gone = json!({ "error": "no answer" });
+  stand.answers.lock().unwrap().insert("c".into(), gone.clone());
+  rounds(&mut master, 1).await;
+  assert_eq!(shown(&board, &master, "lab-arena").cards_in_use, Vec::<String>::new());
+  let first = ask(&demands, "lab-arena", None, None);
+  let second = ask(&demands, "lab-arena", None, None);
+  let third = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, first), ["a"]);
+  assert_eq!(granted_on(&demands, second), ["b"]);
+  let reason = demand(&demands, third).reason.unwrap();
+  assert_eq!(reason.code, DemandWait::Ceiling);
+  assert!(reason.text.contains("uses 2 cards and its ceiling is 2: a, b"), "{}", reason.text);
+
+  // c comes back still holding it: above its ceiling, nothing is taken, and it is given only what it uses.
+  stand.answers.lock().unwrap().insert("c".into(), in_use_on_c);
+  rounds(&mut master, 1).await;
+  assert_eq!(shown(&board, &master, "lab-arena").cards_in_use, ["a", "b", "c"]);
+  assert_eq!(granted_on(&demands, first), ["a"]);
+  assert_eq!(granted_on(&demands, second), ["b"]);
+  assert_eq!(granted_on(&demands, third), ["c"]);
+  assert!(adapted(&stand).is_empty());
+  assert!(demands.book.lock().unwrap().give_back(third));
+  let fourth = ask(&demands, "lab-arena", None, None);
+  assert!(demands.book.lock().unwrap().give_back(first));
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, fourth), ["c"]);
+
+  // A demand's seat is the master's own word: it counts on a node lost with it granted there.
+  stand.answers.lock().unwrap().insert("b".into(), gone);
+  rounds(&mut master, 1).await;
+  assert!(shown(&board, &master, "lab-arena").cards_in_use.contains(&"b".to_owned()));
+}
+
+#[tokio::test]
 async fn a_lent_card_counts_for_the_service_it_is_lent_to_and_comes_back_once_the_callers_is_below_its_ceiling()
  {
   let all: &[&str] = &["a", "b", "c"];
