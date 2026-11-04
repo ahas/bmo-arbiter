@@ -400,10 +400,12 @@ it.
 - **`~/bmo-card/turn.py`** on every node the arbiter stands on, installed with it and updated by every
   install. An occupant in a process of its own imports its `TurnClient` (a ticket asked for and after,
   `keep`, `rest`, `give_back`, `state`), `hold` (the turn waited for and the lock taken), `GivingTurn` (a
-  turn that gives way) and `quiet` (wait until the card stands unasked), or runs it as a command:
+  turn that gives way), `quiet` (wait until the card stands unasked) and `ArbiterFault` (an answer from a
+  live arbiter that is not a ticket), or runs it as a command:
   `python turn.py --service <name> [--lock <path>] [--state <file>] -- <command> [<argument> …]`, which
   holds a turn and the lock around the command and exits with its code, or `3` where the service has no
-  place on the node.
+  place on the node. A fault the arbiter answers with is said on standard error and waited out: the command
+  starts only once a turn is given.
   While the command runs, a `SIGTERM` sent to `turn.py` is passed on to the command and `turn.py` waits
   for it to end, so a stop reaches the command once and its own way of ending runs to the end; `SIGINT`
   and `SIGHUP`, which a terminal sends to the command as well, are left to the command. A unit that runs
@@ -414,6 +416,12 @@ it.
   lock back on the same descriptor the command shares. They are done one after another, and the file reads
   `held` or `lent` once each is done, `held` from the start, and is removed once the command has ended. What the command keeps on the card while the
   card is lent is the command's to take off first; the arbiter sees only that the lock is not held.
+- **The lock is taken as it comes only where nothing answers:** a connection refused at the arbiter's
+  address is a node with no queue, and the occupant takes the lock itself. An arbiter that answers is one
+  whose node keeps a queue: any other failed answer is `ArbiterFault` and the occupant asks again rather
+  than take the lock outside that queue — a status other than a ticket's `200`, `201` and `202` (`404` asks
+  a new ticket, and `422` `no-place` refuses the service outright), an answer that cannot be read, or a
+  connection that breaks after it was taken.
 - **An occupant may carry a copy of its own** beside its code instead, or call the ticket routes through a
   published client; the contract it meets is 「Tickets」, and the installed file is what follows this
   repository's version.

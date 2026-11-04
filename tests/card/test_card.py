@@ -1010,6 +1010,118 @@ class TurnsTest(unittest.TestCase):
         waiting.join(5.0)
         self.assertTrue(took and took[0] - let_go < 0.5)
 
+    def test_a_live_arbiter_that_answers_a_fault_keeps_the_waiter_in_the_queue(self) -> None:
+        """The stall on the node, reproduced: an arbiter that answers, but not with a ticket, is not a node
+        with no arbiter. The waiter asks again and never takes the lock outside the queue while another
+        occupant holds it, however long that takes; once a ticket is answered it is granted through the
+        queue as any other."""
+        import http.server
+        import json
+
+        import turn
+        from http.server import ThreadingHTTPServer
+
+        turns = self.turns
+
+        class Stub(http.server.BaseHTTPRequestHandler):
+            faulting = True
+
+            def send_json(self, status: int, body: dict) -> None:
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def ticket_id(self) -> int | None:
+                try:
+                    return int(self.path.split("?")[0].strip("/").split("/")[1])
+                except (IndexError, ValueError):
+                    return None
+
+            def do_POST(self) -> None:  # noqa: N802
+                asked = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+                if type(self).faulting:
+                    return self.send_json(503, {"code": "failed", "error": "the arbiter cannot answer now"})
+                answered = turns.ask(asked["serviceName"])
+                self.send_json(201 if answered["turn"] else 202, answered)
+
+            def do_GET(self) -> None:  # noqa: N802
+                if type(self).faulting:
+                    return self.send_json(503, {"code": "failed", "error": "the arbiter cannot answer now"})
+                answered = turns.again(self.ticket_id())
+                if answered is None:
+                    return self.send_json(404, {"code": "not-found", "error": "no ticket is held"})
+                self.send_json(200, answered)
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                turns.done(self.ticket_id())
+                self.send_response(204)
+                self.send_header("content-length", "0")
+                self.end_headers()
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+
+        self.occupants.path.write_text("desktop voice router *\n")
+        self.occupants.read()
+        lock = Path(tempfile.mkdtemp()) / ".gpu.lock"
+        # Another occupant holds the card lock, and the queue sees it held.
+        holding = os.open(lock, os.O_RDWR | os.O_CREAT, 0o666)
+        fcntl.flock(holding, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(os.close, holding)
+        voice = self.turns.ask("voice")
+        self.assertTrue(voice["turn"])
+        self.held = [99]
+
+        took: list[int] = []
+
+        def waits() -> None:
+            took.append(turn.hold(turn.TurnClient("song", port=port), lock))
+
+        waiting = threading.Thread(target=waits, daemon=True)
+        waiting.start()
+        time.sleep(0.3)
+        self.assertEqual(took, [])
+        # The ask is answered with a fault, so no ticket of the waiter stands.
+        self.assertNotIn("song", [one.service for one in self.turns.tickets.values()])
+
+        # The holder lets the lock go, and the arbiter still answers only a fault: the waiter asks again
+        # and does not take the lock outside its queue.
+        fcntl.flock(holding, fcntl.LOCK_UN)
+        time.sleep(1.2)
+        self.assertEqual(took, [])
+
+        # The arbiter answers a ticket, and the card is free: the turn is granted through the queue.
+        Stub.faulting = False
+        self.held = []
+        self.turns.done(voice["id"])
+        waiting.join(5.0)
+        self.assertTrue(took)
+        song = [one for one in self.turns.state()["queue"] if one["serviceName"] == "song"]
+        self.assertTrue(song and song[0]["turn"])
+        os.close(took[0])
+
+    def test_only_a_node_where_nothing_answers_gives_the_lock_as_it_comes(self) -> None:
+        import turn
+
+        self.occupants.path.write_text("desktop voice router *\n")
+        self.occupants.read()
+        lock = Path(tempfile.mkdtemp()) / ".gpu.lock"
+        # Nothing listens at the arbiter's address: the node keeps no queue.
+        client = turn.TurnClient("song", port=9)
+        self.assertIsNone(client.ask())
+        fd = turn.hold(client, lock)
+        self.assertIsNotNone(fd)
+        os.close(fd)
+
     def test_quiet_waits_for_the_card_to_stand_unasked_on_end(self) -> None:
         import turn
 

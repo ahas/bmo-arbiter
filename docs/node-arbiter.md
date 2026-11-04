@@ -339,7 +339,9 @@ sequenceDiagram
   seen, a resting turn its `givesWayMs` or one second, and ten more where a process that asks for no turns
   holds the lock.
 - **A process that asks for no turns** still takes the lock as it comes; the queue waits behind it. **An
-  occupant on a node whose arbiter does not answer** takes the lock as it comes.
+  occupant on a node where nothing answers at the arbiter's address** takes the lock as it comes. An
+  arbiter that answers, even with a refusal or a fault, is one whose node keeps a queue: the occupant asks
+  again and never takes the lock outside that queue.
 - **Inside the arbiter** the desktop and a lent hold wait in the same queue as tickets of the arbiter's
   own, which it gives back itself and never drops for silence.
 
