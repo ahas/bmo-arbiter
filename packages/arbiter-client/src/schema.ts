@@ -229,6 +229,23 @@ export interface paths {
         patch: operations["changeTicket"];
         trace?: never;
     };
+    "/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What every card was doing at the master's last reading: its use, the turn or claim holding it, the engine resident on it with its memory, and its waiters. */
+        get: operations["getUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -393,6 +410,11 @@ export interface components {
             units: components["schemas"]["ClusterUnit"][];
             /** Format: double */
             usedMiB: number | null;
+            /**
+             * Format: uint32
+             * @description The card's use as the driver reports it, 0 to 100, or null where it gives no rate.
+             */
+            utilizationPercent: number | null;
         };
         /** @description One node the master reads. */
         ClusterNode: {
@@ -561,6 +583,11 @@ export interface components {
             totalMiB: number;
             /** Format: double */
             usedMiB: number;
+            /**
+             * Format: uint32
+             * @description The card's use as the driver reports it, 0 to 100, or null where it gives no rate.
+             */
+            utilizationPercent: number | null;
         };
         /** @description An owner's door: whether a use of the card waits there with its units out, how long, and the waits so far. */
         Door: {
@@ -973,6 +1000,80 @@ export interface components {
             to: string | null;
             /** Format: int64 */
             tookMs: number;
+        };
+        /** @description Every node's card as the master last read it, and when it answered. */
+        Usage: {
+            /**
+             * Format: int64
+             * @description When the master answered, in epoch milliseconds.
+             */
+            at: number;
+            nodes: components["schemas"]["UsageNode"][];
+        };
+        /** @description One card's use, and what stands on it. */
+        UsageCard: {
+            /** @description The claim standing on the card. */
+            claim: components["schemas"]["Claim"] | null;
+            /** Format: double */
+            freeMiB: number | null;
+            /** Format: uint32 */
+            index: number;
+            name: string | null;
+            /** Format: double */
+            totalMiB: number | null;
+            /** @description The turn standing on the card, whether or not it is in use. */
+            turn: components["schemas"]["CardTurn"] | null;
+            /** @description Every unit on the card, with the place each stands in. */
+            units: components["schemas"]["UsageUnit"][];
+            /** Format: double */
+            usedMiB: number | null;
+            /**
+             * Format: uint32
+             * @description The card's use as the driver reports it, 0 to 100, or null where it gives no rate.
+             */
+            utilizationPercent: number | null;
+            /** @description Every ticket waiting in the card's line, in line order. */
+            waiters: components["schemas"]["UsageWaiter"][];
+        };
+        /** @description One node, whether the master reaches it, and its cards. */
+        UsageNode: {
+            cards: components["schemas"]["UsageCard"][];
+            /** @description Whether the master reached the node's slave at its last reading. */
+            connected: boolean;
+            /** @description Why the last read gave no card, where it gave none. */
+            error: string | null;
+            nodeName: string;
+            /**
+             * Format: int64
+             * @description When the slave was last read.
+             */
+            readAt: number | null;
+        };
+        /** @description A unit on a card and the memory it holds. */
+        UsageUnit: {
+            /** @description `<service>/<part>@<node>`. */
+            name: string;
+            part: string;
+            /** Format: double */
+            ramMiB: number;
+            serviceName: string;
+            state: components["schemas"]["UnitState"];
+            /** Format: double */
+            vramMiB: number;
+        };
+        /** @description A ticket waiting for a card's turn. */
+        UsageWaiter: {
+            /** Format: int64 */
+            position: number | null;
+            serviceName: string;
+            /** Format: int64 */
+            ticketId: number;
+            /** @description The unit it asks for. */
+            unitName: string | null;
+            /** Format: double */
+            vramMiB: number | null;
+            /** Format: int64 */
+            waitedMs: number;
         };
         /**
          * @description How a service yields its card: by its turn, or by its process going down and coming back.
@@ -1581,6 +1682,27 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             500: components["responses"]["Failed"];
+        };
+    };
+    getUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What every card was doing at the master's last reading: its use, the turn or claim holding it, the engine resident on it with its memory, and its waiters. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Usage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
 }

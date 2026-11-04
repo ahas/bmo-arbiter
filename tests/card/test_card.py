@@ -152,7 +152,8 @@ class CardProcessesTest(unittest.TestCase):
             self.running = running
 
         def read(self) -> dict:
-            return {"name": "GPU", "totalMiB": 12288, "usedMiB": 10000, "freeMiB": 2288}
+            return {"name": "GPU", "totalMiB": 12288, "usedMiB": 10000, "freeMiB": 2288,
+                    "utilizationPercent": 72}
 
         def processes(self) -> list[tuple[int, int]] | None:
             return self.running

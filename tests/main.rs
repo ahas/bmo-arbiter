@@ -20,5 +20,6 @@ mod placement;
 mod plan;
 mod reach;
 mod rules;
+mod tool;
 mod verbs;
 mod yaml;

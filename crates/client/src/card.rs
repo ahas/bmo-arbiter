@@ -89,6 +89,9 @@ pub struct Device {
   pub used_mib: f64,
   #[serde(rename = "freeMiB")]
   pub free_mib: f64,
+  /// The card's use as the driver reports it, 0 to 100, or null where it gives no rate.
+  #[serde(rename = "utilizationPercent")]
+  pub utilization_percent: Option<u32>,
   /// Every process on the card, or null where the driver gives no count per process.
   pub processes: Option<Vec<Process>>,
 }

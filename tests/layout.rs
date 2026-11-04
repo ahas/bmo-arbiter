@@ -43,7 +43,15 @@ fn the_cargo_manifests_are_the_roots_and_its_published_crates() {
     .filter(|path| path.file_name().is_some_and(|name| name == "Cargo.toml"))
     .map(|path| shown(&path))
     .collect();
-  assert_eq!(manifests, ["Cargo.toml", "crates/client/Cargo.toml", "crates/plugin/Cargo.toml"]);
+  assert_eq!(
+    manifests,
+    [
+      "Cargo.toml",
+      "crates/client/Cargo.toml",
+      "crates/plugin/Cargo.toml",
+      "tools/gpu/Cargo.toml"
+    ]
+  );
 }
 
 fn nested_twins(dir: &Path, twins: &mut Vec<String>) {

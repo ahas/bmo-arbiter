@@ -108,6 +108,65 @@ async fn a_cards_processes_come_through_as_its_slave_read_them_and_none_from_a_s
 }
 
 #[tokio::test]
+async fn the_usage_reads_each_cards_use_holder_engine_and_waiters() {
+  let holding = json!({ "id": 7, "serviceName": "model", "turn": true, "inUse": true, "resting": false,
+    "giveWay": false, "giveWayFor": null, "position": null, "waitMs": null, "claimantName": null, "waitedMs": 0,
+    "need": null, "ref": null, "rest": false, "keep": null });
+  let world = World::new(
+    json!({ "a": "model" }),
+    &[(
+      "a",
+      slave(json!({ "free": 500.0, "utilizationPercent": 42,
+        "queue": [holding, waiting(8, "voice", "voice/large")] })),
+    )],
+  )
+  .start();
+  world.state_where("node a read", |state| connected(state, "a")).await;
+  let (status, usage) = asked(&world, Method::GET, "/usage", None).await;
+  assert_eq!(status, 200);
+  let node = &usage["nodes"][0];
+  assert_eq!((node["nodeName"].as_str(), node["connected"].as_bool()), (Some("a"), Some(true)));
+  let card = &node["cards"][0];
+  assert_eq!(card["utilizationPercent"], 42);
+  assert_eq!(
+    (
+      card["turn"]["serviceName"].as_str(),
+      card["turn"]["ticketId"].as_i64(),
+      card["turn"]["inUse"].as_bool()
+    ),
+    (Some("model"), Some(7), Some(true))
+  );
+  let units: Vec<&str> = card["units"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|unit| unit["name"].as_str().unwrap())
+    .collect();
+  assert_eq!(units, ["model/weights@a", "model/store@a"]);
+  assert_eq!(
+    (card["waiters"][0]["serviceName"].as_str(), card["waiters"][0]["position"].as_i64()),
+    (Some("voice"), Some(1))
+  );
+  // No process, pid or name of a process stands in the owner's reading.
+  assert!(card.get("processes").is_none(), "{card}");
+}
+
+#[tokio::test]
+async fn the_usage_says_a_node_the_master_does_not_reach() {
+  let world = World::new(json!({ "a": "model" }), &[]).start();
+  world
+    .state_where("the node lost", |state| {
+      nodes(state).iter().any(|node| node["name"] == "a" && node["link"]["state"] == "lost")
+    })
+    .await;
+  let (status, usage) = asked(&world, Method::GET, "/usage", None).await;
+  assert_eq!(status, 200);
+  let node = &usage["nodes"][0];
+  assert_eq!((node["nodeName"].as_str(), node["connected"].as_bool()), (Some("a"), Some(false)));
+  assert!(node["error"].as_str().is_some_and(|error| !error.is_empty()), "{node}");
+}
+
+#[tokio::test]
 async fn what_a_service_says_of_its_units_stands_beside_them_read_again_when_its_file_changes_and_a_bad_file_is_said()
  {
   let world = World::new(json!({ "a": "model" }), &[("a", slave(json!({})))]);

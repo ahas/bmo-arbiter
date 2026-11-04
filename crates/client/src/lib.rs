@@ -12,6 +12,7 @@ mod error;
 pub mod events;
 mod page;
 pub mod placements;
+pub mod usage;
 
 pub use call::{ArbiterClient, CallError, CallResult};
 pub use error::{ErrorCode, WireError};

@@ -168,6 +168,7 @@ pub fn slave(over: Value) -> Value {
     "typicalHoldMs": {},
     "units": [unit("model/weights", "resident", 4000.0, None), store],
     "device": { "name": "RTX 4070", "totalMiB": 11875, "usedMiB": 11875.0 - free, "freeMiB": free,
+      "utilizationPercent": over.get("utilizationPercent").cloned().unwrap_or(json!(0)),
       "processes": over.get("processes").cloned().unwrap_or(Value::Null) },
     "stage": { "waiting": false, "waitingMs": 0, "graphs": 0, "waits": 0, "waitedMs": 0 },
     "store": null,
@@ -355,6 +356,17 @@ impl World {
       done.status.code().unwrap_or(-1),
       format!("{}{}", String::from_utf8_lossy(&done.stdout), String::from_utf8_lossy(&done.stderr)),
     )
+  }
+
+  /// The master stopped and waited for, so the next call finds no answer at its address.
+  pub fn stop_master(&mut self) {
+    if let Some(master) = &mut self.master {
+      unsafe {
+        libc::kill(-(master.id() as i32), libc::SIGKILL);
+      }
+      let _ = master.wait();
+      self.master = None;
+    }
   }
 
   /// A node's slave answering as given, or not at all; written whole so no read sees half of it.

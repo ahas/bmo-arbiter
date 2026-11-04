@@ -1,0 +1,121 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["at", "nodes"],
+  "properties": {
+    "at": {
+      "type": "integer",
+      "format": "int64",
+      "description": "When the master answered, in epoch milliseconds."
+    },
+    "nodes": {
+      "type": "array",
+      "description": "Every node the master reads, in the picture's order.",
+      "items": { "$ref": "#/$defs/node" }
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeName", "connected", "readAt", "error", "cards"],
+      "properties": {
+        "nodeName": { "type": "string" },
+        "connected": {
+          "type": "boolean",
+          "description": "Whether the master reached the node's slave at its last reading."
+        },
+        "readAt": {
+          "type": ["integer", "null"],
+          "format": "int64",
+          "description": "When the slave was last read, in epoch milliseconds."
+        },
+        "error": {
+          "type": ["string", "null"],
+          "description": "Why the last read gave no card, where it gave none."
+        },
+        "cards": { "type": "array", "items": { "$ref": "#/$defs/card" } }
+      }
+    },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index", "name", "totalMiB", "usedMiB", "freeMiB", "utilizationPercent", "turn", "claim", "units",
+        "waiters"
+      ],
+      "properties": {
+        "index": { "type": "integer" },
+        "name": { "type": ["string", "null"] },
+        "totalMiB": { "type": ["number", "null"] },
+        "usedMiB": { "type": ["number", "null"] },
+        "freeMiB": { "type": ["number", "null"] },
+        "utilizationPercent": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 100,
+          "description": "The card's use as the driver reports it, or null where it gives no rate."
+        },
+        "turn": {
+          "oneOf": [{ "$ref": "#/$defs/turn" }, { "type": "null" }],
+          "description": "The turn standing on the card, whether or not it is in use."
+        },
+        "claim": {
+          "oneOf": [{ "$ref": "#/$defs/claim" }, { "type": "null" }],
+          "description": "The claim standing on the card."
+        },
+        "units": { "type": "array", "items": { "$ref": "#/$defs/unit" } },
+        "waiters": { "type": "array", "items": { "$ref": "#/$defs/waiter" } }
+      }
+    },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serviceName", "ticketId", "waitedMs", "inUse"],
+      "properties": {
+        "serviceName": { "type": "string" },
+        "ticketId": { "type": "integer", "format": "int64" },
+        "waitedMs": { "type": "integer", "format": "int64" },
+        "inUse": { "type": ["boolean", "null"] }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimantName", "claimedAt"],
+      "properties": {
+        "claimantName": { "type": "string" },
+        "claimedAt": { "type": ["integer", "null"], "format": "int64" }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "serviceName", "part", "vramMiB", "ramMiB", "state"],
+      "properties": {
+        "name": { "type": "string", "description": "`<service>/<part>@<node>`." },
+        "serviceName": { "type": "string" },
+        "part": { "type": "string" },
+        "vramMiB": { "type": "number" },
+        "ramMiB": { "type": "number" },
+        "state": {
+          "type": "string",
+          "enum": ["resident", "ram", "evicted", "mixed"]
+        }
+      }
+    },
+    "waiter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ticketId", "serviceName", "position", "waitedMs", "unitName", "vramMiB"],
+      "properties": {
+        "ticketId": { "type": "integer", "format": "int64" },
+        "serviceName": { "type": "string" },
+        "position": { "type": ["integer", "null"], "format": "int64" },
+        "waitedMs": { "type": "integer", "format": "int64" },
+        "unitName": { "type": ["string", "null"] },
+        "vramMiB": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

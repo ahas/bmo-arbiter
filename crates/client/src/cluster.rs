@@ -144,6 +144,9 @@ pub struct ClusterCard {
   pub used_mib: Option<f64>,
   #[serde(rename = "freeMiB")]
   pub free_mib: Option<f64>,
+  /// The card's use as the driver reports it, 0 to 100, or null where it gives no rate.
+  #[serde(rename = "utilizationPercent")]
+  pub utilization_percent: Option<u32>,
   pub units: Vec<ClusterUnit>,
   pub turn: Option<CardTurn>,
   pub queue: Vec<QueuedTicket>,

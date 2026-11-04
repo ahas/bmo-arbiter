@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter"
-version = "0.1.0-rev.11"
+version = "0.1.0-rev.12"
 dependencies = [
  "axum",
  "bmo-arbiter-client",
@@ -263,6 +263,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "gpu-tool",
  "ignore",
  "jsonschema",
  "libc",
@@ -282,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter-client"
-version = "0.1.0-rev.11"
+version = "0.1.0-rev.12"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -294,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter-plugin"
-version = "0.1.0-rev.11"
+version = "0.1.0-rev.12"
 dependencies = [
  "bmo-arbiter-client",
  "rmcp",
@@ -572,6 +573,12 @@ dependencies = [
  "quote",
  "syn 3.0.9",
 ]
+
+[[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dunce"
@@ -854,6 +861,17 @@ dependencies = [
  "log",
  "regex-automata",
  "regex-syntax",
+]
+
+[[package]]
+name = "gpu-tool"
+version = "0.1.0-rev.12"
+dependencies = [
+ "bmo-arbiter-client",
+ "dotenvy",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

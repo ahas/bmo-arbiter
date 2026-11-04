@@ -4,16 +4,17 @@
 # every test live in `tests/`. The version is the repository's one version: 0.1.0 with a revision until the
 # first release (docs/api.md, 「Versions」).
 [workspace]
-members = ["crates/client", "crates/plugin"]
+members = ["crates/client", "crates/plugin", "tools/gpu"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-rev.11"
+version = "0.1.0-rev.12"
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
 axum = { version = "0.8.9", features = ["macros", "multipart", "ws"] }
+dotenvy = "0.15.7"
 futures-util = "0.3.34"
 jsonschema = { version = "0.58.6", default-features = false }
 reqwest = { version = "0.13.5", features = ["json", "query", "stream"] }
@@ -65,6 +66,7 @@ tokio.workspace = true
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 
 [dev-dependencies]
+gpu-tool = { path = "tools/gpu" }
 jsonschema.workspace = true
 libc = "0.2.177"
 # The layout check reads the README's folder table as markdown.

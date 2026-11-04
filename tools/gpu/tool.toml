@@ -1,0 +1,23 @@
+# The card master's use as a supervisor reads it (docs/api.md, 「Usage」): one entry, `bmo/gpu`, answered by
+# calling the master's usage route. The read is the owner's first — what each card is doing, who holds it,
+# what engine stands on it and who waits — and the route's answer stands beside it for a program. The tool
+# names services and units alone: no process, pid or person's name is in it.
+
+[tool]
+name = "gpu"
+protocol = 1
+language = "rust"
+build = 'cargo build --release -p gpu-tool && cp "$BMO_CARGO_TARGET/release/gpu-tool" "$BMO_TOOL_OUT/"'
+check = 'cargo test -p bmo-arbiter --test main tool::'
+run = ["gpu-tool"]
+
+[[entry]]
+namespace = "bmo"
+name = "gpu"
+title = "GPU cards"
+description = "What each GPU node's card is doing now: its use, the service or turn holding it, the engine resident with its memory, and the waiters in its queue."
+manual = "manual.md"
+input = "input.json"
+output = "output.json"
+hints = { read_only = true }
+capabilities = ["room.tools"]

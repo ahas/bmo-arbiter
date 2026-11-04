@@ -10,6 +10,10 @@ name = "bmo-arbiter"
 languages = ["cargo", "bun"]
 setup = ["bun install --cwd packages/arbiter-client --frozen-lockfile"]
 
+[tools]
+# The arbiter's own hosted tool, checked by the command its tool.toml names.
+dir = "tools"
+
 [check]
 quick = ["layout", "dependencies", "korean", "cargo-profile", "shared-versions"]
 # No code file holds Korean, so the ledger allows none anywhere.
@@ -37,7 +41,8 @@ id = "fmt"
 command = "cargo fmt --all --check"
 
 [build]
-binaries = ["bmo-arbiter"]
+# The master's binary and the hosted tool's executable.
+binaries = ["bmo-arbiter", "gpu-tool"]
 
 # The master runs from its own deploy tree. A release is a worktree of the commit, so the `card/` package
 # the master's install uploads to every node stands in it beside `bin/bmo-arbiter`, and the master reads
@@ -47,3 +52,25 @@ binaries = ["bmo-arbiter"]
 root = "~/.local/share/bmo-arbiter"
 data_root = "~/.local/share/bmo-arbiter/data"
 units = ["deploy/systemd/*.service"]
+
+# The tool is placed in its folder's .placed/: the executable the release's bin/ holds, its manifest, the
+# schemas and the manual beside it.
+[[deploy.step]]
+id = "place-tools"
+phase = "before-flip"
+command = '''
+set -eu
+rm -rf tools/gpu/.placed
+mkdir -p tools/gpu/.placed
+cp bin/gpu-tool tools/gpu/tool.toml tools/gpu/*.json tools/gpu/manual.md tools/gpu/.placed/
+'''
+
+# The tool is registered with the tool host once the master is up, as this service's own, so a supervisor
+# reaches it with `bmo use bmo/gpu`.
+[[deploy.step]]
+id = "register-tools"
+phase = "after-health"
+command = '''
+set -eu
+bmo pocket put tools/gpu/.placed --placed --service bmo-arbiter --allow room.tools
+'''

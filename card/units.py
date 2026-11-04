@@ -644,10 +644,14 @@ class CardMemory:
         try:
             import pynvml
             memory = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
+            try:
+                use = int(pynvml.nvmlDeviceGetUtilizationRates(self.handle).gpu)
+            except Exception:  # noqa: BLE001 - a driver that cannot say a rate is shown as unread
+                use = None
         except Exception:  # noqa: BLE001
             return None
         return {"name": self.name, "totalMiB": round(memory.total / 2**20), "usedMiB": round(memory.used / 2**20),
-                "freeMiB": round(memory.free / 2**20)}
+                "freeMiB": round(memory.free / 2**20), "utilizationPercent": use}
 
     def processes(self) -> list[tuple[int, int]] | None:
         """Every compute process on the card with the memory the driver counts for it, in bytes; None where

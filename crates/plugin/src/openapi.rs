@@ -14,6 +14,7 @@ use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandPage, DemandQuery};
 use bmo_arbiter_client::descriptions::Description;
 use bmo_arbiter_client::events::{EventKind, EventPage, EventsQuery, Health};
 use bmo_arbiter_client::placements::{Placement, PlacementAsk};
+use bmo_arbiter_client::usage::Usage;
 use bmo_arbiter_client::{ErrorCode, WireError};
 use schemars::generate::{SchemaGenerator, SchemaSettings};
 use schemars::{JsonSchema, Schema};
@@ -460,6 +461,16 @@ fn routes(generator: &mut SchemaGenerator) -> Vec<Route> {
       "getCluster",
       "The whole picture: groups, nodes, cards, units, queues, declarations.",
       read::<Cluster>(generator),
+    )
+    .never_fails(),
+    Route::new(
+      "get",
+      "/usage",
+      Master,
+      "getUsage",
+      "What every card was doing at the master's last reading: its use, the turn or claim holding it, the \
+       engine resident on it with its memory, and its waiters.",
+      read::<Usage>(generator),
     )
     .never_fails(),
     Route::new(

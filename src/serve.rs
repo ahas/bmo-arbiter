@@ -17,6 +17,7 @@ use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use bmo_arbiter_client::cluster::Cluster;
 use bmo_arbiter_client::demands::{DemandAsk, DemandPage, DemandQuery, DemandState};
 use bmo_arbiter_client::descriptions::Description;
 use bmo_arbiter_client::events::{Event, EventKind, EventPage, EventsQuery, Health};
@@ -32,6 +33,7 @@ use crate::master::{BoxFuture, Master, Reached, World};
 use crate::picture::detail_from;
 use crate::placement::{AdapterAnswer, Declaration, Hands, Placer, Say, write_whole};
 use crate::reach::{NodeRegistry, NodeShell};
+use crate::usage::usage_of;
 
 /// The address the API answers on, the token it takes, and how often the rounds go.
 pub struct Settings {
@@ -257,7 +259,7 @@ impl Placements {
 
 #[derive(Clone)]
 struct App {
-  cluster: Arc<Mutex<Value>>,
+  cluster: Arc<Mutex<Cluster>>,
   events: Arc<Mutex<Events>>,
   placements: Arc<Mutex<Placements>>,
   requests: mpsc::UnboundedSender<i64>,
@@ -334,6 +336,16 @@ async fn health() -> Response {
 async fn cluster(State(app): State<App>) -> Response {
   let cluster = app.cluster.lock().unwrap().clone();
   answered(StatusCode::OK, &cluster)
+}
+
+/// What every card was doing at the master's last reading (docs/api.md, 「Usage」): the owner's read of the
+/// cluster, with no process, pid or person's name in it.
+async fn usage(State(app): State<App>) -> Response {
+  let usage = {
+    let cluster = app.cluster.lock().unwrap();
+    usage_of(&cluster, now_ms())
+  };
+  answered(StatusCode::OK, &usage)
 }
 
 /// The placement's own work, one placement after another in the order they were asked: first one a stopped
@@ -690,7 +702,7 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
   let descriptions = Arc::new(master.descriptions_folder());
   let (requests, waiting) = mpsc::unbounded_channel();
   master.discover().await;
-  let picture = || serde_json::to_value(master.state()).expect("the cluster serializes");
+  let picture = || master.state();
   let app = App {
     cluster: Arc::new(Mutex::new(picture())),
     events: Arc::new(Mutex::new(Events::new())),
@@ -708,6 +720,7 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
     .route("/health", get(health))
     .route("/events", get(events))
     .route("/cluster", get(cluster))
+    .route("/usage", get(usage))
     .route("/placements", post(create_placement))
     .route("/placements/{placementId}", get(placement))
     .route("/demands", post(create_demand).get(list_demands))
@@ -725,7 +738,10 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
     }
   });
   let mut published = master.revision();
-  app.publish(EventKind::ClusterChanged, app.cluster.lock().unwrap().clone());
+  app.publish(
+    EventKind::ClusterChanged,
+    serde_json::to_value(app.cluster.lock().unwrap().clone()).expect("the cluster serializes"),
+  );
   let mut discovered = Instant::now();
   loop {
     let began = Instant::now();
@@ -736,9 +752,9 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
     master.poll().await;
     if master.revision() != published {
       published = master.revision();
-      let now = serde_json::to_value(master.state()).expect("the cluster serializes");
+      let now = master.state();
       *app.cluster.lock().unwrap() = now.clone();
-      app.publish(EventKind::ClusterChanged, now);
+      app.publish(EventKind::ClusterChanged, serde_json::to_value(&now).expect("the cluster serializes"));
     }
     let rest = settings
       .read_every

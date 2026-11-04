@@ -47,6 +47,7 @@ fn the_document_states_the_routes_events_and_tools_of_the_api_document() {
       "GET /health",
       "GET /placements/{placementId}",
       "GET /tickets/{ticketId}",
+      "GET /usage",
       "PATCH /card-units/{unitName}",
       "PATCH /tickets/{ticketId}",
       "POST /demands",

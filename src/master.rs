@@ -2369,6 +2369,7 @@ fn cluster_card(
     total_mib: card.total_mib.map(|mib| mib.0),
     used_mib: card.used_mib.map(|mib| mib.0),
     free_mib: card.free_mib.map(|mib| mib.0),
+    utilization_percent: card.utilization_percent,
     units: card
       .units
       .iter()

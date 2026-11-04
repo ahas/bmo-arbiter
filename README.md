@@ -12,7 +12,8 @@ The card arbiter for a cluster of GPU nodes whose cards several services share. 
 
 It knows no service by name: each service declares itself, names itself to the node arbiter and answers
 the master's adapter verbs. It is an upstream unit: a harness takes a turn on a card through its MCP server,
-`bmo-arbiter mcp`, with no other unit running.
+`bmo-arbiter mcp`, with no other unit running. A supervisor reads what every card is doing through the
+hosted tool `bmo/gpu`, which calls the master's usage route from the tool host.
 
 ## Layout
 
@@ -24,6 +25,7 @@ the master's adapter verbs. It is an upstream unit: a harness takes a turn on a 
 | `packages/` | The TypeScript client, `arbiter-client/`, generated from `docs/openapi.json` |
 | `card/` | The node arbiter: its Python package, pinned `pyproject.toml`, node setup and user unit, uploaded to every node as it stands |
 | `tests/` | The repository checks and every test: the master's as Cargo tests, the node arbiter's Python tests under `tests/card/` |
+| `tools/` | The arbiter's own hosted tools: `gpu/`, the supervisor's read of every card, placed and registered by a deployment |
 | `docs/` | The canonical statements of what the arbiter does, and the OpenAPI document |
 | `deploy/` | The master's systemd user unit, which a deployment links from the deploy tree |
 

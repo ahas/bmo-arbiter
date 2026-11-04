@@ -15,5 +15,6 @@ pub mod plan;
 pub mod reach;
 pub mod rules;
 pub mod serve;
+pub mod usage;
 pub mod verbs;
 pub mod yaml;

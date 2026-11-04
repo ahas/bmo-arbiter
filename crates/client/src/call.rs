@@ -20,6 +20,7 @@ use crate::descriptions::Description;
 use crate::error::WireError;
 use crate::events::{Event, EventPage, EventsQuery, Health};
 use crate::placements::{Placement, PlacementAsk};
+use crate::usage::Usage;
 
 /// Why a call did not come back with its route's answer.
 #[derive(Debug)]
@@ -167,6 +168,11 @@ impl ArbiterClient {
   /// `GET /cluster`, of the master.
   pub async fn cluster(&self) -> CallResult<Cluster> {
     self.get(&["cluster"]).await
+  }
+
+  /// `GET /usage`, of the master: what every card was doing at its last reading.
+  pub async fn usage(&self) -> CallResult<Usage> {
+    self.get(&["usage"]).await
   }
 
   /// `POST /placements`, of the master.

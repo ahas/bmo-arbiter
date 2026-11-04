@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.11**.
+This document states version **0.1.0-rev.12**.
 
 ## The wire format
 
@@ -202,7 +202,7 @@ it. Any other method and path is answered `404` `no-route`.
   | `master` | `version`, `startedAt`, `rulesFile`, `rulesLoadedAt?`, `rulesError?`, `readEveryMs` |
   | `groups` | each `name`, `pool`, `nodeNames`, `totalMiB`, `freeMiB` |
   | `nodes` | each `name`, `role?` (the node service's as last read), `desktop`, `link` (`state` `connected` or `lost`, `sinceAt?`, `readAt?`, `lastReadMs?`, `error?`: why the last read gave no card, the shell's error or the slave's answer), `version?` (its slave's), `rules?` (`loadedAt?`, `error?`), `occupants`, `cards` |
-  | `nodes[].cards` | each `index`, `name?`, `totalMiB?`, `usedMiB?`, `freeMiB?`, `units`, `turn?` (`serviceName`, `ticketId`, `waitedMs`, `inUse?`), `queue`, `claim?` (`claimantName`, `claimedAt?`), `ram` (`dumpsMiB`, `availableMiB?`, `maxMiB?`, `floorMiB?`, `dump?`), `stage` (`waiting`, `waitingMs`), `store?` (`path`, `bytes`, `extents?`, `slotsUsed`, `bytesUsed`, `error?`), `processes?` |
+  | `nodes[].cards` | each `index`, `name?`, `totalMiB?`, `usedMiB?`, `freeMiB?`, `utilizationPercent?` (the card's use as the driver reports it, 0 to 100, null where it gives no rate), `units`, `turn?` (`serviceName`, `ticketId`, `waitedMs`, `inUse?`), `queue`, `claim?` (`claimantName`, `claimedAt?`), `ram` (`dumpsMiB`, `availableMiB?`, `maxMiB?`, `floorMiB?`, `dump?`), `stage` (`waiting`, `waitingMs`), `store?` (`path`, `bytes`, `extents?`, `slotsUsed`, `bytesUsed`, `error?`), `processes?` |
   | `…units` | each `name` (`<service>/<part>@<node>`), `serviceName`, `part`, `vramMiB`, `state` (`resident`, `ram`, `evicted`, `mixed`), `ramMiB`, `sinceAt?`, `evictable`, `reason?`, `loadMs?`, `unloadMs?`, `kind?` (`resident`, `on-demand`, `fill`), `detail?` (「Unit descriptions」) |
   | `…queue` | each `ticketId`, `serviceName`, `position?`, `waitedMs`, `waitMs?`, `unitName?`, `vramMiB?` |
   | `…processes` | each `pid`, `name`, `serviceName?`, `usedMiB` |
@@ -215,6 +215,31 @@ it. Any other method and path is answered `404` `no-route`.
 
   A note's `code` is a kebab-case word a reader translates by; its `text` is an English sentence for a
   person (「Messages and codes」).
+
+### Usage
+
+- **`GET /usage`** — `200` with what every card was doing at the master's last reading, in the order the
+  picture holds the nodes and their cards. It is read-only and changes nothing; a supervisor reads it where
+  it cannot reach the master's port itself.
+
+  | Field | Shape |
+  | --- | --- |
+  | `at` | when the master answered, in epoch milliseconds |
+  | `nodes` | each `nodeName`, `connected`, `readAt?`, `error?` (why the last read gave no card) and `cards` |
+  | `…cards` | each `index`, `name?`, `totalMiB?`, `usedMiB?`, `freeMiB?`, `utilizationPercent?`, `turn?`, `claim?`, `units`, `waiters` |
+  | `…turn` | the service whose turn stands: `serviceName`, `ticketId`, `inUse?` and `waitedMs` |
+  | `…claim` | the claimant whose claim stands, by `claimantName` |
+  | `…units` | each `name` (`<service>/<part>@<node>`), `serviceName`, `part`, `vramMiB`, `ramMiB` and `state` (`resident`, `ram`, `evicted`, `mixed`) |
+  | `…waiters` | each `serviceName`, `ticketId`, `position?`, `waitedMs`, `unitName?` and `vramMiB?` |
+
+- **`utilizationPercent`** is the card's use as the driver reports it, the same figure the desktop rule
+  reads (`docs/node-arbiter.md`, 「The desktop」), and null where the driver gives no rate. `turn` is the
+  turn standing on the card, whether or not it is in use; `claim` is the claimant that took the card
+  outright. The units are every unit on the card with the place each stands in, so the resident engine and
+  its memory read together.
+- **A node the master does not reach** answers `connected` false, its last reading beside it where it has
+  one, and why in `error`; a node never read since the master started has none.
+- **No process, pid or person's name stands in the reading:** it names services and units alone.
 
 ### Placements
 
@@ -309,7 +334,7 @@ answered `404` `no-route`.
   | `queue` | every ticket, in line order, as `GET /tickets/{ticketId}` answers it |
   | `typicalHoldMs` | by service, how long its turns have held the card in use |
   | `units` | every card unit, as `GET /card-units` gives them |
-  | `device?` | the card as the driver says it: `name`, `totalMiB`, `usedMiB`, `freeMiB`, and `processes?`, each `pid`, `name`, `serviceName?`, `usedMiB`, null where the driver gives no count per process |
+  | `device?` | the card as the driver says it: `name`, `totalMiB`, `usedMiB`, `freeMiB`, `utilizationPercent?` (the card's use, 0 to 100, null where the driver gives no rate), and `processes?`, each `pid`, `name`, `serviceName?`, `usedMiB`, null where the driver gives no count per process |
   | `stage` | the lent owner's door: `waiting`, `waitingMs`, `graphs`, `waits`, `waitedMs` |
   | `store?` | the dump store: `path`, `bytes`, `extents?`, `slotsUsed`, `bytesUsed`, `error?` |
   | `ram` | `dumpsMiB`, `availableMiB?`, `maxMiB?`, `floorMiB?`, `dump?` (where a unit goes when no rule names its part: `ram` or `disk`) |

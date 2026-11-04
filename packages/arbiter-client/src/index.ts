@@ -21,6 +21,7 @@ export type Demand = Schemas["Demand"];
 export type DemandAsk = Schemas["DemandAsk"];
 export type DemandPage = Schemas["DemandPage"];
 export type Description = Schemas["Description"];
+export type Usage = Schemas["Usage"];
 export type Card = Schemas["Card"];
 export type Ticket = Schemas["Ticket"];
 export type TicketAsk = Schemas["TicketAsk"];

@@ -32,7 +32,8 @@ class StandInMemory:
     """The card as its driver would say it, with one process on it."""
 
     def read(self) -> dict:
-        return {"name": "Test Card", "totalMiB": 24576, "usedMiB": 8192, "freeMiB": 16384}
+        return {"name": "Test Card", "totalMiB": 24576, "usedMiB": 8192, "freeMiB": 16384,
+                "utilizationPercent": 64}
 
     def processes(self) -> list[tuple[int, int]]:
         return [(os.getpid(), 1 << 30)]
