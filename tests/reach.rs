@@ -30,7 +30,7 @@ fn a_connection_is_read_from_the_node_services_target() {
   let hub = Target {
     role: Some("voice".into()),
     hub_id: Some(1),
-    hub_address: Some("http://127.0.0.1:1".into()),
+    hub_address: Some("http://[::1]:1".into()),
     hub_token_file: Some("~/t".into()),
     agent_name: Some("node-a".into()),
     ..target(NodeKind::Hub)

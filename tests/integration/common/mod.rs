@@ -41,7 +41,7 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const dir = process.env.STANDIN_DIR;
 const read = () => JSON.parse(readFileSync(`${dir}/nodes.json`, "utf8"));
 const node = (name, nodes) => ({ name, label: name, kind: "hub", hubId: 1, agentName: name,
-  address: `${name} @ http://127.0.0.1:1`, credential: "~/none", role: nodes[name] ?? null, state: "connected",
+  address: `${name} @ http://[::1]:1`, credential: "~/none", role: nodes[name] ?? null, state: "connected",
   tone: "good", detail: null, checkedAt: null, connectedAt: null, up: true, thisMachine: false });
 const answer = (body, status = 200) => Response.json(body, { status });
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -54,7 +54,7 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
   if (!(parts[1] in nodes)) return answer({ code: "not-found", error: `no node ${parts[1]}` }, 404);
   if (request.method === "GET" && parts[2] === "target") {
     return answer({ nodeName: parts[1], kind: "hub", role: nodes[parts[1]] ?? null, host: null, port: null, user: null,
-      keyPath: null, shell: null, sshOptions: [], sshArgs: [], hubId: 1, hubAddress: "http://127.0.0.1:1",
+      keyPath: null, shell: null, sshOptions: [], sshArgs: [], hubId: 1, hubAddress: "http://[::1]:1",
       hubTokenFile: "~/none", agentName: parts[1] });
   }
   if (request.method === "PATCH" && parts.length === 2) {
