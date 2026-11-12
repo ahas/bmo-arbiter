@@ -138,10 +138,14 @@ const own = `${dir}/demo-placed.json`;
 const answer = (said) => { console.log(JSON.stringify(said)); process.exit(said.ok ? 0 : 1); };
 if (verb === "placed") answer({ ok: true, node: null, state: null, detail: "", nodes: existsSync(own) ? JSON.parse(readFileSync(own, "utf8")) : [] });
 if (verb === "install" && existsSync(`${dir}/fail-install`)) answer({ ok: false, node, state: null, detail: "the stand-in was told to fail" });
+// Told to hold, an install stays in hand until whatever stops it.
+if (verb === "install" && existsSync(`${dir}/hold-install`)) { appendFileSync(`${dir}/adapter.log`, `holding install ${node}\n`); setInterval(() => {}, 1 << 30); }
+else {
 console.log(`doing ${verb} on ${node}`);
 if (verb === "install") writeFileSync(own, JSON.stringify(placed.includes(node) ? placed : [...placed, node]));
 if (verb === "uninstall") writeFileSync(own, JSON.stringify(placed.filter((one) => one !== node)));
 answer({ ok: true, node, state: verb === "uninstall" || verb === "stop" ? "stopped" : "running", detail: "" });
+}
 "#;
 
 /// A unit of the card as its slave answers it.
@@ -190,6 +194,7 @@ pub struct World {
   nodes: Child,
   node_port: u16,
   token: Option<String>,
+  drain_ms: Option<u64>,
   pub port: u16,
 }
 
@@ -244,6 +249,7 @@ impl World {
       nodes,
       node_port,
       token: None,
+      drain_ms: None,
       port: 0,
     };
     for (name, state) in slaves {
@@ -270,6 +276,12 @@ impl World {
   }
 
   /// The master standing behind a token every route takes.
+  /// The master's stop drained for the milliseconds given instead of its own default.
+  pub fn with_drain_ms(mut self, drain_ms: u64) -> World {
+    self.drain_ms = Some(drain_ms);
+    self
+  }
+
   pub fn with_token(mut self, token: &str) -> World {
     self.token = Some(token.to_owned());
     self
@@ -326,25 +338,48 @@ impl World {
       .env("CARD_MASTER_PORT", self.port.to_string())
       .env("CARD_MASTER_READ_EVERY_MS", "50")
       .env("CARD_MASTER_DISCOVER_EVERY_MS", "600000");
+    match self.drain_ms {
+      Some(drain_ms) => command.env("CARD_MASTER_DRAIN_MS", drain_ms.to_string()),
+      None => command.env_remove("CARD_MASTER_DRAIN_MS"),
+    };
   }
 
   /// The master started over the world, on a port of its own choosing, which it names as it starts
   /// answering — so no other process can take the port between its choosing and its binding.
   pub fn start(mut self) -> World {
+    self.spawn_master();
+    self
+  }
+
+  /// The master started again over the same world, on the port the last one answered on, as a restart of
+  /// its unit starts it.
+  pub fn restart_master(&mut self) {
+    assert!(self.master.is_none(), "the last master still stands");
+    self.spawn_master();
+  }
+
+  /// The master spawned in a process group of its own, what it prints in `master.log` and `master.err`.
+  fn spawn_master(&mut self) {
     let mut command = Command::new(binary());
     self.environment(&mut command);
     let log = std::fs::File::create(self.root().join("master.log")).unwrap();
+    let errors = std::fs::File::create(self.root().join("master.err")).unwrap();
     self.master = Some(
       command
         .stdin(Stdio::null())
         .stdout(log)
-        .stderr(Stdio::null())
+        .stderr(errors)
         .process_group(0)
         .spawn()
         .expect("the master starts"),
     );
     self.port = named_port(&self.root().join("master.log"), "bmo-arbiter: answering on 127.0.0.1:");
-    self
+  }
+
+  /// Whether the master's process has not yet ended.
+  pub fn master_running(&mut self) -> bool {
+    let master = self.master.as_mut().expect("the master was started");
+    master.try_wait().unwrap().is_none()
   }
 
   /// The binary run once as a person runs it beside the standing master, with what it printed.
@@ -367,6 +402,39 @@ impl World {
       let _ = master.wait();
       self.master = None;
     }
+  }
+
+  /// The master sent SIGTERM, as a stop of its unit sends it, and nothing else.
+  pub fn terminate_master(&self) {
+    self.signal_master(libc::SIGTERM);
+  }
+
+  /// The master alone sent the signal given.
+  pub fn signal_master(&self, signal: i32) {
+    let master = self.master.as_ref().expect("the master was started");
+    unsafe {
+      libc::kill(master.id() as i32, signal);
+    }
+  }
+
+  /// The master's exit status once it has ended, within a bound, and whatever it started taken down after it.
+  pub fn master_ended(&mut self) -> i32 {
+    let mut master = self.master.take().expect("the master was started");
+    let until = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+      if let Some(status) = master.try_wait().unwrap() {
+        break status;
+      }
+      if Instant::now() > until {
+        self.master = Some(master);
+        panic!("the master never ended");
+      }
+      std::thread::sleep(Duration::from_millis(25));
+    };
+    unsafe {
+      libc::kill(-(master.id() as i32), libc::SIGKILL);
+    }
+    status.code().unwrap_or(-1)
   }
 
   /// A node's slave answering as given, or not at all; written whole so no read sees half of it.

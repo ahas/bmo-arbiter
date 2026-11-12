@@ -4,3 +4,4 @@ pub mod common;
 
 mod contract;
 mod placement;
+mod stop;

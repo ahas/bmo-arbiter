@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.12**.
+This document states version **0.1.0-rev.13**.
 
 ## The wire format
 
@@ -120,6 +120,7 @@ data root and reads the deployment's own settings from `~/.config/bmo-arbiter/en
 | `CARD_MASTER_PORT` | the loopback port of the master's API; `0` has the system choose, named in the line the master prints as it starts listening | `7440` |
 | `CARD_MASTER_READ_EVERY_MS` | how often every slave is read | `2000` |
 | `CARD_MASTER_DISCOVER_EVERY_MS` | how often the node service is read | `60000` |
+| `CARD_MASTER_DRAIN_MS` | how long a stop waits for the calls in hand before it cuts them (「A stop」) | `5000` |
 | `CARD_INSTALL_POLL_MS` | how often the install looks at the node setup and at the arbiter's health, both alike; a check sets it to run an install quickly | the setup every 5 s, the health every second |
 | `HOME` | the home a key path written `~/…` and the defaults above stand under | `/` |
 
@@ -306,6 +307,22 @@ master's to decide (`docs/placement.md`, 「Demands」).
     written.
 - What each detail means is `docs/placement.md`, 「What a service says of its units」. The folder itself is
   the master's own, and no other unit writes in it.
+
+### A stop
+
+The master drains on SIGTERM or SIGINT, the signal a stop of its unit sends, before it ends:
+
+- **It stops listening at once,** so a new call finds no answer at its address, and its rounds stop.
+- **Every call it already has in hand is answered:** a short call finishes as it would have; an answer
+  `waitMs` holds open is answered at once as the demand stands, as when its time runs out (`202` with
+  `Retry-After` to a `POST`); every open event stream ends. A connection kept open between calls is
+  closed, at once where no call is in hand on it, else once that call is answered.
+- **A call still in hand `CARD_MASTER_DRAIN_MS` after the signal, five seconds unless set, is cut,** the
+  master saying so on its standard error, and the master ends with exit status `0` either way.
+- What the master holds in its memory goes with it. A reader of the stream opens it again on the next
+  master, where a resume from a number the stopped master gave is answered `410` `gone` (「Events」); a caller of a
+  demand asks it again (`docs/placement.md`, 「Demands」); a placement left running is undone at the next
+  start (「Placements」).
 
 ## What the node arbiter serves
 
@@ -585,7 +602,7 @@ says, `1` where it ran and failed, `2` where its words do not read; what it prin
 
 | Verb | Words | What it does |
 | --- | --- | --- |
-| *(none)* | | stands as the master |
+| *(none)* | | stands as the master until a stop drains it (「A stop」) |
 | `--once` | | reads every slave once, prints the cluster as JSON and ends |
 | `mcp` | `[--master <url>] [--card <url>] [--token <token>]` | the harness plugin's MCP server on standard input and output (「The clients and the harness plugin」): the master's tools call `--master`, else `http://127.0.0.1:<CARD_MASTER_PORT>`, with `--token`, else `CARD_MASTER_TOKEN`; the node's tools call `--card`, else `http://127.0.0.1:<CARD_TURN_PORT>` |
 | `check` | | reads the rules and says what they would place where — the claimants, each group with the nodes it chooses, the units and the rules — writing nothing; fails where a unit's `vram_mib` is more than any answering card it may stand on holds once its group's `reserve_mib` is kept back |

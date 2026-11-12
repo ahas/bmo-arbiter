@@ -8,7 +8,7 @@ members = ["crates/client", "crates/plugin", "tools/gpu"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-rev.12"
+version = "0.1.0-rev.13"
 edition = "2024"
 license = "MIT"
 
@@ -67,6 +67,8 @@ toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 
 [dev-dependencies]
 gpu-tool = { path = "tools/gpu" }
+# The stop's tests hold a call open on a bare connection and read its answers as HTTP.
+httparse = "1.10.1"
 jsonschema.workspace = true
 libc = "0.2.177"
 # The layout check reads the README's folder table as markdown.

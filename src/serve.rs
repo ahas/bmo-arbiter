@@ -26,7 +26,9 @@ use bmo_arbiter_client::{ErrorCode, WireError};
 use futures_util::Stream;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{broadcast, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use crate::demands::Demands;
 use crate::master::{BoxFuture, Master, Reached, World};
@@ -35,12 +37,14 @@ use crate::placement::{AdapterAnswer, Declaration, Hands, Placer, Say, write_who
 use crate::reach::{NodeRegistry, NodeShell};
 use crate::usage::usage_of;
 
-/// The address the API answers on, the token it takes, and how often the rounds go.
+/// The address the API answers on, the token it takes, how often the rounds go, and how long a stop drains.
 pub struct Settings {
   pub port: u16,
   pub token: Option<String>,
   pub read_every: Duration,
   pub discover_every: Duration,
+  /// How long a stop waits for the calls in hand before it cuts them (docs/api.md, 「A stop」).
+  pub drain: Duration,
 }
 
 /// The port the master answers on: `CARD_MASTER_PORT`, else 7440; 0 is one the system chooses.
@@ -74,6 +78,7 @@ impl Settings {
       token: master_token(),
       read_every: Duration::from_millis(number("CARD_MASTER_READ_EVERY_MS").unwrap_or(2_000)),
       discover_every: Duration::from_millis(number("CARD_MASTER_DISCOVER_EVERY_MS").unwrap_or(60_000)),
+      drain: Duration::from_millis(number("CARD_MASTER_DRAIN_MS").unwrap_or(5_000)),
     }
   }
 }
@@ -268,6 +273,8 @@ struct App {
   /// The master's store of the units' descriptions.
   descriptions: Arc<PathBuf>,
   token: Option<Arc<str>>,
+  /// Whether the master is stopping, which answers every held call at once (docs/api.md, 「A stop」).
+  stopping: Stopping,
 }
 
 impl App {
@@ -470,7 +477,7 @@ async fn demand_answer(
       return refused(ErrorCode::NotFound, format!("the master holds no demand {id}"));
     };
     let left = deadline.saturating_duration_since(Instant::now());
-    let waits = watch || demand.state == DemandState::Waiting;
+    let waits = (watch || demand.state == DemandState::Waiting) && !app.stopping.is_set();
     if now != news || left.is_zero() || !waits {
       if !created {
         return answered(StatusCode::OK, &demand);
@@ -482,8 +489,13 @@ async fn demand_answer(
       waiting.headers_mut().insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
       return waiting;
     }
-    // A round that moved nothing of it wakes it to look again; the time running out answers it as it stands.
-    let _ = tokio::time::timeout(left, changed.changed()).await;
+    // A round that moved nothing of it wakes it to look again; the time running out or a stop answers it as
+    // it stands.
+    let mut stopping = app.stopping.clone();
+    tokio::select! {
+      _ = tokio::time::timeout(left, changed.changed()) => {}
+      () = stopping.set() => {}
+    }
   }
 }
 
@@ -637,26 +649,35 @@ async fn events(
   };
   let live = events.live.subscribe();
   drop(events);
-  Sse::new(stream(backlog, live, kinds))
+  Sse::new(stream(backlog, live, kinds, app.stopping.clone()))
     .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
     .into_response()
 }
 
-/// What a stream sends: the events it missed, then each live one of the kinds it reads, none twice.
+/// What a stream sends: the events it missed, then each live one of the kinds it reads, none twice, until
+/// the master stops.
 fn stream(
   backlog: VecDeque<Event>,
   live: broadcast::Receiver<Event>,
   kinds: Vec<EventKind>,
+  stopping: Stopping,
 ) -> impl Stream<Item = Result<SseEvent, Infallible>> {
   let sent = backlog.back().map(|event| event.id);
   futures_util::stream::unfold(
-    (backlog, live, kinds, sent),
-    |(mut backlog, mut live, kinds, mut sent)| async move {
+    (backlog, live, kinds, sent, stopping),
+    |(mut backlog, mut live, kinds, mut sent, mut stopping)| async move {
       let event = loop {
+        if stopping.is_set() {
+          return None;
+        }
         if let Some(event) = backlog.pop_front() {
           break event;
         }
-        match live.recv().await {
+        let received = tokio::select! {
+          received = live.recv() => received,
+          () = stopping.set() => return None,
+        };
+        match received {
           Ok(event) if kinds.contains(&event.kind) && sent.is_none_or(|sent| event.id > sent) => {
             break event;
           }
@@ -670,7 +691,7 @@ fn stream(
         .id(event.id.to_string())
         .event(event.kind.name())
         .data(serde_json::to_string(&event).expect("an event serializes"));
-      Some((Ok(frame), (backlog, live, kinds, sent)))
+      Some((Ok(frame), (backlog, live, kinds, sent, stopping)))
     },
   )
 }
@@ -692,9 +713,77 @@ pub async fn once(mut master: Master) -> String {
   String::from_utf8(out).expect("serde_json writes UTF-8")
 }
 
-/// The master standing: the API up, then a round every `read_every` and the node list read again every
-/// `discover_every`, each change of the picture published as `cluster.changed`.
+/// Whether the master is stopping: set once, by SIGTERM or SIGINT, and read by every call that would
+/// otherwise stay open.
+#[derive(Clone)]
+struct Stopping(watch::Receiver<bool>);
+
+impl Stopping {
+  /// Set by the first SIGTERM or SIGINT the process receives from now on.
+  fn on_signals() -> std::io::Result<Self> {
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let (set, read) = watch::channel(false);
+    tokio::spawn(async move {
+      tokio::select! {
+        _ = terminate.recv() => {}
+        _ = interrupt.recv() => {}
+      }
+      set.send_replace(true);
+      // Kept open, so a reader waiting on it is never told the channel closed instead.
+      set.closed().await;
+    });
+    Ok(Self(read))
+  }
+
+  fn is_set(&self) -> bool {
+    *self.0.borrow()
+  }
+
+  /// Ends once the master is stopping, at once where it already is.
+  async fn set(&mut self) {
+    if self.0.wait_for(|stopping| *stopping).await.is_err() {
+      // The signal's task is gone without setting it, so no stop is coming.
+      std::future::pending::<()>().await;
+    }
+  }
+}
+
+/// The master standing until a stop drains it (docs/api.md, 「A stop」): the API up, then a round every
+/// `read_every` and the node list read again every `discover_every`, each change of the picture published
+/// as `cluster.changed`. On a stop it listens no more, its rounds end, and the calls in hand are given
+/// `settings.drain` to be answered.
 pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> std::io::Result<()> {
+  let mut stopping = Stopping::on_signals()?;
+  let mut api = None;
+  tokio::select! {
+    stood = stand(&mut master, &settings, placer, stopping.clone(), &mut api) => match stood {
+      Err(fault) => return Err(fault),
+      Ok(never) => match never {},
+    },
+    () = stopping.set() => {}
+  }
+  let Some(api) = api else {
+    return Ok(());
+  };
+  if tokio::time::timeout(settings.drain, api).await.is_err() {
+    eprintln!(
+      "bmo-arbiter: calls still in hand {} ms after the stop were cut",
+      settings.drain.as_millis()
+    );
+  }
+  Ok(())
+}
+
+/// The API listening and the rounds going, for as long as nothing stops them; the API's task is left in
+/// `api`, which ends once every call it has in hand is answered after a stop.
+async fn stand(
+  master: &mut Master,
+  settings: &Settings,
+  placer: Placer,
+  stopping: Stopping,
+  api: &mut Option<JoinHandle<()>>,
+) -> std::io::Result<Infallible> {
   master.read_rules_if_changed();
   master.attach(placer.board());
   let demands = Arc::new(Demands::default());
@@ -702,9 +791,8 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
   let descriptions = Arc::new(master.descriptions_folder());
   let (requests, waiting) = mpsc::unbounded_channel();
   master.discover().await;
-  let picture = || master.state();
   let app = App {
-    cluster: Arc::new(Mutex::new(picture())),
+    cluster: Arc::new(Mutex::new(master.state())),
     events: Arc::new(Mutex::new(Events::new())),
     placements: Arc::new(Mutex::new(Placements {
       kept: VecDeque::new(),
@@ -714,6 +802,7 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
     demands: demands.clone(),
     descriptions,
     token: settings.token.as_deref().map(Arc::from),
+    stopping: stopping.clone(),
   };
   tokio::spawn(place_requests(placer, app.clone(), waiting));
   let router = Router::new()
@@ -732,11 +821,13 @@ pub async fn serve(mut master: Master, settings: Settings, placer: Placer) -> st
     .with_state(app.clone());
   let listener = tokio::net::TcpListener::bind(("127.0.0.1", settings.port)).await?;
   println!("bmo-arbiter: answering on 127.0.0.1:{}", listener.local_addr()?.port());
-  tokio::spawn(async move {
-    if let Err(fault) = axum::serve(listener, router).await {
+  let mut stopped = stopping;
+  *api = Some(tokio::spawn(async move {
+    let drained = axum::serve(listener, router).with_graceful_shutdown(async move { stopped.set().await });
+    if let Err(fault) = drained.await {
       eprintln!("bmo-arbiter: the API stopped — {fault}");
     }
-  });
+  }));
   let mut published = master.revision();
   app.publish(
     EventKind::ClusterChanged,

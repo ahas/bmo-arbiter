@@ -17,7 +17,8 @@ ExecStartPre=/usr/bin/mkdir -p %h/.local/share/bmo-arbiter/data/placements
 ExecStart=%h/.local/share/bmo-arbiter/deploy/bin/bmo-arbiter
 Restart=always
 RestartSec=5
-# A stop is waited for until the master and the adapters it runs have ended, each of which ends on SIGTERM.
+# A stop is waited for until the master and the adapters it runs have ended, each of which ends on SIGTERM:
+# the master drains the calls it has in hand first, for CARD_MASTER_DRAIN_MS at most (docs/api.md, 「A stop」).
 TimeoutStopSec=infinity
 
 [Install]
