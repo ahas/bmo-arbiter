@@ -12,6 +12,7 @@ import asyncio
 import fcntl
 import importlib.util
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,16 @@ BATCH = units.Claimant("batch", first=False, tickets=False, ram_free_bytes=8 << 
 IDLE = watch.Reading(percent=2, used_mib=600, total_mib=10240)
 GAME = watch.Reading(percent=85, used_mib=5200, total_mib=10240)
 PAUSED = watch.Reading(percent=0, used_mib=7000, total_mib=10240)
+
+
+def unanswering_port(test: unittest.TestCase) -> int:
+    """A port on the IPv4 loopback where nothing answers and every machine the suite runs on refuses a
+    connection at once: held bound and never listening for the test's life. A closed port nothing holds is
+    not refused on a mirrored-network WSL machine; the connection waits there until it times out."""
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", 0))
+    test.addCleanup(held.close)
+    return held.getsockname()[1]
 
 
 class Clock:
@@ -1117,7 +1128,7 @@ class TurnsTest(unittest.TestCase):
         self.occupants.read()
         lock = Path(tempfile.mkdtemp()) / ".gpu.lock"
         # Nothing listens at the arbiter's address: the node keeps no queue.
-        client = turn.TurnClient("song", port=9)
+        client = turn.TurnClient("song", port=unanswering_port(self))
         self.assertIsNone(client.ask())
         fd = turn.hold(client, lock)
         self.assertIsNotNone(fd)
@@ -1178,7 +1189,7 @@ class TurnCommandTest(unittest.TestCase):
     )
 
     def run_turn(self, folder: Path, *extra: str) -> subprocess.Popen:
-        env = {**os.environ, "CARD_TURN_PORT": "9"}
+        env = {**os.environ, "CARD_TURN_PORT": str(unanswering_port(self))}
         process = subprocess.Popen([sys.executable, str(HERE / "turn.py"), "--service", "tester", "--lock",
                                     str(folder / "lock"), *extra, "--", sys.executable, "-c", self.COMMAND,
                                     str(folder / "up"), str(folder / "heard")], env=env)
