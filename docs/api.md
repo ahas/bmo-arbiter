@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.13**.
+This document states version **0.1.0-rev.14**.
 
 ## The wire format
 
@@ -139,6 +139,7 @@ Read from its environment, which `bmo-card.service` fills from `~/.config/bmo-ca
 | `CARD_OWNERS` | the folder owners besides the borrower open their control sockets in | `~/.local/share/bmo-card/owners` |
 | `CARD_TURN_PORT` | the node arbiter's loopback port | `7439` |
 | `CARD_TURN_HOLD_OPEN_S` | the longest an answer is held open | 20 |
+| `CARD_DRAIN_MS` | how long a stop waits for the calls in hand before it cuts them (「A stop」) | `5000` |
 | `CARD_CLAIM_POLL_S` | how often a claimant's tickets are looked at | 0.1 |
 | `CARD_LEND_GIVES_WAY_S` | how long a lent hold takes to let go, its ticket's `givesWayMs` in seconds | 3 |
 | `DESKTOP_READ_EVERY_S` | how often the desktop's card is read | 1 |
@@ -410,6 +411,22 @@ A ticket is a place in the node's queue for one turn on the card (`docs/node-arb
   `offset` and `length` in the dump store),
   `lastUnload?`, `lastLoad?` and `lastLower?` (each `tookMs`, `bytes`, `at`, `to?`), and `door?` (its own
   owner's door, as `stage` is the lent owner's, for an owner besides the lent one).
+
+### A stop
+
+The node arbiter drains on SIGTERM or SIGINT, the signal a stop of its unit sends, before it ends:
+
+- **It stops listening at once,** so no new call is accepted on the node's loopback, and no turn is given
+  any more.
+- **Every call it already has in hand is answered:** a short call finishes as it would have, and an answer
+  `waitMs` holds open goes out at once as the ticket stands, as when its wait runs out.
+- **A call still in hand `CARD_DRAIN_MS` after the signal, five seconds unless set, is cut,** the arbiter
+  saying so on its standard error, and the arbiter ends with exit status `0` either way.
+- **The card is emptied:** a hold in hand ends as a close does, its rpc-server asked to stop with `SIGTERM`
+  and waited for until it has ended, its turn given back and the lock let go (`docs/node-arbiter.md`,
+  「Lending」).
+- What the arbiter keeps in its memory goes with it, its queue among it: a caller asks for a new ticket on
+  the next arbiter.
 
 ### The lending protocol
 

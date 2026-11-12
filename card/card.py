@@ -81,6 +81,8 @@ KEEP_POLL_S = 1.0
 # what a hold is counted at before a service has held the card here.
 TURN_PORT = int(os.environ.get("CARD_TURN_PORT", "7439"))
 TURN_HOLD_OPEN_S = float(os.environ.get("CARD_TURN_HOLD_OPEN_S", "20"))
+# How long a stop waits for the calls in hand before it cuts them (docs/api.md, 「A stop」).
+DRAIN_S = float(os.environ.get("CARD_DRAIN_MS", "5000")) / 1000
 # How often a held answer looks again at a lock that may have freed with nobody giving a ticket back, and at
 # its asker's connection.
 TURN_LOOK_S = 0.25
@@ -544,6 +546,9 @@ class Turns:
         self.guard = threading.Lock()
         # Woken whenever a turn may have changed hands, so an answer held open goes out at once.
         self.changed = threading.Condition(self.guard)
+        # The arbiter is stopping: no turn is given any more, and every answer held open goes out as its
+        # ticket stands (docs/api.md, 「A stop」).
+        self.draining = False
 
     def _order(self) -> list[Ticket]:
         """The queue in its order: the ticket whose turn it is first, then by the occupants' order, then by
@@ -574,6 +579,8 @@ class Turns:
         return [ticket for ticket in self._order() if ticket.granted is None and not ticket.rest]
 
     def _grant(self) -> None:
+        if self.draining:
+            return
         claiming = [ticket for ticket in self.tickets.values() if self.occupants.claims_by_ticket(ticket.service)]
         if claiming:
             if self.claim_holds():
@@ -624,7 +631,8 @@ class Turns:
         deadline = time.monotonic() + min(max(0.0, wait_s), self.hold_open_s)
 
         def nothing_new() -> bool:
-            if self.tickets.get(ticket.id) is not ticket:
+            # A stop answers every answer held open as its ticket stands, rather than wait out the turn.
+            if self.draining or self.tickets.get(ticket.id) is not ticket:
                 return False
             if not holding:
                 return ticket.granted is None
@@ -776,6 +784,13 @@ class Turns:
             self._grant()
             self.changed.notify_all()
             return True
+
+    def stop(self) -> None:
+        """The arbiter is stopping: no turn is given any more, and every answer held open goes out as it
+        stands (docs/api.md, 「A stop」)."""
+        with self.guard:
+            self.draining = True
+            self.changed.notify_all()
 
     def _end(self, ticket: Ticket) -> None:
         """A ticket over, how long it held the card in use counted for the next waits, its rest left out; a turn
@@ -2231,15 +2246,119 @@ class LocalTurn:
             self.ticket = None
 
 
-async def serve_turns(turns: Turns, port: int, units_api: UnitsApi | None = None) -> None:
+class HoldServer(ThreadingHTTPServer):
+    """The hold API's listener, counting the calls in hand: a stop closes it to new calls, and the calls
+    already in hand are answered before the process ends, or cut when the drain's deadline passes
+    (docs/api.md, 「A stop」)."""
+
+    daemon_threads = True
+
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler]) -> None:
+        super().__init__(address, handler)
+        self.in_hand = 0
+        self.in_hand_changed = threading.Condition()
+
+    def process_request(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        with self.in_hand_changed:
+            self.in_hand += 1
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._answered()
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._answered()
+
+    def _answered(self) -> None:
+        with self.in_hand_changed:
+            self.in_hand -= 1
+            self.in_hand_changed.notify_all()
+
+    def stop_listening(self) -> None:
+        """The listener closed and its serving thread ended: no new call is accepted, and a connection
+        already open that carries no call is closed with it."""
+        self.shutdown()
+        self.server_close()
+
+    def drain(self, timeout_s: float) -> bool:
+        """Wait until every call in hand is answered, or the deadline passes: whether every call ended."""
+        with self.in_hand_changed:
+            return self.in_hand_changed.wait_for(lambda: self.in_hand == 0, max(0.0, timeout_s))
+
+
+class Stop:
+    """A stop of the arbiter (docs/api.md, 「A stop」): no new call is accepted, the answers held open go out
+    as they stand, the calls in hand are waited for within the deadline, and then the holds end, which
+    stops each rpc-server and lets go of the lock (docs/node-arbiter.md, 「Lending」)."""
+
+    def __init__(self, deadline_s: float = DRAIN_S) -> None:
+        self.deadline_s = deadline_s
+        self.turns: Turns | None = None
+        self.event = asyncio.Event()
+        # The hold API's listeners, the lend address's server, and the connections in hand on it.
+        self.servers: list[HoldServer] = []
+        self.lend_server: asyncio.AbstractServer | None = None
+        self.card_tasks: set[asyncio.Task] = set()
+
+    def signal(self) -> None:
+        """The signal a stop sends, taken in the loop the drain runs in."""
+        self.event.set()
+
+    def holds(self, serve: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
+              ) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]:
+        """A lend connection's handler whose call the stop ends before the process does."""
+        async def held(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            task = asyncio.current_task()
+            if task is not None:
+                self.card_tasks.add(task)
+            try:
+                await serve(reader, writer)
+            finally:
+                if task is not None:
+                    self.card_tasks.discard(task)
+        return held
+
+    async def drain(self) -> None:
+        """The stop carried out: listening ends, the calls in hand are waited for until the deadline, then
+        every hold in hand is ended, which empties the card."""
+        if self.turns is not None:
+            self.turns.stop()
+        for server in self.servers:
+            await asyncio.to_thread(server.stop_listening)
+        if self.lend_server is not None:
+            self.lend_server.close()
+        waiters = (asyncio.to_thread(server.drain, self.deadline_s) for server in self.servers)
+        if not all(await asyncio.gather(*waiters)):
+            say(f"card: a call was still in hand {self.deadline_s:g} s after the signal; it is cut")
+        tasks = list(self.card_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self.lend_server is not None:
+            await self.lend_server.wait_closed()
+
+
+async def serve_turns(turns: Turns, port: int, units_api: UnitsApi | None = None,
+                      stop: Stop | None = None) -> None:
     """The hold API on the node's loopback, in a thread of its own, for the process's life. A port that
     cannot be had leaves the queue to this process's own waiters and says so."""
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), turns_handler(turns, units_api))
+        server = HoldServer(("127.0.0.1", port), turns_handler(turns, units_api))
     except OSError as fault:
         say(f"turns: the hold API could not listen on 127.0.0.1:{port} ({fault}); occupants asking it take the lock as it comes")
         await asyncio.Event().wait()
         return
+    if stop is not None:
+        if stop.event.is_set():
+            # The stop began before this rule did: the listener never serves.
+            server.server_close()
+            return
+        stop.servers.append(server)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     await asyncio.Event().wait()
 
@@ -2266,7 +2385,8 @@ def occupants_path(env: dict[str, str]) -> Path:
     return Path(env.get("CARD_OCCUPANTS", "") or str(Path.home() / ".config/bmo-card/occupants"))
 
 
-def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> list[tuple[str, Callable[[], Awaitable[None]]]]:
+def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str],
+          stop: Stop | None = None) -> list[tuple[str, Callable[[], Awaitable[None]]]]:
     """The rules this node keeps, each named, as the settings switch them on, every one under the order
     of the node's occupants."""
     import desktop
@@ -2281,6 +2401,8 @@ def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> 
     card.claim_yields = lambda name: occupants.outranks(name, lent_to)
     turns = Turns(occupants, lock, card.claimed, claim_holds=card.claim_holds)
     card.turns = turns
+    stop = stop or Stop()
+    stop.turns = turns
     card.lent_to = lent_to or ANY
     seen = desktop.Desktop()
     store = card.units.store if card.units is not None else store_of(env)
@@ -2304,7 +2426,7 @@ def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> 
     kept: list[tuple[str, Callable[[], Awaitable[None]]]] = [
         (f"occupants {' '.join(occupants.order)} from {path}", occupants.run),
         ("the order kept on the lock's holders", Keeper(occupants, lock).run),
-        (f"the hold queue on 127.0.0.1:{TURN_PORT}", lambda: serve_turns(turns, TURN_PORT, units_api)),
+        (f"the hold queue on 127.0.0.1:{TURN_PORT}", lambda: serve_turns(turns, TURN_PORT, units_api, stop)),
         (f"the units{' and the store at ' + str(store.path) if store is not None else ''}", units_api.run),
     ]
     kept.append((f"claims of {' '.join(claimant.name for claimant in card.claimants) or 'the claimants the rules will declare'}",
@@ -2316,18 +2438,45 @@ def rules(card: Card, lend: Lending | None, lock: Path, env: dict[str, str]) -> 
             lambda: bool(lock_holders(lock, os.getpid())), lambda: occupants.present(DESKTOP), LocalTurn(turns, DESKTOP))))
     if lend is not None:
         async def lend_card() -> None:
-            server = await asyncio.start_server(card.serve, lend.address, HOLD_PORT)
+            if stop.event.is_set():
+                return
+            server = await asyncio.start_server(stop.holds(card.serve), lend.address, HOLD_PORT)
+            if stop.event.is_set():
+                server.close()
+                await server.wait_closed()
+                return
+            stop.lend_server = server
             async with server:
                 await server.serve_forever()
         kept.append((f"lent from {lend.address}:{HOLD_PORT}", lend_card))
     return kept
 
 
-async def main_async(kept: list[tuple[str, Callable[[], Awaitable[None]]]], lock: Path) -> None:
+async def main_async(kept: list[tuple[str, Callable[[], Awaitable[None]]]], lock: Path, stop: Stop) -> None:
     say(f"card: the lock is {lock}; " + ("; ".join(name for name, _ in kept) if kept else "no rule but the lock itself"))
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.signal)
+    stopping = asyncio.ensure_future(stop.event.wait())
     if not kept:
-        await asyncio.Event().wait()
-    await asyncio.gather(*(run() for _, run in kept))
+        await stopping
+        return
+    running = [asyncio.ensure_future(run()) for _, run in kept]
+    done, _ = await asyncio.wait([*running, stopping], return_when=asyncio.FIRST_COMPLETED)
+    if stopping not in done:
+        # A rule ended or failed: the process ends as it would without a stop, its failure with it.
+        stopping.cancel()
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+        for task in done:
+            task.result()
+        return
+    say(f"card: stopping; the calls in hand are waited for {stop.deadline_s:g} s")
+    await stop.drain()
+    for task in running:
+        task.cancel()
+    await asyncio.gather(*running, return_exceptions=True)
 
 
 def main() -> int:
@@ -2356,7 +2505,8 @@ def main() -> int:
         run.chmod(0o700)
         card.control = run / "control.sock"
         card.units = units_mod.Units(lend.service, units_mod.Owner(card.control), store_of(env))
-    asyncio.run(main_async(rules(card, lend, lock, env), lock))
+    stop = Stop()
+    asyncio.run(main_async(rules(card, lend, lock, env, stop), lock, stop))
     return 0
 
 

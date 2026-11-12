@@ -506,7 +506,8 @@ Each occupant chooses how it waits, inside the contract above:
   keep-alive probes, so a head whose machine or network went away without closing ends its connection,
   and its hold, as a close does.
 - **A hold ends with its connection:** its rpc-server is asked to stop with `SIGTERM` and waited for until
-  it has ended, which empties the card, and the lock is let go then.
+  it has ended, which empties the card, and the lock is let go then. A stop of the arbiter ends it the same
+  way (`docs/api.md`, 「A stop」).
 - **The hold's turn follows its engine's use,** read off its units' owner with every read of the units:
   - **in use** from its grant, and again from the owner's next graph or a use of the card waiting at its
     door, until the head says `QUIET`;
@@ -585,7 +586,9 @@ no service's own install runs it.
   `~/.local/share/bmo-card/`.
 - **The unit,** `bmo-card.service`, a systemd user unit that restarts on any exit, starts with
   `default.target` and reads both settings files. Linger is on for the account, so it stands after a
-  reboot with nobody logged in. Under WSL the driver's libraries are found where WSL keeps them.
+  reboot with nobody logged in. Under WSL the driver's libraries are found where WSL keeps them. A stop
+  drains it before it ends (`docs/api.md`, 「A stop」): its calls in hand are answered, and its hold ends,
+  which stops the rpc-server and empties the card.
 - **What it carries nothing of:** no key but the lend settings', no checkpoint, no data beyond the units
   it unloads. `bmo-arbiter uninstall --node <node>` stops, disables and removes the unit, and the dump
   store with its table unless `--keep-store`; the occupants file and its history stay with the node's
@@ -639,6 +642,7 @@ node:
   taking the card in the order their requests arrived with no measure of time passing a turn, and
   units unloaded where the rules put them, every owner's dumps counted and lowered together; the ranks
   made by tier from the rules' `tiers`, a lower tier waited for and given way to, and a ticket kept until
-  its holder gives it back.
+  its holder gives it back; the arbiter started as a process, a call in hand answered as its ticket stands
+  once `SIGTERM` comes, the arbiter ending with `0`, and the next arbiter answering on the same port.
 - On a node: `systemctl --user status bmo-card` stands active, the journal's first line names the lock
   and the rules kept there, and `curl -s http://127.0.0.1:7439/card` there answers the card.

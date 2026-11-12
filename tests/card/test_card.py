@@ -2283,5 +2283,204 @@ class LocalHoldUserTest(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await self.until_let_go()
         self.assertIsNone(self.user.poll())
+
+
+class StopTest(unittest.TestCase):
+    """The arbiter started as a process and stopped with SIGTERM and started again (docs/api.md, 「A stop」):
+    a call held open is answered as its ticket stands, the arbiter ends with `0`, and the next arbiter on
+    the same port answers."""
+
+    def free_port(self) -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    def start(self, folder: Path, port: int) -> subprocess.Popen:
+        """The arbiter on `port`, its settings and its files all under `folder`, and nothing lent."""
+        (folder / "occupants").write_text("tester *\n")
+        (folder / "rules.json").write_text("{}")
+        (folder / "lock").touch()
+        env = {
+            **os.environ,
+            "HOME": str(folder),
+            "CARD_LOCK": str(folder / "lock"),
+            "CARD_OCCUPANTS": str(folder / "occupants"),
+            "CARD_RULES": str(folder / "rules.json"),
+            "CARD_STORE": str(folder / "units.store"),
+            "CARD_OWNERS": str(folder / "owners"),
+            "CARD_TURN_PORT": str(port),
+            "CARD_DRAIN_MS": "5000",
+            # Nothing is lent, whatever the test machine's own settings say.
+            "LLM_KEY": "",
+            "CARD_ADDRESS": "",
+        }
+        process = subprocess.Popen([sys.executable, str(HERE / "card.py")], env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.stderr.close)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        return process
+
+    def ready(self, port: int, process: subprocess.Popen) -> None:
+        import json
+        import urllib.request
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                self.fail(f"the arbiter ended before it was ready: {process.stderr.read()}")
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as answer:
+                    if json.loads(answer.read())["ready"]:
+                        return
+            except OSError:
+                pass
+            time.sleep(0.05)
+        self.fail("the arbiter never answered ready")
+
+    def until(self, read: Callable[[], object], said: str) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if read():
+                return
+            time.sleep(0.02)
+        self.fail(said)
+
+    def test_a_call_held_open_is_answered_on_sigterm_and_the_next_arbiter_answers(self) -> None:
+        import json
+        import signal
+        import threading
+        import urllib.error
+        import urllib.request
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        port = self.free_port()
+        process = self.start(root, port)
+        self.ready(port, process)
+        # The card's lock held here, so the ticket waits and its answer is held open.
+        held_lock = os.open(root / "lock", os.O_RDWR)
+        self.addCleanup(os.close, held_lock)
+        fcntl.flock(held_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def queue() -> list:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/card", timeout=5) as answer:
+                return json.loads(answer.read())["queue"]
+
+        answered: list[tuple[int, dict]] = []
+
+        def ask() -> None:
+            body = json.dumps({"serviceName": "tester", "waitMs": 20000}).encode()
+            asked = urllib.request.Request(f"http://127.0.0.1:{port}/tickets", data=body, method="POST",
+                                           headers={"content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(asked, timeout=20) as answer:
+                    answered.append((answer.status, json.loads(answer.read())))
+            except urllib.error.HTTPError as refused:
+                answered.append((refused.code, json.loads(refused.read())))
+            except OSError:
+                answered.append((0, {}))
+
+        asking = threading.Thread(target=ask)
+        asking.start()
+        self.until(queue, "the ticket never stood in the queue")
+        process.send_signal(signal.SIGTERM)
+        self.assertEqual(process.wait(timeout=30), 0)
+        asking.join(5.0)
+        self.assertFalse(asking.is_alive(), "the call in hand was not answered before the arbiter ended")
+        self.assertEqual(len(answered), 1)
+        status, ticket = answered[0]
+        self.assertEqual((status, ticket.get("turn")), (202, False))
+        self.assertEqual(ticket.get("serviceName"), "tester")
+
+        # The next arbiter on the same port answers: the listener went with the first, and the port is free.
+        again = self.start(root, port)
+        self.ready(port, again)
+        self.assertEqual(queue(), [])
+        again.send_signal(signal.SIGTERM)
+        self.assertEqual(again.wait(timeout=30), 0)
+
+
+class HoldServerTest(unittest.TestCase):
+    """The hold API's listener counts the calls in hand: a stop waits for them no longer than the drain
+    (docs/api.md, 「A stop」)."""
+
+    def test_a_call_in_hand_is_waited_for_until_the_deadline(self) -> None:
+        import urllib.request
+        from http.server import BaseHTTPRequestHandler
+
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                time.sleep(1.5)
+                self.send_response(200)
+                self.send_header("content-length", "0")
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        server = card.HoldServer(("127.0.0.1", 0), Slow)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        called = threading.Thread(target=lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}/").read(),
+                                  daemon=True)
+        called.start()
+        deadline = time.monotonic() + 5
+        while server.in_hand == 0:
+            self.assertLess(time.monotonic(), deadline, "the call never reached the listener")
+            time.sleep(0.01)
+        server.stop_listening()
+        self.assertFalse(server.drain(0.1), "the deadline did not cut the call in hand")
+        self.assertTrue(server.drain(5.0), "the call in hand never ended")
+        called.join(5.0)
+
+
+class StopCardTest(unittest.IsolatedAsyncioTestCase):
+    """A stop empties the card: the hold in hand ends, its rpc-server stopped and waited for, and the
+    head's connection closed (docs/api.md, 「A stop」; docs/node-arbiter.md, 「Lending」)."""
+
+    KEY = "card-key-3c81de"
+    RPC = (
+        "import signal, socket, sys\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "held = socket.socket()\n"
+        "held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "held.bind(('127.0.0.1', int(sys.argv[1])))\n"
+        "held.listen()\n"
+        "while True:\n"
+        "    connection, _ = held.accept()\n"
+        "    connection.close()\n"
+    )
+
+    async def test_a_stop_ends_the_hold_and_stops_its_rpc_server(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        pieces = root / "pieces"
+        pieces.mkdir()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            rpc_port = probe.getsockname()[1]
+        broker = card.Card(self.KEY, "127.0.0.1", None, [sys.executable, "-c", self.RPC, str(rpc_port)],
+                           pieces, rpc_port=rpc_port)
+        stop = card.Stop(deadline_s=5.0)
+        stop.lend_server = await asyncio.start_server(stop.holds(broker.serve), "127.0.0.1", 0)
+        self.addCleanup(lambda: stop.lend_server and stop.lend_server.close())
+        port = stop.lend_server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        self.addCleanup(writer.close)
+        writer.write(f"HOLD {self.KEY}\n".encode())
+        await writer.drain()
+        self.assertEqual(await asyncio.wait_for(reader.readline(), 10), b"READY\n")
+        server = broker.server
+        self.assertIsNotNone(server)
+        self.assertTrue(broker.held)
+        await stop.drain()
+        self.assertFalse(broker.held)
+        self.assertIsNone(broker.server)
+        self.assertEqual(server.returncode, 0, "the stop did not wait for the rpc-server to end")
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
+
+
 if __name__ == "__main__":
     unittest.main()
