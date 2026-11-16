@@ -264,6 +264,20 @@ fn moves(command: &str, verb: &str) -> bool {
   command.contains("/card-units/") && command.contains(&format!(r#""state":"{state}""#))
 }
 
+/// The rules file written again with its time of change a second past the last one, so the master's next
+/// round reads it again even where the file system stamps two writes close together with the same time.
+fn rewrite_rules(stand: &Stand, rules: &str) {
+  let file = stand.dir.join("card-rules.yaml");
+  let before = std::fs::metadata(&file).and_then(|meta| meta.modified()).unwrap();
+  std::fs::write(&file, rules).unwrap();
+  std::fs::File::options()
+    .write(true)
+    .open(&file)
+    .unwrap()
+    .set_modified(before + std::time::Duration::from_secs(1))
+    .unwrap();
+}
+
 fn sent(stand: &Stand, verb: &str) -> Vec<String> {
   stand
     .commands
@@ -830,13 +844,10 @@ async fn an_occupant_of_a_later_tier_is_unloaded_by_default_and_one_of_an_earlie
     master.state().tiers.into_iter().map(|one| (one.name, one.tier)).collect();
   assert_eq!(tiers, [("model".to_owned(), 0.5), ("voice".to_owned(), 1.0)]);
 
-  std::fs::write(
-    stand.dir.join("card-rules.yaml"),
+  rewrite_rules(
+    &stand,
     "occupants:\n  - name: model\n    tier: 2\n  - name: voice\n    tier: 1\nunits:\n  - unit: \"voice/*\"\n    vram_mib: 6000\n",
-  )
-  .unwrap();
-  // The file is read again where its time of change moved; a second's step makes sure it does.
-  std::thread::sleep(std::time::Duration::from_millis(1100));
+  );
   master.poll().await;
   let evicted = sent(&stand, "evict");
   assert_eq!(evicted.len(), 1, "{evicted:?}");
@@ -1544,11 +1555,7 @@ async fn no_rank_takes_a_card_a_claim_or_the_bench_holds_and_a_claim_takes_a_car
     .lock()
     .unwrap()
     .insert("a".into(), slave(9000.0, store_resident(), Some("trainer"), json!([])));
-  std::fs::write(
-    stand.dir.join("card-rules.yaml"),
-    format!("{RULES}\noccupants:\n  - name: trainer\n    tier: 0\n    claims: true\n"),
-  )
-  .ok();
+  rewrite_rules(&stand, &format!("{RULES}\noccupants:\n  - name: trainer\n    tier: 0\n    claims: true\n"));
   rounds(&mut master, 1).await;
   assert_eq!(adapted(&stand), ["lab-arena stop a"]);
   assert_eq!(demand(&demands, on_a).taken.as_deref(), Some("trainer"));
