@@ -1071,6 +1071,39 @@ impl Master {
       })
   }
 
+  /// Whether the service fits on the node's card beside what stands there (docs/placement.md, 「Services that
+  /// fit share a card」): the card's free memory as last read, less its group's reserve, its own processes'
+  /// memory counted free, and less the declared memory of every other service standing there whose process
+  /// that reading does not show yet, holds what it declares. A card with no free memory read fits nothing.
+  fn fits(&self, rules: &Rules, declaration: &Declaration, node: &str) -> bool {
+    let Some(view) = self.nodes.get(node) else { return false };
+    let Some(card) = view.cards.first() else { return false };
+    let Some(free) = card.free_mib else { return false };
+    let service = declaration.service.as_str();
+    let facts = NodeFacts {
+      name: node.to_owned(),
+      role: view.role.clone(),
+      desktop: view.desktop,
+    };
+    let reserve = rules.group_of(&facts).map_or(0.0, |group| group.reserve_mib.0);
+    let processes = card.processes.as_deref().unwrap_or_default();
+    let shown = |name: &str| processes.iter().any(|one| one.service_name.as_deref() == Some(name));
+    let own: f64 = processes
+      .iter()
+      .filter(|one| one.service_name.as_deref() == Some(service))
+      .map(|one| one.used_mib)
+      .sum();
+    let unshown: f64 = self
+      .instances
+      .keys()
+      .filter(|(other, at)| at == node && other != service && !shown(other))
+      .filter(|(other, at)| !self.stopped.contains_key(&(other.clone(), at.clone())))
+      .filter_map(|(other, _)| self.declaration(other))
+      .map(|other| other.card_mib as f64)
+      .sum();
+    free.0 + own - reserve - unshown >= declaration.card_mib as f64
+  }
+
   /// What a card of the service's placement is to a demand of it, `seated` being the services each node's
   /// demands hold it for.
   fn opening(
@@ -1093,7 +1126,19 @@ impl Master {
     if let Some(by) = self.held_by(rules, tier, node) {
       return Opening::Held(by);
     }
-    if let Some(using) = seated.get(node).filter(|using| !using.is_empty()) {
+    // a card holds one demand of a service. Demands of others keep it from a service that yields by its
+    // process only where theirs do not stand there yielding by their process too, as on a card lent or coming
+    // back, or where it neither stands nor fits there; from any other service always.
+    let using = seated.get(node).filter(|using| !using.is_empty());
+    let beside = |one: &String| {
+      one != service
+        && self
+          .declaration(one)
+          .is_some_and(|other| other.yield_by == YieldBy::Process && self.stands(other, node).is_some())
+    };
+    if let Some(using) =
+      using.filter(|using| declaration.yield_by != YieldBy::Process || !using.iter().all(beside))
+    {
       return Opening::InUse(using.join(", "));
     }
     if let Some(bring) = self.bringing.get(node) {
@@ -1123,6 +1168,12 @@ impl Master {
     }
     if declaration.yield_by != YieldBy::Process {
       return Opening::Closed;
+    }
+    if self.fits(rules, declaration, node) {
+      return Opening::Bring(Vec::new());
+    }
+    if let Some(using) = using {
+      return Opening::InUse(using.join(", "));
     }
     let mut handover = Vec::new();
     for (other, at) in self.instances.keys() {

@@ -755,11 +755,12 @@ async fn a_slave_answering_no_card_is_lost_with_its_answer_and_shows_the_role_re
   assert!(connected.link.error.is_none());
 }
 
-/// A service as it declares itself, at the tier given, yielding by its process where it says so.
+/// A service as it declares itself, at the tier given, yielding by its process where it says so. It needs
+/// more card memory than a test's card holds free, so no service fits beside another unless a test says so.
 fn declared(service: &str, tier: f64, yield_by: YieldBy) -> Declaration {
   Declaration {
     service: service.into(),
-    card_mib: 1000,
+    card_mib: 10000,
     priority: 10,
     tier: Some(Num(tier)),
     yield_by,
@@ -1277,6 +1278,99 @@ async fn a_stop_is_let_go_once_its_service_stands_again_by_its_health_or_by_a_pl
   assert_eq!(granted_on(&demands, second), ["b"]);
   assert_eq!(demand(&demands, second).cards[0].address.as_deref(), Some("http://b.test/lab-arena"));
   assert_eq!(adapted(&stand), ["lab-arena stop a", "lab-arena stop b"]);
+}
+
+/// A large engine and a small one of one tier, each yielding by its process and needing the card memory given.
+fn sharing(engine_mib: u64, small_mib: u64) -> Vec<Declaration> {
+  vec![
+    Declaration {
+      card_mib: engine_mib,
+      ..declared("engine", 2.0, YieldBy::Process)
+    },
+    Declaration {
+      card_mib: small_mib,
+      ..declared("small", 2.0, YieldBy::Process)
+    },
+  ]
+}
+
+/// The card with the free memory given and the processes using it, each as its service and its memory.
+fn using_card(free: f64, processes: &[(&str, f64)]) -> Value {
+  let mut answer = slave(free, store_resident(), None, json!([]));
+  answer["device"]["processes"] = processes
+    .iter()
+    .enumerate()
+    .map(|(at, (service, used))| {
+      json!({ "pid": at + 1, "name": "server", "serviceName": service, "usedMiB": used })
+    })
+    .collect();
+  answer
+}
+
+#[tokio::test]
+async fn a_service_that_fits_beside_what_stands_comes_up_beside_it_and_hands_nothing_over() {
+  let (mut master, stand, demands) =
+    demanding(&["a"], sharing(8600, 1200), &[("engine", &["a"]), ("small", &["a"])], &["engine a"]).await;
+  *stand.answer.lock().unwrap() = using_card(1500.0, &[("engine", 8500.0)]);
+  rounds(&mut master, 1).await;
+  let engine = ask(&demands, "engine", None, None);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, engine), ["a"]);
+
+  // The small one fits in the card's free memory: brought up beside the engine, whose demand holds the card,
+  // and granted there, nothing handed over.
+  let small = ask(&demands, "small", None, None);
+  rounds(&mut master, 3).await;
+  assert_eq!(adapted(&stand), ["small start a"]);
+  assert_eq!(granted_on(&demands, small), ["a"]);
+  assert_eq!(granted_on(&demands, engine), ["a"]);
+
+  // A third the reading would still hold does not fit: the small one stands before its memory shows.
+  let mut services = sharing(8600, 1200);
+  services.push(Declaration {
+    card_mib: 1000,
+    ..declared("third", 2.0, YieldBy::Process)
+  });
+  *stand.declared.lock().unwrap() = services;
+  placed(&stand, &[("engine", &["a"]), ("small", &["a"]), ("third", &["a"])]);
+  rounds(&mut master, 1).await;
+  let third = ask(&demands, "third", None, None);
+  rounds(&mut master, 3).await;
+  assert_eq!(adapted(&stand), ["small start a"]);
+  assert_eq!(demand(&demands, third).reason.unwrap().code, DemandWait::InUse);
+}
+
+#[tokio::test]
+async fn an_engine_brought_back_beside_a_small_service_that_fits_leaves_it_standing() {
+  let (mut master, stand, demands) =
+    demanding(&["a"], sharing(8600, 1200), &[("engine", &["a"]), ("small", &["a"])], &["small a"]).await;
+  // The engine's own process is still loading as it comes back: its memory counts free for it.
+  *stand.answer.lock().unwrap() = using_card(5000.0, &[("small", 1200.0), ("engine", 4000.0)]);
+  rounds(&mut master, 1).await;
+  let engine = ask(&demands, "engine", None, None);
+  rounds(&mut master, 3).await;
+  assert_eq!(adapted(&stand), ["engine start a"]);
+  assert_eq!(granted_on(&demands, engine), ["a"]);
+  assert!(!said(&master, "occupant-stopped", "small"));
+}
+
+#[tokio::test]
+async fn a_service_that_does_not_fit_waits_on_another_demand_and_takes_the_card_once_it_is_given_back() {
+  let (mut master, stand, demands) =
+    demanding(&["a"], sharing(8600, 1200), &[("engine", &["a"]), ("small", &["a"])], &["engine a"]).await;
+  *stand.answer.lock().unwrap() = using_card(1000.0, &[("engine", 8500.0)]);
+  rounds(&mut master, 1).await;
+  let engine = ask(&demands, "engine", None, None);
+  rounds(&mut master, 1).await;
+  let small = ask(&demands, "small", None, None);
+  rounds(&mut master, 2).await;
+  assert!(adapted(&stand).is_empty());
+  assert_eq!(demand(&demands, small).reason.unwrap().code, DemandWait::InUse);
+
+  demands.book.lock().unwrap().give_back(engine);
+  rounds(&mut master, 3).await;
+  assert_eq!(adapted(&stand), ["engine stop a", "small start a"]);
+  assert_eq!(granted_on(&demands, small), ["a"]);
 }
 
 /// A service as it declares itself, with the ceiling given.

@@ -304,7 +304,8 @@ sequenceDiagram
   use, and the demands granted there are told so. No measure of time makes it yield.
 - **A hand-over between two such occupants of one tier** happens only where the standing one rests, where
   the one caller using it lends its card within a demand of its own, or where a demand of a better rank for
-  the other occupant takes the card (「A demand's rank」).
+  the other occupant takes the card (「A demand's rank」), and never for a demand of a service that fits
+  beside it (「Services that fit share a card」).
 - **Down:** the master runs the adapter's `stop` for that node alone, beside the rounds (「Master and
   slaves」), and once it answers says `occupant-stopped` and keeps the stop in
   `placements/process-yields.json` beside the rules, so a master restarted meanwhile still brings it back.
@@ -405,12 +406,14 @@ sequenceDiagram
   verbs」), the address its callers reach it at and the file its key is read from. The caller sends there
   and gives the demand back once its work ends.
 - **One rule for every caller, in the line's order.** The line is by rank, then by the order demands were
-  asked in. A card is granted where the service stands with no demand on it; else
-  on a card that is free, or whose standing occupant of the service's tier has no demand on it and a turn
-  not in use, which is made to yield — by its process as a hand-over, else by its units or its turn as the
-  rules say — and the service is brought up there. Among cards equally open, the one the master last
+  asked in. A card is granted where the service stands with no demand of it on the card; else
+  on a card that is free, or where the service fits beside what stands there (「Services that fit share a
+  card」 below), or whose standing occupant of the service's tier has no demand on it and a turn not in use,
+  which is made to yield — by its process as a hand-over, else by its units or its turn as the rules say —
+  and the service is brought up there. Among cards equally open, the one the master last
   granted the demand's work key on comes first, so work that left its state on a card goes back to it. A
-  card a claim or a ticket of a lower tier holds is never chosen, a card holds one demand at a time, and
+  card a claim or a ticket of a lower tier holds is never chosen, a card holds one demand of a service at a
+  time and demands of several services only where each stands or fits there, and
   no card is chosen that would put the service above its ceiling or the demand's pool above its limit
   (「A service's ceiling」, 「A pool」 below).
 - **Where no card is open:** a caller that holds a card hands its own over (「A demand asked within
@@ -447,6 +450,24 @@ sequenceDiagram
 - **The rules' unit of a service yielding by its process** — its `on-demand` unit — is its card
   accounting; a demand is what asks for it, and the rules plan nothing for it.
 - **Shown** in the cluster, each demand with its service, its cards, its state and its reason.
+
+#### Services that fit share a card
+
+- **A service that yields by its process fits on a card** where the card's free memory holds the
+  `card_mib` it declares, as the node last read it: less its group's `reserve_mib`, with the memory the
+  service's own processes already hold there counted free, and less the `card_mib` of every other service
+  standing there whose process that reading does not show yet, so an engine just brought up is counted
+  before its memory shows. A card the slave reads no free memory of fits nothing.
+- **Where it fits, nothing standing makes way for it.** It is brought up beside the occupants standing
+  there, none of them handed over, and it is granted there beside the demands of other services those
+  occupants hold, where each of them yields by its process and stands there. A demand whose service does not
+  stand on the card — a card lent within a demand, or coming back to the demand that lent it — keeps the card
+  in use as ever.
+- **Where it does not fit,** the one rule above stands: an occupant of its tier with no demand on it and a
+  turn not in use is handed over, and a card where another service's demand stands is in use.
+- **Fitting decides nothing else:** a claim or a lower tier takes the card as ever, a ceiling and a pool
+  hold as ever, one bring on a card at a time, and an occupant that yields by its process goes down for a
+  ticket and comes back as 「Yielding by the process」 says.
 
 #### A demand's rank
 
