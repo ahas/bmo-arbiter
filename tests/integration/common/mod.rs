@@ -41,7 +41,7 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const dir = process.env.STANDIN_DIR;
 const read = () => JSON.parse(readFileSync(`${dir}/nodes.json`, "utf8"));
 const node = (name, nodes) => ({ name, label: name, kind: "hub", hubId: 1, agentName: name,
-  address: `${name} @ http://[::1]:1`, credential: "~/none", role: nodes[name] ?? null, state: "connected",
+  address: `${name} @ http://[::1]:1`, credential: "~/none", role: nodes[name] ?? null, callers: [], state: "connected",
   tone: "good", detail: null, checkedAt: null, connectedAt: null, up: true, thisMachine: false });
 const answer = (body, status = 200) => Response.json(body, { status });
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
