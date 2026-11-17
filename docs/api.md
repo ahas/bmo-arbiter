@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.14**.
+This document states version **0.1.0-rev.15**.
 
 ## The wire format
 
@@ -265,14 +265,16 @@ A demand asks for cards of a service that stands on several nodes; which node an
 master's to decide (`docs/placement.md`, 「Demands」).
 
 - **`POST /demands`** with `serviceName`, and optionally `count?` (how many cards, one where absent),
-  `within?` (the id of a granted demand of the caller's it is asked within), `workKey?` (the key of the work it continues), `ref?` (shown), `rank?` (a whole number, zero or more, the lower first; absent, the rank of the demand it is asked within, else `1`: `docs/placement.md`, 「A demand's rank」), `pool?` (`key`, a text that is not empty, and `cards`, the most cards the demands of that key use of one service at once, one or more; absent, the pool of the demand it is asked within, else none: `docs/placement.md`, 「A pool」) and `waitMs?` (how long to hold the answer
-  open).
+  `within?` (the id of a granted demand of the caller's it is asked within), `workKey?` (the key of the work it continues), `ref?` (shown), `rank?` (a whole number, zero or more, the lower first; absent, the rank of the demand it is asked within, else `1`: `docs/placement.md`, 「A demand's rank」), `pool?` (`key`, a text that is not empty, and `cards`, the most cards the demands of that key use of one service at once, one or more; absent, the pool of the demand it is asked within, else none: `docs/placement.md`, 「A pool」), `leaseMs?` (how long, in milliseconds, one or more, the
+  demand stands with no call of its caller's on it before the master gives it back; absent, it stands
+  until given back: `docs/placement.md`, 「Demands」) and `waitMs?` (how long to hold the answer open).
   - `201` with the demand where every card it asks is granted, `202` with the demand where it waits for
     any, with a `Retry-After` header of 1. `waitMs` holds the answer open as `GET` does.
   - `400` `bad-request`: a body that does not name a service, a `count` of nought, a pool with an empty
-    `key` or `cards` of nought, or a field of the wrong kind. `422` `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not
+    `key` or `cards` of nought, a `leaseMs` of nought, or a field of the wrong kind. `422` `no-place`: a service placed on no node. `404` `not-found`: a `within` the master does not
     hold.
 - **`GET /demands`** — `200` with a page of every demand the master holds, in the order they were asked.
+  It keeps no demand's lease.
 - **`GET /demands/{demandId}`** — `200` with the demand. `waitMs` holds the answer open only while the
   caller still waits on it: a demand `waiting`, its service `starting` on a card among them, a card of it
   `taken` or not. Such an answer is held until a card is granted, granted again, lent, or taken,
@@ -280,9 +282,11 @@ master's to decide (`docs/placement.md`, 「Demands」).
   never dropped for it. A demand `granted`, `partly` or `lent` is answered
   at once, whatever `waitMs` asks, unless `watch=true`, which holds the answer open the same way in every
   state, for a caller standing on a card that wants to hear the moment it is taken. `404` `not-found`, at
-  once: a demand the master does not hold, one given back among them, so a new one is asked for.
+  once: a demand the master does not hold, one given back or lapsed among them, so a new one is asked for.
+  Each call keeps the demand's lease from the moment it comes until the moment it is answered or cut.
 - **`DELETE /demands/{demandId}`** — gives it back, every card of it: `204`, or `404` `not-found`. The
-  caller alone gives a demand back; nothing else drops one.
+  caller gives a demand back; nothing else drops one but its lease, which the master gives back at its
+  first round after the lease has run with no call on it, saying `demand-lapsed`.
 - **A demand** is `id`, `serviceName`, `count`, `rank`, `pool?` (`key`, `cards`), `cards` (each card granted: `nodeName`, `address?` and
   `keyFile?` as the service's adapter reports them), `state` (`waiting`, `granted`, `partly` or `lent`),
   `taken?` (the claimant or lower-tier occupant that stopped the service on one of its cards, or the
@@ -290,8 +294,8 @@ master's to decide (`docs/placement.md`, 「Demands」).
   it: its engine may stand and nothing has cut what its caller has in hand, which is the caller's to stop), `reason?`
   (while a card waits: `code` — `starting`, `pool` (its pool uses as many cards as its limit lets it),
   `ceiling` (the service uses as many cards as its ceiling
-  lets it), `in-use`, `held`, `start-failed` — and `text`, an English sentence), `waitedMs`, `within?`,
-  `workKey?` and `ref?`.
+  lets it), `in-use`, `held`, `start-failed` — and `text`, an English sentence), `waitedMs`, `leaseMs?`,
+  `within?`, `workKey?` and `ref?`.
 - **Its id** is a positive signed 64-bit integer, each larger than the last the master gave and never
   below the milliseconds since the epoch at which it was given.
 
@@ -681,6 +685,7 @@ carried.
   | `occupant-start-failed` | the adapter's `start` failed and is tried again |
   | `occupant-standing` | an occupant the master had stopped stands on the node again, its `health` answering `running` or a placement of it there done, so the master keeps no stop of it there |
   | `card-outranked` | a demand lost its card to a demand of a better rank; the text names both |
+  | `demand-lapsed` | a demand's lease ran out with no call of its caller's on it, and the master gave it back; the text names its service and its reference |
 - **The codes of the placement:**
 
   | Code | What happened |

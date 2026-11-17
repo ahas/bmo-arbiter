@@ -1582,7 +1582,7 @@ impl Master {
   /// a card where the service stands idle, else one it can be brought up on, else the line; a demand asked
   /// within another granted beside it on its card for the same service, and lent that card for another
   /// where no other is open; a card a lower tier took granted again once the service stands there again or
-  /// another opens. Nothing here waits on time.
+  /// another opens. A demand whose lease ran out is given back first; nothing else here waits on time.
   fn serve_demands(&mut self) {
     let Some(demands) = self.demands.clone() else { return };
     let rules = self.rules_now();
@@ -1590,6 +1590,17 @@ impl Master {
     let brought = self.collect_brought();
     let mut book = demands.book.lock().unwrap();
     book.placed = placements.services.clone();
+    for lapsed in book.lapse(millis(self.world.clock())) {
+      let named = lapsed.reference.as_deref().unwrap_or("no reference");
+      self.say(
+        None,
+        "demand-lapsed",
+        format!(
+          "{}: demand {} ({named}) given back, its lease run out with no call on it",
+          lapsed.service, lapsed.id
+        ),
+      );
+    }
     let mut failed_now: HashSet<i64> = HashSet::new();
     for (node, service, demand, brought) in brought {
       if brought.started.is_err() {

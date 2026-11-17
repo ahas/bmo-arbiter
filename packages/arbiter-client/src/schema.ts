@@ -472,6 +472,12 @@ export interface components {
             /** Format: int64 */
             id: number;
             /**
+             * Format: uint64
+             * @description Its lease, where it names one: how long it stands with no call of its caller's on it.
+             * @default null
+             */
+            leaseMs: number | null;
+            /**
              * @description Whether what took a card of it is a demand of a better rank, its engine perhaps still standing, rather
              *     than a claim or a lower tier, which stopped the engine.
              * @default false
@@ -510,6 +516,12 @@ export interface components {
              * @description How many cards; one where absent.
              */
             count?: number | null;
+            /**
+             * Format: uint64
+             * @description How long, in milliseconds, it stands with no call of its caller's on it before the master gives it
+             *     back; absent, it stands until given back.
+             */
+            leaseMs?: number | null;
             /** @description Its pool; absent, the pool of the demand it is asked within, else none. */
             pool?: components["schemas"]["DemandPool"] | null;
             /**

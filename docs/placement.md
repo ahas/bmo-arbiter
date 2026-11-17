@@ -389,7 +389,7 @@ sequenceDiagram
   the node's queue as every occupant does.
 - **What it names:** the service; how many cards, one where it names none; and, as the caller says, the
   demand it is asked within, the key of the work it continues, a reference that is only shown, its rank
-  (「A demand's rank」) and its pool (「A pool」).
+  (「A demand's rank」), its pool (「A pool」) and its lease (「Given back」 below).
 - **Granted card by card.** A card is granted on a node of the service's placement once the service stands
   there for the demand:
   - a service that yields by its process is started there by its adapter's `start` where it does not
@@ -421,7 +421,8 @@ sequenceDiagram
   below); any other waits in the line, behind the demands ahead of it, until a card frees — its last demand
   given back, a claim or a lower tier gone. Between demands of one rank the line is the order they were
   asked in, nothing more: nothing in use is taken for a waiting demand of the same rank, no time ends the
-  wait and none makes anything give way. A card where a `start` or `stop` of another service runs is in use by that
+  wait and none makes anything give way, but the lease of a demand whose caller has gone silent (「Given
+  back」 below). A card where a `start` or `stop` of another service runs is in use by that
   service until its answer is taken, and one where the asked service's own `start` runs has it starting
   there. Its answer says what it waits on, one reason at a time: a `start` that failed, whether for this
   demand or to bring the service back on a node of its placement, tried again at the next round; the service
@@ -442,11 +443,28 @@ sequenceDiagram
   its own, waiting meanwhile with the ceiling as its reason.
 - **A rank never reaches a node and never passes a tier:** what a claim or a ticket of a lower tier takes,
   it takes whatever a demand's rank, and what a rank takes is only ever the seat of another demand.
-- **Given back by its caller alone.** A demand stands until its caller gives it back; nothing drops it
-  for silence. A caller keeps the ids of the demands it holds and gives back, at its own start, those its
-  work no longer needs; the cluster shows every demand, and a person may give one back through the same
-  route. Demands are the master's memory: a master restarted holds none, and its callers ask again, their
-  work keys bringing them back to their cards.
+- **Given back by its caller, or by its lease once its caller is silent.** A demand stands until its
+  caller gives it back. A caller can die without doing so — killed, out of memory, its session cancelled —
+  and the master cannot see a caller off the nodes, so the caller says how long its silence may last: a
+  demand may name a lease, a length of time.
+  - **A demand with a lease is kept by its caller's calls on it:** asking it and asking after it by its id.
+    A call held open keeps it for as long as it is held, and the lease runs from the moment the last call
+    on it was answered or cut. Nothing else keeps it: neither the cluster nor the list of demands read, nor
+    a demand asked within it, nor a call on another demand of the same caller.
+  - **A lease run out gives the demand back** at the master's first round after it, as its caller giving
+    it back would, whatever its state, and is said among the notes as `demand-lapsed`, naming its service
+    and its reference. A caller that still works on it after that finds it gone and asks again, its work
+    key bringing it back to its card.
+  - **The caller chooses the length,** longer than the longest gap between its calls on the demand: one
+    that holds a card through long work asks after the demand while it works, a held `watch` keeping it
+    for as long as it is held.
+  - **A demand that names no lease** stands until its caller gives it back; nothing drops it for silence.
+    A caller keeps the ids of the demands it holds and gives back, at its own start, those its work no
+    longer needs.
+
+  The cluster shows every demand, and a person may give one back through the same route. Demands are the
+  master's memory: a master restarted holds none, and its callers ask again, their work keys bringing
+  them back to their cards.
 - **The rules' unit of a service yielding by its process** — its `on-demand` unit — is its card
   accounting; a demand is what asks for it, and the rules plan nothing for it.
 - **Shown** in the cluster, each demand with its service, its cards, its state and its reason.
@@ -521,7 +539,7 @@ sequenceDiagram
 - **A turn counts only as a node the master reaches reads it.** The last reading of a lost node says what
   was true then and nothing of what runs there now, and no event would ever end a count taken from it, so a
   turn in that reading uses no card. A demand's seat on a lost node still counts: it is the master's own
-  word, and it stands until its caller gives it back.
+  word, and it stands until its caller gives it back or its lease runs out.
 - **A node that comes back still holding the service counts again from its first reading,** which may put
   the service above its ceiling. That is the case below: nothing it uses is taken, and it is given only the
   cards it already uses until it is below its ceiling again.

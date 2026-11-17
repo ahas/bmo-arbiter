@@ -2,11 +2,12 @@
 //! nodes, asked of the master by a caller off the nodes. The book is what the routes and the master's rounds
 //! share: the routes ask, read and give demands back; each round the master grants their cards by the one
 //! rule and writes what it decided here; a card lent within a demand is owed back to it here, once the
-//! demand it was lent to is given back. A demand stands until its caller gives it back; no time and no
-//! silence drops one, and the book is the master's memory alone.
+//! demand it was lent to is given back. A demand stands until its caller gives it back, or, where it names a
+//! lease, until the lease runs with no call of its caller's on it; nothing else drops one, and the book is
+//! the master's memory alone.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bmo_arbiter_client::ErrorCode;
 use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandCard, DemandPool, DemandReason, DemandState};
@@ -67,6 +68,12 @@ pub struct Held {
   pub pool: Option<DemandPool>,
   /// When it was asked, in epoch milliseconds.
   pub asked_at: i64,
+  /// How long it stands with no call of its caller's on it, where it names a lease.
+  pub lease_ms: Option<u64>,
+  /// When the last call of its caller's on it came or was answered, in epoch milliseconds.
+  pub called_at: i64,
+  /// How many calls of its caller's on it are in hand now.
+  pub calls: u32,
   /// One seat for every card it asks.
   pub seats: Vec<Seat>,
   /// While a card waits, what it waits on.
@@ -111,10 +118,19 @@ impl Held {
       cards,
       state,
       waited_ms: (now_ms - self.asked_at).max(0),
+      lease_ms: self.lease_ms,
       within: self.within,
       work_key: self.work_key.clone(),
       reference: self.reference.clone(),
     }
+  }
+
+  /// Whether its lease has run out at `now_ms`: one named, no call in hand on it, and the lease run since
+  /// the last call was answered.
+  fn lapsed(&self, now_ms: i64) -> bool {
+    self.lease_ms.is_some_and(|lease| {
+      self.calls == 0 && now_ms.saturating_sub(self.called_at) >= i64::try_from(lease).unwrap_or(i64::MAX)
+    })
   }
 
   /// What a held answer waits to change: its state, its cards and who took one.
@@ -155,6 +171,9 @@ impl Book {
     if ask.pool.as_ref().is_some_and(|pool| pool.key.trim().is_empty() || pool.cards == 0) {
       return Err((ErrorCode::BadRequest, "a pool names a key and a limit of one card or more".into()));
     }
+    if ask.lease_ms == Some(0) {
+      return Err((ErrorCode::BadRequest, "a lease is one millisecond or more".into()));
+    }
     let outer = match ask.within {
       Some(within) => match self.held.get(&within) {
         Some(outer) => Some(outer),
@@ -174,6 +193,9 @@ impl Book {
       rank,
       pool,
       asked_at: now_ms,
+      lease_ms: ask.lease_ms,
+      called_at: now_ms,
+      calls: 0,
       seats: vec![Seat::Waiting; count as usize],
       reason: None,
       news: 0,
@@ -202,6 +224,33 @@ impl Book {
     }
     self.version += 1;
     true
+  }
+
+  /// A call of its caller's on the demand come at `now_ms`, which keeps its lease while it is in hand; its
+  /// news, where the book holds it.
+  pub fn call(&mut self, id: i64, now_ms: i64) -> Option<u64> {
+    let held = self.held.get_mut(&id)?;
+    held.calls += 1;
+    held.called_at = now_ms;
+    Some(held.news)
+  }
+
+  /// A call on the demand answered or cut at `now_ms`: its lease runs from then once no other is in hand.
+  pub fn called(&mut self, id: i64, now_ms: i64) {
+    if let Some(held) = self.held.get_mut(&id) {
+      held.calls = held.calls.saturating_sub(1);
+      held.called_at = now_ms;
+    }
+  }
+
+  /// Every demand whose lease has run out at `now_ms` given back as its caller would give it back; what
+  /// they were, in the line's order.
+  pub fn lapse(&mut self, now_ms: i64) -> Vec<Held> {
+    let lapsed: Vec<Held> = self.held.values().filter(|held| held.lapsed(now_ms)).cloned().collect();
+    for held in &lapsed {
+      self.give_back(held.id);
+    }
+    lapsed
   }
 
   /// Every demand held, in the line's order.
@@ -275,5 +324,44 @@ impl Demands {
   /// Every held answer woken to look again.
   pub fn tell(&self) {
     self.changed.send_modify(|seen| *seen += 1);
+  }
+
+  /// A new demand in the line, with the call that asked it in hand, or why it is refused: its id, its news
+  /// and the call.
+  pub fn ask(self: &Arc<Self>, ask: &DemandAsk, clock: fn() -> i64) -> Result<(i64, u64, Call), Refused> {
+    let now_ms = clock();
+    let mut book = self.book.lock().unwrap();
+    let id = book.ask(ask, now_ms)?.id;
+    let news = book.call(id, now_ms).unwrap_or_default();
+    Ok((id, news, self.in_hand(id, clock)))
+  }
+
+  /// A call of its caller's on the demand, kept in hand until what is returned is dropped, its time read
+  /// from `clock` in epoch milliseconds; with the demand's news, where the book holds it.
+  pub fn call(self: &Arc<Self>, id: i64, clock: fn() -> i64) -> Option<(u64, Call)> {
+    let news = self.book.lock().unwrap().call(id, clock())?;
+    Some((news, self.in_hand(id, clock)))
+  }
+
+  fn in_hand(self: &Arc<Self>, id: i64, clock: fn() -> i64) -> Call {
+    Call {
+      demands: self.clone(),
+      id,
+      clock,
+    }
+  }
+}
+
+/// A call on a demand in hand: dropped, whether answered or cut, it lets the demand's lease run again.
+#[derive(Debug)]
+pub struct Call {
+  demands: Arc<Demands>,
+  id: i64,
+  clock: fn() -> i64,
+}
+
+impl Drop for Call {
+  fn drop(&mut self) {
+    self.demands.book.lock().unwrap().called(self.id, (self.clock)());
   }
 }

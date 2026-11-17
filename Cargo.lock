@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter"
-version = "0.1.0-rev.14"
+version = "0.1.0-rev.15"
 dependencies = [
  "axum",
  "bmo-arbiter-client",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter-client"
-version = "0.1.0-rev.14"
+version = "0.1.0-rev.15"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "bmo-arbiter-plugin"
-version = "0.1.0-rev.14"
+version = "0.1.0-rev.15"
 dependencies = [
  "bmo-arbiter-client",
  "rmcp",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "gpu-tool"
-version = "0.1.0-rev.14"
+version = "0.1.0-rev.15"
 dependencies = [
  "bmo-arbiter-client",
  "dotenvy",

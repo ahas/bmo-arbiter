@@ -404,13 +404,16 @@ async fn a_demand_is_granted_waits_in_line_while_its_card_is_in_use_and_is_given
     let (status, refused) = asked(&world, Method::POST, "/demands", Some(&body)).await;
     assert_eq!((status, refused["code"].as_str()), (400, Some("bad-request")), "{pool}");
   }
+  let (status, refused) =
+    asked(&world, Method::POST, "/demands", Some(r#"{"serviceName":"demo","leaseMs":0}"#)).await;
+  assert_eq!((status, refused["code"].as_str()), (400, Some("bad-request")));
 
   // The service is brought up on a for the first; the answer is held open until it is granted.
   let (status, first) = asked(
     &world,
     Method::POST,
     "/demands",
-    Some(r#"{"serviceName":"demo","workKey":"k","waitMs":10000}"#),
+    Some(r#"{"serviceName":"demo","workKey":"k","leaseMs":3600000,"waitMs":10000}"#),
   )
   .await;
   let first_id = first["id"].as_i64().unwrap();
@@ -420,8 +423,12 @@ async fn a_demand_is_granted_waits_in_line_while_its_card_is_in_use_and_is_given
     asked(&world, Method::GET, &format!("/demands/{first_id}?waitMs=10000"), None).await.1
   };
   assert_eq!(
-    (first["state"].as_str(), first["cards"][0]["nodeName"].as_str()),
-    (Some("granted"), Some("a"))
+    (
+      first["state"].as_str(),
+      first["cards"][0]["nodeName"].as_str(),
+      first["leaseMs"].as_u64()
+    ),
+    (Some("granted"), Some("a"), Some(3_600_000))
   );
   assert!(std::fs::read_to_string(world.root().join("adapter.log")).unwrap().contains("start a"));
   // Granted, it is answered at once however long the read asks to be held.

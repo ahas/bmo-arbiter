@@ -435,15 +435,15 @@ async fn placement(State(app): State<App>, Named(id): Named<String>) -> Response
 }
 
 /// A demand asked for (docs/api.md, 「Demands」): `201` where every card it asks is granted by the time the
-/// answer goes, `202` where it waits; the master's next round is woken for it.
+/// answer goes, `202` where it waits; the master's next round is woken for it. The call keeps its lease
+/// until it is answered or cut.
 async fn create_demand(State(app): State<App>, body: Bytes) -> Response {
   let ask: DemandAsk = match body_of(&body) {
     Ok(ask) => ask,
     Err(refusal) => return refusal.into_response(),
   };
   let changed = app.demands.changed.subscribe();
-  let asked = app.demands.book.lock().unwrap().ask(&ask, now_ms()).map(|held| (held.id, held.news));
-  let (id, news) = match asked {
+  let (id, news, _call) = match app.demands.ask(&ask, now_ms) {
     Ok(asked) => asked,
     Err((code, why)) => return refused(code, why),
   };
@@ -512,8 +512,8 @@ async fn demand(
     Err(why) => return refused(ErrorCode::BadRequest, format!("the query does not read: {why}")),
   };
   let changed = app.demands.changed.subscribe();
-  let news = app.demands.book.lock().unwrap().held.get(&id).map(|held| held.news);
-  let Some(news) = news else {
+  // the caller's call keeps the demand's lease until it is answered or cut
+  let Some((news, _call)) = app.demands.call(id, now_ms) else {
     return refused(ErrorCode::NotFound, format!("the master holds no demand {id}"));
   };
   demand_answer(&app, changed, id, news, query.wait_ms, query.watch.unwrap_or(false), false).await

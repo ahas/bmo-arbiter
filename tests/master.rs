@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bmo_arbiter::demands::Demands;
@@ -74,6 +74,8 @@ struct Stand {
   gates: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
   /// The verbs that fail, as `<service> <verb> <node>`.
   refused: Mutex<HashSet<String>>,
+  /// The world's clock, in seconds since the epoch, which a test moves.
+  clock: Mutex<f64>,
 }
 
 struct StandShell(Arc<Stand>, String);
@@ -129,7 +131,7 @@ impl World for StandWorld {
   }
 
   fn clock(&self) -> f64 {
-    1000.0
+    *self.0.clock.lock().unwrap()
   }
 
   fn log(&self, _line: &str) {}
@@ -254,6 +256,7 @@ fn master_of(
     running: Mutex::new(HashSet::new()),
     gates: Mutex::new(HashMap::new()),
     refused: Mutex::new(HashSet::new()),
+    clock: Mutex::new(1000.0),
   });
   (Master::new(Arc::new(StandWorld(stand.clone())), rules_file, 2.0), stand)
 }
@@ -974,6 +977,7 @@ fn ask(demands: &Demands, service: &str, within: Option<i64>, work_key: Option<&
     reference: None,
     rank: None,
     pool: None,
+    lease_ms: None,
     wait_ms: None,
   };
   demands.book.lock().unwrap().ask(&ask, 1000).unwrap().id
@@ -998,6 +1002,7 @@ fn ask_ranked(
       key: key.into(),
       cards,
     }),
+    lease_ms: None,
     wait_ms: None,
   };
   demands.book.lock().unwrap().ask(&ask, 1000).unwrap().id
@@ -1919,4 +1924,68 @@ async fn a_start_that_never_answers_holds_no_round_and_a_claim_meanwhile_stops_t
   assert!(said(&master, "occupant-started", "coder"));
   assert!(said(&master, "occupant-stopped", "coder"));
   assert_eq!(adapted(&stand), ["coder start a", "lab-arena stop a", "coder stop a"]);
+}
+
+/// The time a stand-in caller's call on a demand comes and is answered, in epoch milliseconds.
+static CALLED_AT: AtomicI64 = AtomicI64::new(0);
+
+fn called_at() -> i64 {
+  CALLED_AT.load(Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn a_demand_whose_caller_falls_silent_past_its_lease_is_given_back_and_one_without_a_lease_never_is()
+{
+  let one: &[&str] = &["a"];
+  let (mut master, stand, demands) =
+    demanding(one, vec![declared("lab-arena", 2.0, YieldBy::Process)], &[("lab-arena", one)], &["lab-arena a"])
+      .await;
+  let at = |seconds: f64| *stand.clock.lock().unwrap() = seconds;
+
+  // Asked at 1000s with a lease of five seconds, and granted; a demand naming none waits behind it.
+  let leased = DemandAsk {
+    service_name: "lab-arena".into(),
+    count: None,
+    within: None,
+    work_key: None,
+    reference: Some("painting".into()),
+    rank: None,
+    pool: None,
+    lease_ms: Some(5000),
+    wait_ms: None,
+  };
+  let held = demands.book.lock().unwrap().ask(&leased, 1_000_000).unwrap().id;
+  let unleased = ask(&demands, "lab-arena", None, None);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, held), ["a"]);
+  assert_eq!(demand(&demands, held).lease_ms, Some(5000));
+  assert_eq!(demand(&demands, unleased).state, DemandState::Waiting);
+
+  // A call held open on it keeps it however long the call is held.
+  CALLED_AT.store(1_001_000, Ordering::SeqCst);
+  let (_, call) = demands.call(held, called_at).unwrap();
+  at(1100.0);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, held), ["a"]);
+
+  // Answered at 1100s, the lease runs from then: kept until five seconds have passed with no call on it.
+  CALLED_AT.store(1_100_000, Ordering::SeqCst);
+  drop(call);
+  at(1104.999);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, held), ["a"]);
+  assert!(!said(&master, "demand-lapsed", "lab-arena"));
+
+  // Its caller silent past the lease: given back without it, said, and its card goes to the one waiting.
+  at(1105.0);
+  rounds(&mut master, 1).await;
+  assert!(!demands.book.lock().unwrap().held.contains_key(&held));
+  assert!(demands.call(held, called_at).is_none());
+  assert!(said(&master, "demand-lapsed", "lab-arena"));
+  assert_eq!(granted_on(&demands, unleased), ["a"]);
+
+  // A demand that names no lease stands through any silence.
+  at(1_000_000.0);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, unleased), ["a"]);
 }

@@ -1,5 +1,6 @@
 //! Demands (docs/api.md, 「Demands」): cards of a service standing on several nodes asked of the master, which
-//! decides which node answers each, and given back by their caller alone.
+//! decides which node answers each, and given back by their caller, or by the master once a lease the
+//! caller named runs with no call of its on the demand.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,10 @@ pub struct DemandAsk {
   /// Its pool; absent, the pool of the demand it is asked within, else none.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub pool: Option<DemandPool>,
+  /// How long, in milliseconds, it stands with no call of its caller's on it before the master gives it
+  /// back; absent, it stands until given back.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub lease_ms: Option<u64>,
   /// How long to hold the answer open.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub wait_ms: Option<u64>,
@@ -131,6 +136,9 @@ pub struct Demand {
   pub reason: Option<DemandReason>,
   /// How long it has stood.
   pub waited_ms: i64,
+  /// Its lease, where it names one: how long it stands with no call of its caller's on it.
+  #[serde(default)]
+  pub lease_ms: Option<u64>,
   pub within: Option<i64>,
   pub work_key: Option<String>,
   #[serde(rename = "ref")]

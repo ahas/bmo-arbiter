@@ -927,6 +927,16 @@
             "format": "int64",
             "type": "integer"
           },
+          "leaseMs": {
+            "default": null,
+            "description": "Its lease, where it names one: how long it stands with no call of its caller's on it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "outranked": {
             "default": false,
             "description": "Whether what took a card of it is a demand of a better rank, its engine perhaps still standing, rather\nthan a claim or a lower tier, which stopped the engine.",
@@ -1010,6 +1020,7 @@
           "outranked",
           "reason",
           "waitedMs",
+          "leaseMs",
           "within",
           "workKey",
           "ref"
@@ -1022,6 +1033,15 @@
           "count": {
             "description": "How many cards; one where absent.",
             "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "leaseMs": {
+            "description": "How long, in milliseconds, it stands with no call of its caller's on it before the master gives it\nback; absent, it stands until given back.",
+            "format": "uint64",
             "minimum": 0,
             "type": [
               "integer",
@@ -2680,7 +2700,7 @@
   "info": {
     "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes, grants cards of a service as demands ask them and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.14"
+    "version": "0.1.0-rev.15"
   },
   "openapi": "3.1.0",
   "paths": {
