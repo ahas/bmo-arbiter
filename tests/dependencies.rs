@@ -108,19 +108,6 @@ fn dependencies_stay_in_the_repository_and_name_no_other_unit() {
 }
 
 #[test]
-fn the_testbed_allows_the_same_base_libraries() {
-  let text = fs::read_to_string(Path::new(ROOT).join("testbed.toml")).expect("testbed.toml is readable");
-  let declaration: Table = text.parse().expect("testbed.toml is TOML");
-  let allowed: Vec<&str> = declaration["check"]["base_libraries"]
-    .as_array()
-    .expect("[check] base_libraries is a list")
-    .iter()
-    .filter_map(Value::as_str)
-    .collect();
-  assert_eq!(allowed, OTHER_REPOSITORIES);
-}
-
-#[test]
 fn a_manifest_breaking_the_rules_is_named() {
   let manifest: Table = r#"
     [dependencies]

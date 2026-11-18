@@ -7,7 +7,6 @@ use crate::support;
 use std::fs;
 use std::path::Path;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use support::{ROOT, files_under, is_skipped, shown};
 
 /// File names that declare a package or a project to some other build tool.
@@ -85,58 +84,6 @@ fn a_directory_named_after_its_parent_is_found() {
   nested_twins(root.path(), &mut twins);
   assert_eq!(twins.len(), 1, "{twins:?}");
   assert!(twins[0].ends_with("card/card"), "{twins:?}");
-}
-
-/// The first column of the README's table whose first header cell is `Folder`, each cell's text with
-/// its code marks and a trailing `/` taken off.
-fn folder_table(markdown: &str) -> Vec<String> {
-  let mut folders = Vec::new();
-  let (mut in_head, mut first_cell, mut in_folder_table) = (false, false, false);
-  let mut cell = String::new();
-  for event in Parser::new_ext(markdown, Options::ENABLE_TABLES) {
-    match event {
-      Event::Start(Tag::Table(_)) => in_folder_table = false,
-      // The head's cells stand in no row of their own.
-      Event::Start(Tag::TableHead) => (in_head, first_cell) = (true, true),
-      Event::End(TagEnd::TableHead) => in_head = false,
-      Event::Start(Tag::TableRow) => first_cell = true,
-      Event::Start(Tag::TableCell) => cell.clear(),
-      Event::End(TagEnd::TableCell) => {
-        let text = cell.trim().trim_end_matches('/').to_owned();
-        if first_cell && in_head {
-          in_folder_table = text == "Folder";
-        } else if first_cell && in_folder_table {
-          folders.push(text);
-        }
-        first_cell = false;
-      }
-      Event::Text(text) | Event::Code(text) => cell.push_str(&text),
-      _ => {}
-    }
-  }
-  folders
-}
-
-#[test]
-fn the_readme_names_every_top_level_folder_and_no_other() {
-  let readme = fs::read_to_string(Path::new(ROOT).join("README.md")).expect("README.md is readable");
-  let mut named = folder_table(&readme);
-  named.sort();
-  let mut standing: Vec<String> = fs::read_dir(ROOT)
-    .expect("the repository root is readable")
-    .map(|entry| entry.expect("a root entry is readable"))
-    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-    .filter(|name| !is_skipped(name))
-    .collect();
-  standing.sort();
-  assert_eq!(named, standing, "the README's folder table and the top-level folders differ");
-}
-
-#[test]
-fn the_folder_table_is_read_from_its_first_column() {
-  let markdown = "| Name | What |\n|---|---|\n| `other/` | no |\n\n| Folder | Holds |\n|---|---|\n| `src/` | code |\n| `tests` | checks |\n";
-  assert_eq!(folder_table(markdown), ["src", "tests"]);
 }
 
 #[test]

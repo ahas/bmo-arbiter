@@ -52,7 +52,7 @@ These rules hold every change to this repository.
   TypeScript client is the package in `packages/arbiter-client`, generated from `docs/openapi.json`. The
   node arbiter is the Python package in `card/` with its own `pyproject.toml`, uploaded to every node as it
   stands.
-- No directory named after its parent, and the README's folder table names every top-level folder.
+- No directory named after its parent; the testbed's `layout` check holds the README's folder table to the top-level folders.
 - Tests live in `tests/`, never beside the code they test: the master's as Cargo tests, the node
   arbiter's under `tests/card/`, run by a Cargo test of their own so one `cargo test` runs them all.
 
