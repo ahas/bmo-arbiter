@@ -15,7 +15,9 @@ setup = ["bun install --cwd packages/arbiter-client --frozen-lockfile"]
 dir = "tools"
 
 [check]
-quick = ["layout", "dependencies", "korean", "cargo-profile", "shared-versions"]
+quick = ["layout", "dependencies", "korean", "cargo-profile", "shared-versions", "personal-data"]
+# The one address docs/PERSONAL-DATA.md allows.
+personal_data_allowed = ["dev@ahas.io"]
 # No code file holds Korean, so the ledger allows none anywhere.
 korean_ledger = "korean-ledger.json"
 # The crates of other repositories the arbiter may build on: the base libraries every unit may, and the

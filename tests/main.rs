@@ -15,7 +15,6 @@ mod layout;
 mod master;
 mod mcp;
 mod openapi;
-mod personal_data;
 mod placement;
 mod plan;
 mod reach;
