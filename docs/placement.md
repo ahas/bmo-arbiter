@@ -247,7 +247,14 @@ sequenceDiagram
     process」).
   - **How often it reads:** every two seconds, and the node service once a minute, each placed service's
     adapter's `health` on each of its nodes read with it, for where the service stands now;
-    `CARD_MASTER_READ_EVERY_MS` and `CARD_MASTER_DISCOVER_EVERY_MS` set them otherwise.
+    `CARD_MASTER_READ_EVERY_MS` and `CARD_MASTER_DISCOVER_EVERY_MS` set them otherwise. Each read hands
+    the slave its card's places first, in the same command, wherever there are any or were at the read
+    before (「A demand's place in a card's line」).
+  - **Within a round the demands come first:** their cards are granted and their services brought up
+    before the master weighs which occupants yielding by their process go down or come back, so a service
+    standing idle is granted to a demand waiting for it before a ticket that came later can make it yield,
+    and one that comes back where a demand waits for it comes back as that demand's bring, its seat held
+    from its start (「Demands」).
   - **Every adapter verb runs beside the rounds, never inside one.** A `start`, `stop` or `health` the
     master runs is a run of its own, one at a time for each service, node and verb: a round that would run
     a verb already running for that service on that node leaves it be, and the first round after its
@@ -282,8 +289,9 @@ sequenceDiagram
   it.
 - **What a slave answers on its loopback** is `docs/api.md`, 「The card」 and 「Card units」: the node's card
   and every process using it, every unit with its state, the host memory the dumps take, the store, the
-  door of the owner the card is lent through, every other owner's door on each of its own units, the queue
-  and the arbiter's version; and the unload and restore of one unit the master asks for.
+  door of the owner the card is lent through, every other owner's door on each of its own units, the queue,
+  the places of the master's demands and the arbiter's version; the unload and restore of one unit the
+  master asks for; and the places the master hands it (「A demand's place in a card's line」).
 
 ### Yielding by the process
 
@@ -296,7 +304,8 @@ sequenceDiagram
   request. A ticket that names the card memory it needs (`need.vramMiB`) makes it yield only where the
   card's free memory, less its group's `reserve_mib`, does not hold that much; a waiting ticket of a
   service at its ceiling makes it yield only where that service uses the card already (「A service's
-  ceiling」).
+  ceiling」); and a waiting ticket the slave says waits behind a demand of the occupant's own (`waitsFor`,
+  「A demand's place in a card's line」) never makes it yield.
 - **Its turn is in use while a demand for it stands on the node,** and rests while none does
   (「Demands」). The node ticket its own turn client holds says only that it stands.
 - **In use, it is never stopped for a ticket of its own tier.** A ticket of its own tier waits until
@@ -428,6 +437,10 @@ sequenceDiagram
   demand or to bring the service back on a node of its placement, tried again at the next round; the service
   starting on a card; its pool's limit, naming the cards the pool uses; its ceiling, naming the cards the
   service uses; every card in use, naming the services using them; a claim or a ticket of a lower tier.
+- **A waiting demand stands in the line of the cards it waits on,** so a request that reaches one of those
+  nodes after it waits behind it, a turn of its tier passes to it at its holder's request boundary, and a
+  claimant's ticket asked after it waits for it for a bounded time (「A demand's place in a card's line」
+  below).
 - **A lower tier still takes a card.** Where a claim or a ticket of a lower tier stops the service on a
   granted card, every answer to the demand says so, naming the occupant, and the card is granted again
   once the service stands there again or another card opens, its work key preferring the same card.
@@ -442,7 +455,9 @@ sequenceDiagram
   asked service is below its own, and X comes back to the caller's service only once that service is below
   its own, waiting meanwhile with the ceiling as its reason.
 - **A rank never reaches a node and never passes a tier:** what a claim or a ticket of a lower tier takes,
-  it takes whatever a demand's rank, and what a rank takes is only ever the seat of another demand.
+  it takes whatever a demand's rank, and what a rank takes is only ever the seat of another demand. A
+  claimant's ticket the slave holds behind a demand's place (`waitsFor`) holds no card from that demand
+  while it waits, and takes it as any claim does once it is admitted.
 - **Given back by its caller, or by its lease once its caller is silent.** A demand stands until its
   caller gives it back. A caller can die without doing so — killed, out of memory, its session cancelled —
   and the master cannot see a caller off the nodes, so the caller says how long its silence may last: a
@@ -468,6 +483,43 @@ sequenceDiagram
 - **The rules' unit of a service yielding by its process** — its `on-demand` unit — is its card
   accounting; a demand is what asks for it, and the rules plan nothing for it.
 - **Shown** in the cluster, each demand with its service, its cards, its state and its reason.
+
+#### A demand's place in a card's line
+
+- **Within a tier the line is the order requests arrived in, a demand among them.** A node's queue holds
+  the requests of the processes on that node; a demand is a request too, asked of the master, so the master
+  hands each slave a place for it and the slave keeps it in its line beside its tickets, at the tier of the
+  demand's service and by the time the demand was asked (`docs/node-arbiter.md`, 「Places of the master's
+  demands」). What reached the node before the demand stays ahead of it, and what reached it after waits
+  behind it.
+- **The places a card is handed,** at every read (「Master and slaves」):
+  - a **waiting** place for each demand with a card still to be granted, on every card of its service's
+    placement where it holds no card yet and what keeps the card from it is the card's own state: a turn
+    or a demand in use there, a claim or a lower tier, its service starting there, or nothing at all. A card
+    it could not have for its ceiling or its pool's limit, or where its service cannot be had, is handed
+    none, and a demand waiting on its ceiling, its pool's limit or a start that failed is handed none
+    anywhere, since no card freeing would serve it;
+  - a **granted** place for each demand holding the card: granted there, its service being brought up
+    there for it, or coming back there to it.
+- **What a waiting place does on the node:** no ticket behind it is given a turn, a turn of its tier in use
+  is told at its next request boundary that the next request is not its own, a resting turn gives way to
+  it, and the slave says of every ticket it holds back that it waits behind it (`waitsFor`). The place is
+  never given a turn itself: the master brings the demand's service up there, which takes the card as it
+  always does, and the place becomes a granted one.
+- **What the master does with it:** a ticket that waits behind a demand of an occupant yielding by its
+  process never makes that occupant yield (「Yielding by the process」), so the service brought up for the
+  demand stays until the demand is granted there, and once granted it is in use until the demand is given
+  back. A demand is so never passed on a card by a request that came after it, and its card stays its own
+  from the moment its service starts there for it to the moment the demand is given back.
+- **A claimant waits behind a place for a bounded time.** A claimant's ticket asked while a place stands
+  on the card, waiting or granted, for a demand asked before that ticket, waits behind it until it is gone
+  or the claimant's `waits_behind_s` has passed since the ticket was asked, and its claim begins only then
+  (`docs/node-arbiter.md`, 「Claimants」). A claim that has begun takes the card as it always does, from any
+  demand.
+- **A place lapses with its master:** a slave handed no places for a while lets them go, so a master that
+  is gone or restarted holds no node back. A demand is the master's memory alone, and so are its places.
+- **One clock each:** a place carries how long its demand has waited, and the slave counts its arrival by
+  its own clock, as it does a ticket's `waitedMs`, so the master's clock and the node's never meet.
 
 #### Services that fit share a card
 
@@ -692,8 +744,9 @@ sequenceDiagram
   - **`occupants`** — the occupants the rules say anything of, each by its `name` and its `tier`
     (「Tiers」). One with `claims: true` takes the card outright, and says whether it stands `first`, how
     it is `seen_by` (its `tickets`, a `containers` prefix, and only where neither sees it a unit's
-    `cgroup`, whose processes claim only on the card) and the host memory it needs (`ram_free`, GiB or
-    `all`); `docs/node-arbiter.md`, 「Claimants」, is what each means. One without says its tier alone.
+    `cgroup`, whose processes claim only on the card), the host memory it needs (`ram_free`, GiB or
+    `all`) and how long a ticket of it waits behind the demands that stood before it (`waits_behind_s`);
+    `docs/node-arbiter.md`, 「Claimants」, is what each means. One without says its tier alone.
     Every node is pushed all of the claimants.
   - **`nodes`** — groups of nodes chosen by their row in the node service, never by name: a `select` on
     the row's `role` or its machine (`desktop`), and whether they are one `pool` (cards counted as one);

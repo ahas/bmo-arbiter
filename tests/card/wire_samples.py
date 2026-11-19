@@ -97,6 +97,8 @@ async def samples(root: Path) -> list[dict]:
         await ask("GET", "/tickets/soon")
         await ask("GET", "/nowhere")
         await ask("PUT", "/card")
+        await ask("PUT", "/card/places", {"places": [{"serviceName": "coder", "demandId": 7, "waitedMs": 1500, "granted": False}]})
+        await ask("PUT", "/card/places", {"places": [{"serviceName": "coder"}]})
         await ask("PATCH", "/card-units/model%2Fcompute", {"state": "evicted", "reason": "tester asked", "keepsTurn": True})
         await ask("PATCH", "/card-units/model%2Fnothing", {"state": "evicted"})
         await ask("PATCH", "/card-units/model%2Fcompute", {"state": "sideways"})

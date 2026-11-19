@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use bmo_arbiter_client::card::{
-  Card, CardUnit, CardUnitChanges, CardUnitPage, Ticket, TicketAsk, TicketChanges, TicketQuery,
+  Card, CardPlaces, CardUnit, CardUnitChanges, CardUnitPage, Ticket, TicketAsk, TicketChanges, TicketQuery,
 };
 use bmo_arbiter_client::cluster::Cluster;
 use bmo_arbiter_client::demands::{Demand, DemandAsk, DemandPage, DemandQuery};
@@ -554,9 +554,18 @@ fn routes(generator: &mut SchemaGenerator) -> Vec<Route> {
       "/card",
       Node,
       "getCard",
-      "The node's card: occupants, ranks, claim, queue, units.",
+      "The node's card: occupants, ranks, claim, queue, places, units.",
       read::<Card>(generator),
     ),
+    Route::new(
+      "put",
+      "/card/places",
+      Node,
+      "putCardPlaces",
+      "Hand the card every place of the master's demands, replacing those handed before.",
+      read::<CardPlaces>(generator),
+    )
+    .body::<CardPlaces>(generator),
     Route::new(
       "post",
       "/tickets",

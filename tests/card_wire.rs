@@ -42,6 +42,8 @@ fn every_answer_of_the_node_arbiters_routes_is_the_documents() {
   for expected in [
     ("GET /health", 200),
     ("GET /card", 200),
+    ("PUT /card", 200),
+    ("PUT /card", 400),
     ("GET /card-units", 200),
     ("POST /tickets", 202),
     ("POST /tickets", 422),

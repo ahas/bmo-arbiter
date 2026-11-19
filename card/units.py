@@ -33,6 +33,9 @@ TO_RAM, TO_DISK = "ram", "disk"
 GIB = 2**30
 # The floor a claim that wants every dump out of host memory sets: no host memory is ever that available.
 NO_RAM = 1 << 62
+# The most seconds a claimant's ticket waits behind the master's demands that stood on the card before it,
+# where the rules say none (docs/node-arbiter.md, 「Claimants」).
+WAITS_BEHIND_S = 600.0
 
 
 class StoreFull(Exception):
@@ -700,14 +703,15 @@ class Claimant:
     """An occupant that takes the card outright when it comes, as the rules declare it: whether it stands
     first on every node whatever the node's order says, how it is seen — its tickets in the hold, its
     running containers named by a prefix, and its processes on the card, those in its containers or in a
-    unit's cgroup — and the host memory it needs available while its claim stands, None for every dump
-    kept there lowered."""
+    unit's cgroup — the host memory it needs available while its claim stands, None for every dump kept
+    there lowered, and the most seconds a ticket of it waits behind the master's demands that came before it."""
     name: str
     first: bool = True
     tickets: bool = True
     cgroup: str | None = None
     containers: str | None = None
     ram_free_bytes: int | None = 0
+    waits_behind_s: float = WAITS_BEHIND_S
 
 
 def claimants_of(rules: dict | None) -> list[Claimant]:
@@ -718,11 +722,14 @@ def claimants_of(rules: dict | None) -> list[Claimant]:
             continue
         seen = one.get("seenBy") if isinstance(one.get("seenBy"), dict) else {}
         free = one.get("ramFree", 0)
+        waits = one.get("waitsBehindS", WAITS_BEHIND_S)
         found.append(Claimant(
             one["name"], first=one.get("first", True) is not False, tickets=seen.get("tickets", True) is not False,
             cgroup=seen.get("cgroup") if isinstance(seen.get("cgroup"), str) else None,
             containers=seen.get("containers") if isinstance(seen.get("containers"), str) else None,
-            ram_free_bytes=None if free == "all" else int(float(free) * GIB) if isinstance(free, (int, float)) else 0))
+            ram_free_bytes=None if free == "all" else int(float(free) * GIB) if isinstance(free, (int, float)) else 0,
+            waits_behind_s=float(waits) if isinstance(waits, (int, float)) and not isinstance(waits, bool) and waits >= 0
+            else WAITS_BEHIND_S))
     return found
 
 

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
-use bmo_arbiter_client::card::{Card, CardUnitChanges, UnitMove};
+use bmo_arbiter_client::card::{Card, CardPlace, CardPlaces, CardUnitChanges, UnitMove};
 use bmo_arbiter_client::cluster::ServiceInstance;
 use bmo_arbiter_client::cluster::{
   CardStage, CardTurn, Cluster, ClusterCard, ClusterNode, ClusterUnit, DeclaredUnit, Group, MasterInfo,
@@ -24,7 +24,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::demands::{Book, Demands, Held, Seat};
+use crate::demands::{Book, Demands, Held, Place, Seat};
 
 use crate::picture::{
   CardView, DESCRIPTIONS_FOLDER, Link, LinkState, NodeView, SlaveRules, TicketView, Turn, UnitDetail,
@@ -319,6 +319,8 @@ pub struct Master {
   bringing: HashMap<String, Bringing>,
   work_cards: HashMap<String, String>,
   start_failed: HashMap<i64, String>,
+  // The yields a bring under way brings a service back from, by service and node: kept again where it fails.
+  returns: HashMap<(String, String), Stop>,
   rules_error: Option<String>,
   rules_loaded_at: Option<f64>,
   rules_mtime: Option<Option<SystemTime>>,
@@ -338,6 +340,10 @@ pub struct Master {
   events: VecDeque<Event>,
   revision: u64,
   board: Option<Arc<Mutex<Board>>>,
+  // The places each card is handed for the demands at its next read, by node, and the nodes handed some at
+  // their last read, which are handed again, empty, once they have none.
+  places: BTreeMap<String, Vec<Place>>,
+  places_handed: HashSet<String>,
 }
 
 impl Master {
@@ -409,6 +415,7 @@ impl Master {
       bringing: HashMap::new(),
       work_cards: HashMap::new(),
       start_failed: HashMap::new(),
+      returns: HashMap::new(),
       rules_error: None,
       rules_loaded_at: None,
       rules_mtime: None,
@@ -422,6 +429,8 @@ impl Master {
       events: VecDeque::new(),
       revision: 0,
       board: None,
+      places: BTreeMap::new(),
+      places_handed: HashSet::new(),
     };
     master.read_yields();
     master
@@ -717,9 +726,10 @@ impl Master {
     let mut asking = JoinSet::new();
     for name in self.members() {
       let Some(reached) = self.reached.get(&name).cloned() else { continue };
+      let read = self.read_command(&name);
       asking.spawn(async move {
         let began = Instant::now();
-        let asked = reached.shell.exec(&format!("curl -s {SLAVE}/card")).await;
+        let asked = reached.shell.exec(&read).await;
         (name, asked, began.elapsed().as_secs_f64() * 1000.0)
       });
     }
@@ -730,6 +740,36 @@ impl Master {
       }
     }
     self.act().await;
+  }
+
+  /// The command that reads the node's slave, handing it its card's places first wherever there are any or
+  /// were at the read before (docs/placement.md, 「A demand's place in a card's line」); each place says how
+  /// long its demand has waited by the master's clock now, so the slave counts its arrival by its own.
+  fn read_command(&mut self, node: &str) -> String {
+    let read = format!("curl -s {SLAVE}/card");
+    let places = self.places.get(node).cloned().unwrap_or_default();
+    if places.is_empty() && !self.places_handed.remove(node) {
+      return read;
+    }
+    if !places.is_empty() {
+      self.places_handed.insert(node.to_owned());
+    }
+    let now = millis(self.world.clock());
+    let handed = CardPlaces {
+      places: places
+        .into_iter()
+        .map(|place| CardPlace {
+          service_name: place.service,
+          demand_id: place.demand,
+          waited_ms: (now - place.asked_at).max(0),
+          granted: place.granted,
+        })
+        .collect(),
+    };
+    let body = serde_json::to_string(&handed).expect("places serialize").replace('\'', "'\\''");
+    format!(
+      "curl -s -o /dev/null -X PUT -H 'content-type: application/json' -d '{body}' {SLAVE}/card/places; {read}"
+    )
   }
 
   /// The units named moved on the node, one `PATCH /card-units/{unitName}` each, in order: whether every one
@@ -774,14 +814,15 @@ impl Master {
 
   /// The answers of the verbs run beside the rounds that have come taken in, what the master unloaded to
   /// come back loaded back once its ticket is gone, every ticket naming a unit placed by the rules, the
-  /// occupants that yield by their process stopped and started beside the rounds, and the demands' cards
-  /// granted.
+  /// demands' cards granted and their services brought up, and only then the occupants that yield by their
+  /// process stopped and started beside the rounds, so a demand waiting for a service is served before a
+  /// ticket that came later can make it yield (docs/placement.md, 「Master and slaves」).
   pub async fn act(&mut self) {
     self.take_answers();
     self.restore_what_is_done().await;
     self.place_tickets().await;
-    self.yield_processes();
     self.serve_demands();
+    self.yield_processes();
   }
 
   /// An adapter verb run beside the rounds for the service on the node, its answer handed back to the
@@ -1047,8 +1088,9 @@ impl Master {
     self.instances.get(&key).cloned()
   }
 
-  /// The claim or the ticket of an occupant of a lower tier than `tier` that holds the node's card, named.
-  fn held_by(&self, rules: &Rules, tier: f64, node: &str) -> Option<String> {
+  /// The claim or the ticket of an occupant of a lower tier than `tier` that holds the node's card from
+  /// `service`, named: a ticket the slave holds behind a demand of that service holds nothing from it.
+  fn held_by(&self, rules: &Rules, service: &str, tier: f64, node: &str) -> Option<String> {
     let card = self.nodes.get(node)?.cards.first()?;
     card
       .claim
@@ -1066,6 +1108,7 @@ impl Master {
         card
           .queue
           .iter()
+          .filter(|ticket| !ticket.waits_for.iter().any(|one| one == service))
           .find(|ticket| !ticket.rest && rules.tier_of(&ticket.service) < tier)
           .map(|ticket| ticket.service.clone())
       })
@@ -1123,7 +1166,7 @@ impl Master {
     else {
       return Opening::Closed;
     };
-    if let Some(by) = self.held_by(rules, tier, node) {
+    if let Some(by) = self.held_by(rules, service, tier, node) {
       return Opening::Held(by);
     }
     // a card holds one demand of a service. Demands of others keep it from a service that yields by its
@@ -1386,8 +1429,13 @@ impl Master {
     }
     let key = (declaration.service.clone(), node.to_owned());
     self.touched.insert(key.clone());
-    if self.stopped.remove(&key).is_some() || !handover.is_empty() {
+    // a yield it is brought back from is kept again should the bring fail, so the service still comes back
+    let returning = self.stopped.remove(&key);
+    if returning.is_some() || !handover.is_empty() {
       self.save_yields();
+    }
+    if let Some(stop) = returning.filter(|stop| stop.kind == StopKind::Yield) {
+      self.returns.insert(key.clone(), stop);
     }
     let stops: Vec<(Declaration, Vec<String>)> = handover
       .into_iter()
@@ -1439,7 +1487,6 @@ impl Master {
       }
       brought
     });
-    self.start_failed.remove(&demand);
     let bringing = Bringing {
       service: declaration.service.clone(),
       demand,
@@ -1490,15 +1537,14 @@ impl Master {
         );
       }
     }
-    if kept_changed {
-      self.save_yields();
-    }
     let key = (service.clone(), node.clone());
     self.touched.insert(key.clone());
     let started = match brought.started {
       Ok(instance) => {
         self.say(Some(&node), "occupant-started", format!("{service} started for a demand"));
         self.yields_failed.remove(&(service.clone(), node.clone(), "start"));
+        self.start_failed.remove(&demand);
+        self.returns.remove(&key);
         self.instances.insert(key, instance.clone());
         Ok(instance)
       }
@@ -1509,9 +1555,16 @@ impl Master {
           format!("{service} was not started ({why}); trying again"),
         );
         self.instances.remove(&key);
+        if let Some(stop) = self.returns.remove(&key) {
+          self.stopped.insert(key, stop);
+          kept_changed = true;
+        }
         Err(why)
       }
     };
+    if kept_changed {
+      self.save_yields();
+    }
     if let Some(held) = book.held.get(&demand).cloned() {
       let mut seats = held.seats.clone();
       for seat in seats.iter_mut() {
@@ -1615,6 +1668,8 @@ impl Master {
         seated.entry(node.to_owned()).or_default().push(held.service.clone());
       }
     }
+    // the places each card is handed at its next read (docs/placement.md, 「A demand's place in a card's line」)
+    let mut lines: BTreeMap<String, Vec<Place>> = BTreeMap::new();
     // the line: by rank, then by the order demands were asked in
     let mut line: Vec<(u32, i64)> = book.held.values().map(|held| (held.rank, held.id)).collect();
     line.sort_unstable();
@@ -1643,7 +1698,7 @@ impl Master {
         let limits = self.limits(&held, &book, &others);
         match seats[at].clone() {
           Seat::Granted(card) => {
-            if let Some(by) = self.held_by(&rules, tier, &card.node_name) {
+            if let Some(by) = self.held_by(&rules, &held.service, tier, &card.node_name) {
               seats[at] = Seat::Taken {
                 node: card.node_name,
                 by,
@@ -1653,7 +1708,7 @@ impl Master {
             }
           }
           Seat::Taken { node, by } => {
-            let holder = self.held_by(&rules, tier, &node);
+            let holder = self.held_by(&rules, &held.service, tier, &node);
             if holder.is_none()
               && let Some(instance) = self.stands(&declaration, &node)
             {
@@ -1707,7 +1762,7 @@ impl Master {
               && seated.get(&card.node_name).is_some_and(|using| using.len() == 1)
               && !self.bringing.contains_key(&card.node_name)
               && self.moving_on(&card.node_name).next().is_none()
-              && self.held_by(&rules, tier, &card.node_name).is_none()
+              && self.held_by(&rules, &held.service, tier, &card.node_name).is_none()
               && !Self::above_ceiling(&declaration, &limits.used, &card.node_name)
               && !limits.above_pool(&card.node_name)
               && (declaration.yield_by == YieldBy::Process
@@ -1763,10 +1818,53 @@ impl Master {
         }
       }
       let limits = self.limits(&held, &book, &seats);
+      // a card still to be granted waits in the line of each card whose own state is what it waits on
+      let waits = seats
+        .iter()
+        .any(|seat| matches!(seat, Seat::Waiting | Seat::Outranked { .. } | Seat::Taken { .. }));
+      let openings = match openings {
+        None if waits => Some(
+          self
+            .choose(&rules, &declaration, held.work_key.as_deref(), &seated, &limits, &placements)
+            .1,
+        ),
+        seen => seen,
+      };
+      let lined: Vec<String> = openings
+        .iter()
+        .flatten()
+        .filter(|(node, opening)| {
+          waits
+            && !seats
+              .iter()
+              .any(|seat| seat.node() == Some(node.as_str()) && !matches!(seat, Seat::Taken { .. }))
+            && !matches!(opening, Opening::Ceiling | Opening::Pool | Opening::Closed)
+        })
+        .map(|(node, _)| node.clone())
+        .collect();
       let reason =
         self.reason(&held, &seats, openings, &rules, &declaration, &seated, &limits, &placements);
+      // a demand waiting on its ceiling, its pool's limit or a failed start waits on no card freeing
+      let on_the_card = reason.as_ref().is_none_or(|reason| {
+        !matches!(reason.code, DemandWait::Pool | DemandWait::Ceiling | DemandWait::StartFailed)
+      });
+      if on_the_card {
+        for node in lined {
+          let place = Place {
+            demand: id,
+            service: held.service.clone(),
+            asked_at: held.asked_at,
+            granted: false,
+          };
+          lines.entry(node).or_default().push(place);
+        }
+      }
       book.seat(id, seats, reason);
     }
+    for (node, mut held) in book.places() {
+      lines.entry(node).or_default().append(&mut held);
+    }
+    self.places = lines;
     let version = book.version;
     drop(book);
     if version != self.demands_seen {
@@ -1984,6 +2082,8 @@ impl Master {
             .queue
             .iter()
             .filter(|ticket| ticket.service != service && !ticket.rest)
+            // a ticket the slave holds behind a demand of this service waits for it, never the other way
+            .filter(|ticket| !ticket.waits_for.iter().any(|one| one == service))
             .filter(|ticket| stopped || ticket.vram_mib.is_none_or(|need| need.0 > room))
             .filter(|ticket| self.ceiling_holds(&ticket.service, node).is_none())
             .find_map(|ticket| {

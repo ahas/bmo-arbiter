@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.15**.
+This document states version **0.1.0-rev.16**.
 
 ## The wire format
 
@@ -352,8 +352,9 @@ answered `404` `no-route`.
   | `tiers` | each occupant's tier as the node's part of the rules carries it, by name; empty where it carries none |
   | `claim?` | the claim standing: `claimantName`, `claimedAt?` |
   | `lockHeldBy` | the pids holding the card lock |
-  | `busy` | a claim stands, a request waits, a turn is in use, or the lock is held by anyone but a resting turn |
+  | `busy` | a claim stands, a request or a waiting place waits, a turn is in use, or the lock is held by anyone but a resting turn |
   | `queue` | every ticket, in line order, as `GET /tickets/{ticketId}` answers it |
+  | `places` | the places of the master's demands as last handed and not yet lapsed, each as 「Places」 hands it |
   | `typicalHoldMs` | by service, how long its turns have held the card in use |
   | `units` | every card unit, as `GET /card-units` gives them |
   | `device?` | the card as the driver says it: `name`, `totalMiB`, `usedMiB`, `freeMiB`, `utilizationPercent?` (the card's use, 0 to 100, null where the driver gives no rate), and `processes?`, each `pid`, `name`, `serviceName?`, `usedMiB`, null where the driver gives no count per process |
@@ -386,12 +387,24 @@ A ticket is a place in the node's queue for one turn on the card (`docs/node-arb
   `resting`, `giveWay` (told to let go), `giveWayFor?` (the occupant or claimant it lets go for),
   `position?` and `waitMs?` (its place in line and how long it is counted to wait, while it waits),
   `claimantName?` (the claimant whose claim stands), `waitedMs` (how long it has stood, backdated by the
-  `waitedMs` it was asked with), `need?`, `ref?`, `rest` and `keep?` (the answer to `nextWaitedMs`).
+  `waitedMs` it was asked with), `need?`, `ref?`, `rest`, `keep?` (the answer to `nextWaitedMs`) and
+  `waitsFor?` (while it waits behind places of the master's demands, the services they stand for; null
+  otherwise).
 - **Its id** is a positive signed 64-bit integer, each larger than the last the node arbiter gave and never
   below the milliseconds since the epoch at which it was given, so a ticket from before a restart is never
   another's after it.
 - **An asker that leaves gives its ticket back:** an answer that cannot be delivered does, and so does a
   held-open answer whose asker closes its connection while it is held.
+
+### Places
+
+The places of the master's demands in the card's line (`docs/node-arbiter.md`, 「Places of the master's
+demands」).
+
+- **`PUT /card/places`** with `places`, each `serviceName`, `demandId` (the master's id of the demand),
+  `waitedMs` (how long the demand has waited, zero or more) and `granted` (`true`: the demand holds the
+  card; `false`: it waits for it) — replaces every place the card keeps. `200` with `places` as kept.
+  `400` `bad-request`: a body that is not that shape. Places not handed again within ten seconds lapse.
 
 ### Card units
 
@@ -562,8 +575,8 @@ The node arbiter reads the occupants and rules files again within a second of a 
 - **`placements/card-rules.yaml`** in the master's data root, YAML, written by a person or by whoever
   keeps the deployment and read by the master alone, again whenever it changes. Its four parts —
   `occupants`, `nodes`, `units`, `rules` — are `docs/placement.md`, 「The rules」. An `occupants` entry is
-  `name` and `tier` (a number, zero or more), and with `claims: true` also `first`, `seen_by` and
-  `ram_free`; one without `claims: true` holds no other key. A file that does not read leaves the last one
+  `name` and `tier` (a number, zero or more), and with `claims: true` also `first`, `seen_by`,
+  `ram_free` and `waits_behind_s` (seconds, zero or more); one without `claims: true` holds no other key. A file that does not read leaves the last one
   read standing and is said in `master.rulesError`.
 - **`placements/card-rules.log`** — one line for every change of the file the master takes up and every
   push: the time, the file's hash, and what changed or where it went.
@@ -604,7 +617,8 @@ command.
   exec -a <agentName> <command>`, and a file is carried by `<BMO_BUN> <BMO_HUB_CONSOLE> upload <local>
   <remote> -a <agentName>`.
 - **On every node** the master runs only bash commands: reading a slave
-  (`curl -s http://127.0.0.1:7439/card`), moving a unit (`PATCH /card-units/{unitName}` there),
+  (`curl -s http://127.0.0.1:7439/card`, after `PUT /card/places` there in the same command wherever the
+  card has places or had them at the read before), moving a unit (`PATCH /card-units/{unitName}` there),
   writing the node files, the install's steps and `systemctl --user` on `bmo-card.service` and the rival
   units.
 - **A command and a carry run to their own end:** the master sets no limit on either and waits for what

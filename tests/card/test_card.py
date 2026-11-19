@@ -126,7 +126,8 @@ class ClaimantsTest(unittest.TestCase):
         rules = {
             "occupants": [
                 {"name": "tester", "claims": True, "first": True, "seenBy": {"tickets": True, "cgroup": "tester-agent.service", "containers": "tester-"}, "ramFree": "all"},
-                {"name": "batch", "claims": True, "first": False, "seenBy": {"tickets": False, "cgroup": None, "containers": None}, "ramFree": 8},
+                {"name": "batch", "claims": True, "first": False, "seenBy": {"tickets": False, "cgroup": None, "containers": None}, "ramFree": 8,
+                 "waitsBehindS": 120},
                 {"name": "plain"},
             ],
             "groups": [{"name": "compute", "dump": "ram", "ramMaxGiB": 24}],
@@ -134,7 +135,7 @@ class ClaimantsTest(unittest.TestCase):
         }
         self.assertEqual(units.claimants_of(rules), [
             units.Claimant("tester", True, True, "tester-agent.service", "tester-", None),
-            units.Claimant("batch", False, False, None, None, 8 << 30),
+            units.Claimant("batch", False, False, None, None, 8 << 30, 120.0),
         ])
         placing = units.placing_of(rules, "svc", floor_bytes=5)
         self.assertEqual((placing.of("weights"), placing.of("store"), placing.ram_max_bytes, placing.floor_bytes), ("disk", "ram", 24 << 30, 5))
@@ -1169,6 +1170,79 @@ class TurnsTest(unittest.TestCase):
         clock.now = 0.0
         turn.quiet(Resting(), 10.0, every_s=1.0, clock=clock, sleep=sleep)
         self.assertEqual(clock.now, 11.0)
+
+
+class PlacesTest(unittest.TestCase):
+    """The places of the master's demands in the card's line (docs/node-arbiter.md, 「Places of the master's
+    demands」, 「Claimants」), against a stand-in lock and clock."""
+
+    def setUp(self) -> None:
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(root))
+        path = Path(root) / "occupants"
+        path.write_text("voice=painter\n")
+        self.occupants = card.Occupants(path, Path(root) / "log", claimants=lambda: [TESTER])
+        self.occupants.read()
+        self.now = 0.0
+        self.claim: str | None = None
+        self.held: list[int] = []
+        self.turns = card.Turns(self.occupants, Path(root) / ".gpu.lock", lambda: self.claim,
+                                holders=lambda lock, mine: self.held, clock=lambda: self.now,
+                                claim_holds=lambda: True, waiters=lambda lock, mine: [])
+
+    def hand(self, *places: tuple[str, float, bool]) -> None:
+        """Places handed as the master hands them: each service, how long its demand has waited, and whether
+        it holds the card."""
+        self.turns.hand_places([(service, demand, waited, granted)
+                                for demand, (service, waited, granted) in enumerate(places, start=1)])
+
+    def test_a_waiting_demand_holds_back_the_requests_that_came_after_it_and_none_that_came_before(self) -> None:
+        speaking = self.turns.ask("voice")
+        self.assertTrue(speaking["turn"])
+        self.held = [99]
+        # At 10 s the master hands a drawing demand asked at 5 s.
+        self.now = 10.0
+        self.hand(("painter", 5.0, False))
+        # The voice's next request came at 10 s, after the demand: its turn ends at this boundary. One that came
+        # at 2 s, before it, would have been served first.
+        self.assertFalse(self.turns.again(speaking["id"], next_waited_s=0.0)["keep"])
+        self.assertTrue(self.turns.again(speaking["id"], next_waited_s=8.0)["keep"])
+        self.turns.done(speaking["id"])
+        self.held = []
+        later = self.turns.ask("voice")
+        self.assertEqual((later["turn"], later["waitsFor"]), (False, ["painter"]))
+        self.assertTrue(self.turns.state()["busy"])
+        earlier = self.turns.ask("voice", waited_s=7.0)
+        self.assertEqual((earlier["turn"], earlier["waitsFor"]), (True, None))
+        self.turns.done(earlier["id"])
+        # The places lapse once the master stops handing them, and the line moves on.
+        self.now = 10.0 + card.PLACES_LAPSE_S + 1.0
+        self.assertEqual(self.turns.state()["places"], [])
+        self.assertTrue(self.turns.again(later["id"])["turn"])
+
+    def test_a_claimants_ticket_waits_behind_the_demands_before_it_for_its_bound_alone(self) -> None:
+        self.now = 10.0
+        self.hand(("painter", 60.0, True))
+        claim = self.turns.ask("tester")
+        self.assertEqual((claim["turn"], claim["waitsFor"]), (False, ["painter"]))
+        self.assertFalse(self.turns.claim_asked("tester"))
+        # Held, it holds back no other occupant's turn.
+        voice = self.turns.ask("voice")
+        self.assertTrue(voice["turn"])
+        self.turns.done(voice["id"])
+        # Its claimant's bound passed, it claims, and a ticket asked while its claim stands joins it at once.
+        self.now = 10.0 + TESTER.waits_behind_s
+        self.assertTrue(self.turns.claim_asked("tester"))
+        self.claim = "tester"
+        self.assertTrue(self.turns.again(claim["id"])["turn"])
+        self.assertTrue(self.turns.ask("tester")["turn"])
+
+    def test_a_place_handed_after_a_claimants_ticket_never_holds_it(self) -> None:
+        self.now = 10.0
+        claim = self.turns.ask("tester")
+        self.hand(("painter", 1.0, False))
+        self.assertIsNone(self.turns.again(claim["id"])["waitsFor"])
+        self.assertTrue(self.turns.claim_asked("tester"))
 
 
 class TurnCommandTest(unittest.TestCase):

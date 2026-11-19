@@ -250,6 +250,29 @@ pub struct Ticket {
   pub rest: bool,
   /// Whether the turn carries on to the next request, where `nextWaitedMs` asked.
   pub keep: Option<bool>,
+  /// While it waits behind places of the master's demands, the services they stand for.
+  #[serde(default)]
+  pub waits_for: Option<Vec<String>>,
+}
+
+/// A demand of the master's in the card's line, as the master hands it and the card shows it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CardPlace {
+  pub service_name: String,
+  /// The master's id of the demand.
+  pub demand_id: i64,
+  /// How long the demand has waited.
+  pub waited_ms: i64,
+  /// The demand holds the card; else it waits for it.
+  pub granted: bool,
+}
+
+/// Every place of the master's demands on the card, handed whole.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CardPlaces {
+  pub places: Vec<CardPlace>,
 }
 
 /// A ticket asked for.
@@ -316,6 +339,9 @@ pub struct Card {
   pub busy: bool,
   /// Every ticket, in line order.
   pub queue: Vec<Ticket>,
+  /// The places of the master's demands as last handed and not yet lapsed.
+  #[serde(default)]
+  pub places: Vec<CardPlace>,
   /// By service, how long its turns have held the card in use.
   pub typical_hold_ms: BTreeMap<String, i64>,
   pub units: Vec<CardUnit>,

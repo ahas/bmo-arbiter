@@ -51,6 +51,8 @@ pub struct TicketView {
   /// A turn's: whether it is in use, and the service it gives way to now, if any.
   pub in_use: Option<bool>,
   pub gives_way_to: Option<String>,
+  /// While it waits behind places of the master's demands, the services they stand for.
+  pub waits_for: Vec<String>,
 }
 
 /// The turn standing on a card.
@@ -165,6 +167,7 @@ pub fn card_from(card: &Card, node: &str) -> CardView {
         rest: ticket.rest,
         in_use: Some(ticket.in_use),
         gives_way_to: ticket.give_way.then(|| ticket.give_way_for.clone()).flatten(),
+        waits_for: ticket.waits_for.clone().unwrap_or_default(),
       }
     })
     .collect();

@@ -166,7 +166,10 @@ pub fn check_lines(rules: &Rules, nodes: &[NodeFacts]) -> Vec<String> {
       RamFree::GiB(size) => format!("{size} GiB kept free"),
     };
     let first = if one.first { ", first on every node" } else { "" };
-    lines.push(format!("occupant {}: takes the whole card{first}, {seen}, RAM {ram}", one.name));
+    lines.push(format!(
+      "occupant {}: takes the whole card{first}, {seen}, RAM {ram}, waits behind earlier demands at most {} s",
+      one.name, one.waits_behind_s
+    ));
   }
   for group in &rules.groups {
     let chosen: Vec<&str> = nodes

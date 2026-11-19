@@ -55,6 +55,7 @@ fn the_occupants_that_take_the_card_how_each_is_seen_and_the_host_memory_it_need
         },
         ram_free: RamFree::All,
         tier: Num(0.0),
+        waits_behind_s: Num(600.0),
       },
       Claimant {
         name: "batch".into(),
@@ -67,6 +68,7 @@ fn the_occupants_that_take_the_card_how_each_is_seen_and_the_host_memory_it_need
         },
         ram_free: RamFree::GiB(Num(8.0)),
         tier: Num(0.0),
+        waits_behind_s: Num(120.0),
       },
     ]
   );

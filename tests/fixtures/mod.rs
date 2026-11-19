@@ -13,6 +13,7 @@ occupants:
     first: false
     seen_by: { tickets: false, cgroup: batch.service }
     ram_free: 8
+    waits_behind_s: 120
 nodes:
   - name: compute
     select: { role: model }

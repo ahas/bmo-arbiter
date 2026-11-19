@@ -90,6 +90,9 @@ TURN_POLL_S = 0.5
 DEFAULT_HOLD_S = 10.0
 # What a ticket waits behind a resting turn that said nothing of how long letting go takes it.
 REST_GIVE_WAY_S = 1.0
+# How long the places of the master's demands stand once it stops handing them (docs/node-arbiter.md, 「Places
+# of the master's demands」).
+PLACES_LAPSE_S = 10.0
 # The lent hold's turn gives way, its units unloading in about this long with the engine waiting at its stage
 # (docs/node-arbiter.md, 「Lending」).
 LEND_GIVES_WAY_S = float(os.environ.get("CARD_LEND_GIVES_WAY_S", "3"))
@@ -417,6 +420,11 @@ class Occupants:
         """Whether a ticket asked under this name claims the card, as a claimant seen by its tickets."""
         return any(claimant.name == name and claimant.tickets for claimant in self.claimants())
 
+    def waits_behind_s(self, name: str) -> float:
+        """The most seconds a ticket of this claimant waits behind the master's demands that came before it."""
+        return next((claimant.waits_behind_s for claimant in self.claimants() if claimant.name == name),
+                    units_mod.WAITS_BEHIND_S)
+
     def present(self, name: str) -> bool:
         return name in self.names()
 
@@ -497,6 +505,43 @@ class Ticket:
     resting: bool = False
     rested_at: float | None = None
     busy_since: float | None = None
+    # A claimant's ticket: whether it may claim, no longer waiting behind the master's demands that came before
+    # it (docs/node-arbiter.md, 「Claimants」).
+    admitted: bool = False
+
+
+@dataclass(frozen=True)
+class Place:
+    """A demand of the master's in the card's line (docs/node-arbiter.md, 「Places of the master's demands」): its
+    service, its demand's id, when it arrived by this node's clock, and whether it holds the card or waits."""
+    service: str
+    demand: int
+    asked: float
+    granted: bool
+
+    def shown(self, now: float) -> dict:
+        return {"serviceName": self.service, "demandId": self.demand, "waitedMs": to_ms(now - self.asked),
+                "granted": self.granted}
+
+
+def handed_places(body: object) -> list[tuple[str, int, float, bool]]:
+    """The places a `PUT /card/places` hands, each its service, its demand's id, how long it has waited in
+    seconds, and whether it is granted; ValueError where the body is not that shape."""
+    if not isinstance(body, dict) or not isinstance(body.get("places"), list):
+        raise ValueError("the body is not an object of places")
+    handed = []
+    for one in body["places"]:
+        if not isinstance(one, dict):
+            raise ValueError("a place is not an object")
+        service, demand, waited, granted = one.get("serviceName"), one.get("demandId"), one.get("waitedMs"), one.get("granted")
+        if not isinstance(service, str) or not service:
+            raise ValueError("a place's serviceName is not a service's name")
+        if not isinstance(demand, int) or isinstance(demand, bool):
+            raise ValueError("a place's demandId is not a whole number")
+        if not isinstance(granted, bool):
+            raise ValueError("a place's granted is not true or false")
+        handed.append((service, demand, asked_ms(waited, "waitedMs") or 0.0, granted))
+    return handed
 
 
 class Turns:
@@ -521,7 +566,13 @@ class Turns:
     A turn with nothing left to serve rests (docs/node-arbiter.md, 「Resting」): it keeps the lock with its weights on
     the card and gives way to any ticket that waits for a request, whatever its rank, and to a process
     waiting for the lock under a service that has a place. A ticket asked only to rest stands after every
-    other, is granted only to a card nobody else wants, and makes nobody give way."""
+    other, is granted only to a card nobody else wants, and makes nobody give way.
+
+    The master's demands stand in the line by the places it hands (docs/node-arbiter.md, 「Places of the
+    master's demands」): a waiting place is never granted, holds back every ticket behind it, ends a turn's
+    keep and a rest as a waiting ticket would, and a claimant's ticket waits behind the places of demands
+    asked before it until they are gone or its claimant's bound passes. Places lapse once the master stops
+    handing them."""
 
     def __init__(self, occupants: Occupants, lock: Path, claimed: Callable[[], str | None],
                  holders: Callable[[Path, int], list[int]] | None = None, clock: Callable[[], float] = time.monotonic,
@@ -549,6 +600,9 @@ class Turns:
         # The arbiter is stopping: no turn is given any more, and every answer held open goes out as its
         # ticket stands (docs/api.md, 「A stop」).
         self.draining = False
+        # The places of the master's demands as last handed, and when.
+        self.places: list[Place] = []
+        self.places_at: float | None = None
 
     def _order(self) -> list[Ticket]:
         """The queue in its order: the ticket whose turn it is first, then by the occupants' order, then by
@@ -575,13 +629,80 @@ class Turns:
 
     def _asking(self) -> list[Ticket]:
         """The tickets waiting for a turn for a request, in the queue's order: those asked only to rest wait
-        for nobody."""
-        return [ticket for ticket in self._order() if ticket.granted is None and not ticket.rest]
+        for nobody, and a claimant's ticket not yet admitted waits behind the master's demands."""
+        return [ticket for ticket in self._standing() if ticket.granted is None and not ticket.rest]
+
+    def _standing(self) -> list[Ticket]:
+        """The queue in its order but for a claimant's tickets not yet admitted."""
+        return [ticket for ticket in self._order() if not self._held_claimant(ticket)]
+
+    def _held_claimant(self, ticket: Ticket) -> bool:
+        return self.occupants.claims_by_ticket(ticket.service) and not ticket.admitted
+
+    def _live_places(self) -> list[Place]:
+        """The places as last handed, none once they have lapsed."""
+        if self.places_at is None or self.clock() - self.places_at > PLACES_LAPSE_S:
+            return []
+        return self.places
+
+    def _place_rank(self, place: Place) -> int:
+        rank = self.occupants.rank(place.service)
+        return len(self.occupants.order) + 1 if rank is None else rank
+
+    def _waiting_places(self, service: str) -> list[Place]:
+        """The waiting places of another service than this one with a place among the occupants, in line order."""
+        waiting = [place for place in self._live_places() if not place.granted and place.service != service
+                   and self.occupants.rank(place.service) is not None]
+        return sorted(waiting, key=lambda place: (self._place_rank(place), place.asked))
+
+    def _places_ahead(self, ticket: Ticket) -> list[Place]:
+        """The waiting places a ticket stands behind: every one where it asks only to rest, else those ahead of
+        it by rank and arrival."""
+        mine = (self._rank(ticket), ticket.asked)
+        return [place for place in self._waiting_places(ticket.service)
+                if ticket.rest or (self._place_rank(place), place.asked) < mine]
+
+    def _places_before(self, ticket: Ticket) -> list[Place]:
+        """The places, waiting or granted, of demands of another service asked before the ticket: what a
+        claimant's ticket waits behind."""
+        return [place for place in self._live_places() if place.service != ticket.service and place.asked < ticket.asked]
+
+    def _admit(self) -> None:
+        """Each claimant's ticket admitted once its claim stands already, no place asked before it stands, or
+        its claimant's bound has passed since it was asked (docs/node-arbiter.md, 「Claimants」)."""
+        now = self.clock()
+        for ticket in self.tickets.values():
+            if not self._held_claimant(ticket):
+                continue
+            if (self.claimed() == ticket.service or not self._places_before(ticket)
+                    or now - ticket.asked >= self.occupants.waits_behind_s(ticket.service)):
+                ticket.admitted = True
+                self.changed.notify_all()
+
+    def waits_for(self, ticket: Ticket) -> list[str]:
+        """The services of the places a waiting ticket is held behind, each once."""
+        if ticket.granted is not None:
+            return []
+        behind = self._places_before(ticket) if self._held_claimant(ticket) else self._places_ahead(ticket)
+        return list(dict.fromkeys(place.service for place in behind))
+
+    def hand_places(self, handed: list[tuple[str, int, float, bool]]) -> list[dict]:
+        """The places the master hands, replacing those it handed before; the places as kept."""
+        with self.guard:
+            now = self.clock()
+            self.places = [Place(service, demand, now - max(0.0, waited_s), granted)
+                           for service, demand, waited_s, granted in handed]
+            self.places_at = now
+            self._grant()
+            self.changed.notify_all()
+            return [place.shown(now) for place in self.places]
 
     def _grant(self) -> None:
+        self._admit()
         if self.draining:
             return
-        claiming = [ticket for ticket in self.tickets.values() if self.occupants.claims_by_ticket(ticket.service)]
+        claiming = [ticket for ticket in self.tickets.values()
+                    if self.occupants.claims_by_ticket(ticket.service) and ticket.admitted]
         if claiming:
             if self.claim_holds():
                 now = self.clock()
@@ -595,8 +716,9 @@ class Turns:
             return
         now = self.clock()
         # A ticket asked only to rest has the card only where nobody asks for it for a request.
-        order = self._asking() or self._order()
-        if order:
+        order = self._asking() or self._standing()
+        # A waiting place of the master's demands ahead of the head holds the whole line behind it.
+        if order and not self._places_ahead(order[0]):
             granted = order[0]
             granted.granted = now
             if granted.rest:
@@ -615,10 +737,10 @@ class Turns:
         queue of requests」, 「One rank taking turns」). How long the turn has been in use does not count."""
         if ticket.granted is None or self.claimed() is not None:
             return False
-        waiting = [other for other in self._asking() if other is not ticket]
-        if not waiting:
-            return True
         mine = (self._rank(ticket), self.clock() - max(0.0, next_waited_s))
+        if any((self._place_rank(place), place.asked) < mine for place in self._waiting_places(ticket.service)):
+            return False
+        waiting = [other for other in self._asking() if other is not ticket]
         return all((self._rank(other), other.asked) >= mine for other in waiting)
 
     def _held_open(self, ticket: Ticket, wait_s: float, holding: bool = False,
@@ -669,6 +791,10 @@ class Turns:
         waiting = [other for other in self._asking() if ticket.resting or self._above(other, ticket)]
         if waiting:
             return waiting[0].service
+        mine = self._rank(ticket)
+        places = [place for place in self._waiting_places(ticket.service) if ticket.resting or self._place_rank(place) < mine]
+        if places:
+            return places[0].service
         # A rest gives way to a process waiting for the lock too: a service that asks for no turn asks for
         # the card in the kernel's table (docs/node-arbiter.md, 「The shared card lock」, 「Resting」).
         if ticket.resting:
@@ -686,8 +812,11 @@ class Turns:
             ticket = self.tickets.get(ticket_id)
             if ticket is None or ticket.granted is None or ticket.resting or self.claimed() is not None:
                 return None
-            alike = [other for other in self._asking() if other is not ticket and self._rank(other) == self._rank(ticket)]
-            return alike[0].service if alike else None
+            alike = [(self._rank(other), other.asked, other.service) for other in self._asking()
+                     if other is not ticket and self._rank(other) == self._rank(ticket)]
+            alike += [(self._place_rank(place), place.asked, place.service) for place in self._waiting_places(ticket.service)
+                      if self._place_rank(place) == self._rank(ticket)]
+            return min(alike)[2] if alike else None
 
     def _wait_s(self, ticket: Ticket, order: list[Ticket]) -> float:
         now = self.clock()
@@ -716,7 +845,7 @@ class Turns:
                 "position": None if granted else order.index(ticket) + 1,
                 "waitMs": None if granted else to_ms(self._wait_s(ticket, order)), "claimantName": self.claimed(),
                 "waitedMs": to_ms(self.clock() - ticket.asked), "need": ticket.need, "ref": ticket.ref, "rest": ticket.rest,
-                "keep": None}
+                "keep": None, "waitsFor": self.waits_for(ticket) or None}
 
     def _new_id(self) -> int:
         self.last_id = max(self.last_id + 1, int(time.time() * 1000))
@@ -821,7 +950,9 @@ class Turns:
         """Whether a ticket of this claimant stands: the claim it makes lasts while one does."""
         with self.guard:
             self._tidy()
-            return self.occupants.claims_by_ticket(name) and any(ticket.service == name for ticket in self.tickets.values())
+            self._admit()
+            return self.occupants.claims_by_ticket(name) and any(
+                ticket.service == name and ticket.admitted for ticket in self.tickets.values())
 
     def state(self) -> dict:
         """The queue as the card shows it (docs/api.md, 「The card」), the claim standing by its claimant's name."""
@@ -832,9 +963,12 @@ class Turns:
             claim = self.claimed()
             held_by = self.holders(self.lock, os.getpid())
             granted = [ticket for ticket in order if ticket.granted is not None]
-            # In use: a claim, a request waiting, a turn being used, or the lock held by anyone but a resting turn.
+            # In use: a claim, a request or a place waiting, a turn being used, or the lock held by anyone but a
+            # resting turn.
+            now = self.clock()
+            places = self._live_places()
             busy = (claim is not None or bool(self._asking()) or any(not ticket.resting for ticket in granted)
-                    or (bool(held_by) and not granted))
+                    or (bool(held_by) and not granted) or any(not place.granted for place in places))
             return {
                 "occupants": self.occupants.names(),
                 "ranks": [rank_names(word) for word in self.occupants.order],
@@ -843,6 +977,7 @@ class Turns:
                 "lockHeldBy": held_by,
                 "busy": busy,
                 "queue": [self.answer(ticket) for ticket in order],
+                "places": [place.shown(now) for place in places],
                 "typicalHoldMs": {service: to_ms(held) for service, held in self.typical.items()},
             }
 
@@ -1271,7 +1406,15 @@ def turns_handler(turns: Turns, units_api: UnitsApi | None = None, version: str 
             self._refuse(HTTPStatus.NOT_FOUND, "not-found", f"no ticket {ticket_id} is held")
 
         def do_PUT(self) -> None:  # noqa: N802
-            self._no_route()
+            parts, _ = self._route()
+            if parts != ["card", "places"]:
+                return self._no_route()
+            try:
+                handed = handed_places(self._body())
+            except ValueError as why:
+                return self._refuse(HTTPStatus.BAD_REQUEST, "bad-request",
+                                    f"a body of places, each serviceName, demandId, waitedMs and granted, is wanted: {why}")
+            self._send(HTTPStatus.OK, {"places": turns.hand_places(handed)})
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             pass

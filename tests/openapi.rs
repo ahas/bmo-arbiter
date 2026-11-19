@@ -53,6 +53,7 @@ fn the_document_states_the_routes_events_and_tools_of_the_api_document() {
       "POST /demands",
       "POST /placements",
       "POST /tickets",
+      "PUT /card/places",
       "PUT /descriptions/{serviceName}",
     ]
   );

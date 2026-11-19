@@ -222,6 +222,14 @@
             },
             "type": "array"
           },
+          "places": {
+            "default": [],
+            "description": "The places of the master's demands as last handed and not yet lapsed.",
+            "items": {
+              "$ref": "#/components/schemas/CardPlace"
+            },
+            "type": "array"
+          },
           "queue": {
             "description": "Every ticket, in line order.",
             "items": {
@@ -297,6 +305,7 @@
           "lockHeldBy",
           "busy",
           "queue",
+          "places",
           "typicalHoldMs",
           "units",
           "device",
@@ -304,6 +313,50 @@
           "store",
           "ram",
           "rules"
+        ],
+        "type": "object"
+      },
+      "CardPlace": {
+        "description": "A demand of the master's in the card's line, as the master hands it and the card shows it.",
+        "properties": {
+          "demandId": {
+            "description": "The master's id of the demand.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "granted": {
+            "description": "The demand holds the card; else it waits for it.",
+            "type": "boolean"
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "waitedMs": {
+            "description": "How long the demand has waited.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "serviceName",
+          "demandId",
+          "waitedMs",
+          "granted"
+        ],
+        "type": "object"
+      },
+      "CardPlaces": {
+        "description": "Every place of the master's demands on the card, handed whole.",
+        "properties": {
+          "places": {
+            "items": {
+              "$ref": "#/components/schemas/CardPlace"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "places"
         ],
         "type": "object"
       },
@@ -2242,6 +2295,17 @@
             "description": "How long it has stood, backdated by the wait it was asked with.",
             "format": "int64",
             "type": "integer"
+          },
+          "waitsFor": {
+            "default": null,
+            "description": "While it waits behind places of the master's demands, the services they stand for.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2259,7 +2323,8 @@
           "need",
           "ref",
           "rest",
-          "keep"
+          "keep",
+          "waitsFor"
         ],
         "type": "object"
       },
@@ -2700,7 +2765,7 @@
   "info": {
     "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes, grants cards of a service as demands ask them and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.15"
+    "version": "0.1.0-rev.16"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2716,14 +2781,14 @@
                 }
               }
             },
-            "description": "The node's card: occupants, ranks, claim, queue, units."
+            "description": "The node's card: occupants, ranks, claim, queue, places, units."
           },
           "500": {
             "$ref": "#/components/responses/Failed"
           }
         },
         "security": [],
-        "summary": "The node's card: occupants, ranks, claim, queue, units.",
+        "summary": "The node's card: occupants, ranks, claim, queue, places, units.",
         "tags": [
           "node"
         ]
@@ -2807,6 +2872,44 @@
         },
         "security": [],
         "summary": "Evict a unit to host memory or restore it, with a reason.",
+        "tags": [
+          "node"
+        ]
+      }
+    },
+    "/card/places": {
+      "put": {
+        "operationId": "putCardPlaces",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardPlaces"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CardPlaces"
+                }
+              }
+            },
+            "description": "Hand the card every place of the master's demands, replacing those handed before."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/Failed"
+          }
+        },
+        "security": [],
+        "summary": "Hand the card every place of the master's demands, replacing those handed before.",
         "tags": [
           "node"
         ]

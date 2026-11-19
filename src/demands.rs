@@ -56,6 +56,17 @@ impl Seat {
   }
 }
 
+/// A demand's place in one card's line (docs/placement.md, 「A demand's place in a card's line」): the
+/// demand, its service, when it was asked, and whether it holds that card or waits for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+  pub demand: i64,
+  pub service: String,
+  /// When the demand was asked, in epoch milliseconds.
+  pub asked_at: i64,
+  pub granted: bool,
+}
+
 /// One demand the master holds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
@@ -272,6 +283,31 @@ impl Book {
         _ => false,
       })
       .count()
+  }
+
+  /// The granted places each card is handed, by node (docs/placement.md, 「A demand's place in a card's
+  /// line」): one for each demand holding the card — granted there, its service brought up or coming back
+  /// there. A waiting demand's places are the master's to choose, by what each card is to it.
+  pub fn places(&self) -> BTreeMap<String, Vec<Place>> {
+    let mut places: BTreeMap<String, Vec<Place>> = BTreeMap::new();
+    for held in self.held.values() {
+      for seat in &held.seats {
+        if let Seat::Granted(DemandCard {
+          node_name: node, ..
+        })
+        | Seat::Starting(node)
+        | Seat::Returning(node) = seat
+        {
+          places.entry(node.clone()).or_default().push(Place {
+            demand: held.id,
+            service: held.service.clone(),
+            asked_at: held.asked_at,
+            granted: true,
+          });
+        }
+      }
+    }
+    places
   }
 
   /// How many demands are granted the service on the node.

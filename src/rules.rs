@@ -25,6 +25,9 @@ pub const DEFAULT_TIER: f64 = 2.0;
 
 /// The tier of a claimant whose entry gives none: it takes the card outright.
 pub const CLAIMANT_TIER: f64 = 0.0;
+/// The most seconds a claimant's ticket waits behind the master's demands that came before it, where its
+/// entry says none (docs/node-arbiter.md, 「Claimants」).
+pub const WAITS_BEHIND_S: f64 = 600.0;
 
 /// The rules file under a data root's placements.
 pub fn rules_path(data_root: &Path) -> PathBuf {
@@ -127,6 +130,8 @@ pub struct Claimant {
   pub seen_by: SeenBy,
   pub ram_free: RamFree,
   pub tier: Num,
+  /// The most seconds a ticket of it waits behind the master's demands that stood on the card before it.
+  pub waits_behind_s: Num,
 }
 
 /// What one entry of the rules' `occupants` says: a claimant, or an occupant's tier alone.
@@ -376,6 +381,11 @@ impl Reader<'_> {
       },
       ram_free,
       tier: self.number(value.get("tier"), &format!("{place}.tier"), CLAIMANT_TIER)?,
+      waits_behind_s: self.number(
+        value.get("waits_behind_s"),
+        &format!("{place}.waits_behind_s"),
+        WAITS_BEHIND_S,
+      )?,
     }))
   }
 

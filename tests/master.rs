@@ -1989,3 +1989,98 @@ async fn a_demand_whose_caller_falls_silent_past_its_lease_is_given_back_and_one
   rounds(&mut master, 1).await;
   assert_eq!(granted_on(&demands, unleased), ["a"]);
 }
+
+/// A ticket the slave holds back behind the demands of the services named (docs/node-arbiter.md, 「Places of
+/// the master's demands」).
+fn held_back(id: i64, service: &str, behind: &[&str]) -> Value {
+  let mut one = waiting(id, service, None);
+  one["waitsFor"] = json!(behind);
+  one
+}
+
+/// Every places hand the master sent with its reads.
+fn places_handed(stand: &Stand) -> Vec<String> {
+  stand
+    .commands
+    .lock()
+    .unwrap()
+    .iter()
+    .filter(|command| command.contains("/card/places"))
+    .cloned()
+    .collect()
+}
+
+#[tokio::test]
+async fn a_later_request_of_its_tier_never_passes_a_waiting_demand_whose_service_comes_back_seated() {
+  let services = vec![declared("painter", 2.0, YieldBy::Process), declared("voice", 2.0, YieldBy::Turn)];
+  let (mut master, stand, demands) =
+    demanding(&["a"], services, &[("painter", &["a"]), ("voice", &["a"])], &["painter a"]).await;
+  // The voice asks the card while the painter stands idle: the painter goes down for it.
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([waiting(1, "voice", None)]));
+  rounds(&mut master, 2).await;
+  assert_eq!(adapted(&stand), ["painter stop a"]);
+
+  // A demand for the painter waits behind the voice's turn in use, and the card is handed its place.
+  let mut speaking = ticket(1, "voice", true, None);
+  speaking["inUse"] = json!(true);
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([speaking]));
+  let draw = ask(&demands, "painter", None, None);
+  rounds(&mut master, 2).await;
+  assert_eq!(demand(&demands, draw).reason.unwrap().code, DemandWait::InUse);
+  let handed = places_handed(&stand);
+  assert!(
+    handed.last().is_some_and(
+      |hand| hand.contains(r#""serviceName":"painter""#) && hand.contains(r#""granted":false"#)
+    ),
+    "{handed:?}"
+  );
+
+  // The voice's turn ends, and its next request comes while the painter is brought back: the slave holds it
+  // behind the painter's place, the painter is not stopped for it, and the demand is granted.
+  *stand.answer.lock().unwrap() = slave(9000.0, store_resident(), None, json!([]));
+  rounds(&mut master, 1).await;
+  *stand.answer.lock().unwrap() =
+    slave(9000.0, store_resident(), None, json!([held_back(2, "voice", &["painter"])]));
+  rounds(&mut master, 3).await;
+  assert_eq!(adapted(&stand), ["painter stop a", "painter start a"]);
+  assert_eq!(granted_on(&demands, draw), ["a"]);
+  let handed = places_handed(&stand);
+  assert!(handed.last().is_some_and(|hand| hand.contains(r#""granted":true"#)), "{handed:?}");
+
+  // Given back, the place goes with it: the card is handed no places once, then none at all.
+  assert!(demands.book.lock().unwrap().give_back(draw));
+  rounds(&mut master, 3).await;
+  let handed = places_handed(&stand);
+  assert!(handed.last().is_some_and(|hand| hand.contains(r#"{"places":[]}"#)), "{handed:?}");
+  let count = handed.len();
+  rounds(&mut master, 2).await;
+  assert_eq!(places_handed(&stand).len(), count);
+}
+
+#[tokio::test]
+async fn a_claimants_ticket_held_behind_a_running_demand_takes_nothing_from_it_until_the_slave_admits_it() {
+  let services = vec![declared("painter", 2.0, YieldBy::Process)];
+  let (mut master, stand, demands) =
+    demanding(&["a"], services, &[("painter", &["a"])], &["painter a"]).await;
+  rewrite_rules(
+    &stand,
+    &format!("occupants:\n  - name: tester\n    claims: true\n    tier: 0\n{}", RULES.trim_start()),
+  );
+  let draw = ask(&demands, "painter", None, None);
+  rounds(&mut master, 1).await;
+  assert_eq!(granted_on(&demands, draw), ["a"]);
+
+  // The claimant asks while the draw runs: the slave holds its ticket behind the draw's place.
+  *stand.answer.lock().unwrap() =
+    slave(9000.0, store_resident(), None, json!([held_back(3, "tester", &["painter"])]));
+  rounds(&mut master, 5).await;
+  assert!(adapted(&stand).is_empty());
+  assert_eq!(demand(&demands, draw).state, DemandState::Granted);
+
+  // Admitted, its bound passed or the place gone, it takes the card as any claimant does.
+  *stand.answer.lock().unwrap() =
+    slave(9000.0, store_resident(), None, json!([waiting(3, "tester", None)]));
+  rounds(&mut master, 2).await;
+  assert_eq!(adapted(&stand), ["painter stop a"]);
+  assert_eq!(demand(&demands, draw).taken.as_deref(), Some("tester"));
+}

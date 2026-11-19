@@ -48,7 +48,8 @@ The owner's covenant for the card. Every rule below realises it, on each node an
   boundary, where the next request in line is that occupant's; its rest; its giving the ticket back. How
   long a turn has been in use, and how long a ticket of its tier has waited, never make a turn give way;
   a request of its tier waits behind the requests ahead of it, however long they take (「One rank taking
-  turns」).
+  turns」). A demand the master holds for a service of the tier is one of those requests, standing in the
+  line by the place the master hands the node (「Places of the master's demands」).
 - **The line is by tier, then by when the request each ticket stands for arrived** (「The hold」).
 - **Yielding is the fastest path back, never a pause:** what the occupant keeps on that card comes down
   whole and comes back when its turn comes again.
@@ -155,7 +156,8 @@ keeps its model on it until another asks for the card.
 - **Occupants of one rank take the card in the order their requests arrived.** Each ticket stands in the
   line by the arrival of the request it stands for (「One queue of requests」), and a turn passes to another
   occupant of its rank only at a point its holder reaches itself:
-  - its request boundary, where the next request in line is the other occupant's: for an occupant that
+  - its request boundary, where the next request in line is the other occupant's, a place of the master's
+    demands among them (「Places of the master's demands」): for an occupant that
     asks `nextWaitedMs`, its answer's `"keep": false`; for the lent hold, which asks none, its head saying
     `QUIET` on the `PASS` it is told (「Lending」);
   - its rest (「Resting」);
@@ -198,8 +200,25 @@ keeps its model on it until another asks for the card.
     The unit is looked for as a system unit and as the node account's own user unit, or named outright
     by a cgroup's path;
   - `ram_free` — the host memory, in GiB, the node keeps available while it claims, or `all`, every dump
-    kept in host memory written out (`docs/placement.md`, 「Host memory」).
-- **The claim** begins when a ticket of the claimant is asked for, a container of it is listed, or a
+    kept in host memory written out (`docs/placement.md`, 「Host memory」);
+  - `waits_behind_s` — the most seconds a ticket of it waits behind the master's demands that stood on the
+    card before it (below), `600` where the rules say none; `0` never waits.
+- **A claimant's ticket waits behind the demands that came before it, for a bounded time.** A ticket of
+  the claimant asked while no claim of it stands is admitted once no place of the master's demands stands
+  on the card for a demand asked before it, waiting or granted (「Places of the master's demands」), or once
+  `waits_behind_s` has passed since it was asked, whichever comes first. Until then it is answered `202`,
+  its `waitsFor` naming the services of the places it waits behind; it claims nothing, holds back no other
+  occupant's turn and makes nothing give way, and the master counts it as no lower tier for those
+  services. A ticket asked while the claim stands joins it at once, and a place handed after the ticket was
+  asked never holds it.
+- **What a claimant holds, and for how long while others wait.** Once its claim has begun, it holds the
+  card for as long as the claim stands, whatever the card's use: the arbiter cannot see the claimant's work
+  under its ticket, and a card taken from under that work would break it, so no idleness ends or lends a
+  claim. What it may not do is pass a demand that was waiting for the card before its ticket came, or take
+  the card from a demand running there when its ticket came, for longer than its `waits_behind_s`; a claim
+  ending and a new ticket of the same claimant in the same moment is such a passing, and the new ticket
+  waits. A container or a process of the claimant claims at once, as its work runs already.
+- **The claim** begins when a ticket of the claimant is admitted, a container of it is listed, or a
   process of it is found on the card, and ends at the first look that finds none of them: its last ticket
   given back, its last container gone from the runtimes' list, its last process off the card. The tickets
   are looked at ten times a second (`CARD_CLAIM_POLL_S`), the containers and the card every two seconds,
@@ -322,7 +341,9 @@ sequenceDiagram
 - **The order of the line:** the ticket whose turn it is first, then by the occupants' ranks, which are
   their tiers (「The occupants」), those of one rank together, then by who asked first, and the tickets
   asking only to rest after all of them. A turn is given to the head only while no claim stands and no process holds the lock, and to
-  one ticket at a time; a claimant's tickets are granted as 「Claimants」 says.
+  one ticket at a time; a claimant's tickets are granted as 「Claimants」 says. A waiting place of the
+  master's demands stands in the same order and holds back every ticket behind it (「Places of the master's
+  demands」).
 - **A ticket stands until its holder gives it back.** No silence drops it: a ticket ends by its `DELETE`;
   by an answer about it that cannot be delivered, its asker having gone; or, once its turn is given, by
   its holder letting the lock go, a holder that dies letting the lock go with it (「Handing on」). A
@@ -381,6 +402,29 @@ sequenceDiagram
   served. A ticket asking only to rest is nobody waiting.
 - **A turn that gives way** keeps its own rules (「Giving way」); `nextWaitedMs` is for an occupant that serves
   requests one at a time, which finishes the request in hand and never stops mid-way.
+
+### Places of the master's demands
+
+- **A demand is a request the node does not see,** asked of the master by a caller off the node
+  (`docs/placement.md`, 「Demands」). The master hands the node a place for each demand that waits for its
+  card or holds it, at every read (`docs/api.md`, 「Places」): its service, its demand's id, how long the
+  demand has waited, and whether it is granted there. Each hand replaces the one before it.
+- **Kept only while the master hands them:** places not handed again within ten seconds lapse, so a master
+  that is gone holds the node back for no longer than that.
+- **A waiting place stands in the line** by its service's rank and its arrival, the node's clock less the
+  wait it was handed with, as a ticket stands by its request's arrival. It is never given a turn: the
+  master brings its service up, and that service takes the lock as it always does. While it stands:
+  - no ticket behind it is given a turn, and a ticket asking only to rest is given none at all;
+  - a turn of its rank or below it in use is answered `"keep": false` where the place stands ahead of the
+    turn's next request (「One queue of requests」), a turn that gives way gives way to a place above it,
+    and a resting turn gives way to any place (「Resting」);
+  - every ticket it holds back says so, `waitsFor` naming the services of the places ahead of it, which
+    the master reads so that nothing it holds back makes that service yield.
+- **A place never holds back its own service:** a ticket of the service a place stands for is that
+  demand's own work, and stands as if the place were not there.
+- **A granted place holds back no turn.** It and a waiting place alike hold back a claimant's ticket asked
+  after the place's demand, for as long as 「Claimants」 says.
+- **Shown** on the card as `places`, as last handed and not yet lapsed.
 
 ### Giving way
 
@@ -470,7 +514,8 @@ Each occupant chooses how it waits, inside the contract above:
 - **A caller off the node** — a gateway, a daemon or a job that needs an instance of a service standing on
   several nodes — asks no ticket here: it asks the master for a demand naming the service, waits however
   long it takes for a card to be granted, and gives the demand back when its work ends; the service's own
-  process asks this node's queue (`docs/placement.md`, 「Demands」).
+  process asks this node's queue (`docs/placement.md`, 「Demands」), and the demand stands in this node's
+  line meanwhile by the place the master hands it (「Places of the master's demands」).
 - **The client** for an occupant in a process of its own is `turn.py`, installed beside the arbiter
   (`docs/api.md`, 「The turn client」): a ticket asked for and after, the turn waited for with the answer
   held open and the lock taken, whether a turn carries on to the next request, a turn resting and asked
@@ -639,7 +684,9 @@ node:
   hold waiting for the hold, the claim and the lock before it, the lend settings and which
   rules the settings switch on, the lent hold's turn following its engine's use and taken back by the
   request at its door or on `WANT`, its turn passed at its request boundary, two occupants of one rank
-  taking the card in the order their requests arrived with no measure of time passing a turn, and
+  taking the card in the order their requests arrived with no measure of time passing a turn, the places
+  of the master's demands holding back the tickets and the turns behind them and a claimant's ticket for
+  no longer than its `waits_behind_s`, and
   units unloaded where the rules put them, every owner's dumps counted and lowered together; the ranks
   made by tier from the rules' `tiers`, a lower tier waited for and given way to, and a ticket kept until
   its holder gives it back; the arbiter started as a process, a call in hand answered as its ticket stands

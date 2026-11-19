@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use sse_stream::SseStream;
 
 use crate::card::{
-  Card, CardUnit, CardUnitChanges, CardUnitPage, Ticket, TicketAsk, TicketChanges, TicketQuery,
+  Card, CardPlaces, CardUnit, CardUnitChanges, CardUnitPage, Ticket, TicketAsk, TicketChanges, TicketQuery,
 };
 use crate::cluster::Cluster;
 use crate::demands::{Demand, DemandAsk, DemandPage, DemandQuery};
@@ -259,6 +259,11 @@ impl ArbiterClient {
   /// `GET /card`, of the node arbiter.
   pub async fn card(&self) -> CallResult<Card> {
     self.get(&["card"]).await
+  }
+
+  /// `PUT /card/places`, of the node arbiter: every place of the master's demands replaced, as kept.
+  pub async fn put_card_places(&self, places: &CardPlaces) -> CallResult<CardPlaces> {
+    self.send(Method::PUT, &["card", "places"], places).await
   }
 
   /// `POST /tickets`, of the node arbiter: the ticket with its turn given, or with its place in line.

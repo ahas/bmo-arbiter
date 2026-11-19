@@ -11,7 +11,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The node's card: occupants, ranks, claim, queue, units. */
+        /** The node's card: occupants, ranks, claim, queue, places, units. */
         get: operations["getCard"];
         put?: never;
         post?: never;
@@ -53,6 +53,23 @@ export interface paths {
         head?: never;
         /** Evict a unit to host memory or restore it, with a reason. */
         patch: operations["changeCardUnit"];
+        trace?: never;
+    };
+    "/card/places": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Hand the card every place of the master's demands, replacing those handed before. */
+        put: operations["putCardPlaces"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/cluster": {
@@ -282,6 +299,11 @@ export interface components {
             lockHeldBy: number[];
             /** @description The names that may be on the card, highest first, the claimants standing first first. */
             occupants: string[];
+            /**
+             * @description The places of the master's demands as last handed and not yet lapsed.
+             * @default []
+             */
+            places: components["schemas"]["CardPlace"][];
             /** @description Every ticket, in line order. */
             queue: components["schemas"]["Ticket"][];
             ram: components["schemas"]["Ram"];
@@ -305,6 +327,26 @@ export interface components {
             };
             units: components["schemas"]["CardUnit"][];
             version: string;
+        };
+        /** @description A demand of the master's in the card's line, as the master hands it and the card shows it. */
+        CardPlace: {
+            /**
+             * Format: int64
+             * @description The master's id of the demand.
+             */
+            demandId: number;
+            /** @description The demand holds the card; else it waits for it. */
+            granted: boolean;
+            serviceName: string;
+            /**
+             * Format: int64
+             * @description How long the demand has waited.
+             */
+            waitedMs: number;
+        };
+        /** @description Every place of the master's demands on the card, handed whole. */
+        CardPlaces: {
+            places: components["schemas"]["CardPlace"][];
         };
         /** @description Whether the card's lent engine waits at its stage, and for how long. */
         CardStage: {
@@ -940,6 +982,11 @@ export interface components {
              * @description How long it has stood, backdated by the wait it was asked with.
              */
             waitedMs: number;
+            /**
+             * @description While it waits behind places of the master's demands, the services they stand for.
+             * @default null
+             */
+            waitsFor: string[] | null;
         };
         /** @description A ticket asked for. */
         TicketAsk: {
@@ -1210,7 +1257,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The node's card: occupants, ranks, claim, queue, units. */
+            /** @description The node's card: occupants, ranks, claim, queue, places, units. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1273,6 +1320,32 @@ export interface operations {
             409: components["responses"]["Conflict"];
             500: components["responses"]["Failed"];
             503: components["responses"]["NotReady"];
+        };
+    };
+    putCardPlaces: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CardPlaces"];
+            };
+        };
+        responses: {
+            /** @description Hand the card every place of the master's demands, replacing those handed before. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CardPlaces"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["Failed"];
         };
     };
     getCluster: {
