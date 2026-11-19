@@ -108,8 +108,8 @@ data root and reads the deployment's own settings from `~/.config/bmo-arbiter/en
 | Environment | Meaning | Where unset |
 | --- | --- | --- |
 | `BMO_DATA_DIR` | the master's data root, whose `placements/` holds the rules, the placements, the request journal and the unit descriptions | `~/.local/share/bmo/data` |
-| `BMO_CODE_ROOT` | the arbiter's own tree: the `card/` package the install uploads and the `VERSION` it carries | `BMO_DEPLOY_DIR`, else the deploy link beside the binary where it stands in a release, else the tree the binary stands in |
-| `BMO_DEPLOY_DIR` | the deploy link of the arbiter's own release, read afresh each time | none |
+| `BMO_CODE_ROOT` | the arbiter's own tree: the `card/` package the install uploads and the `VERSION` it carries | `BMO_DEPLOY_DIR` where it names an arbiter tree, else the deploy link beside the binary where it stands in a release, else the tree the binary stands in |
+| `BMO_DEPLOY_DIR` | the deploy link of the arbiter's own release, read afresh each time. The same shell variable names the release of whatever unit started the shell, so a value under which no `card/` package stands is another unit's tree and is passed by, the rules after it standing | none |
 | `CARD_DECLARATIONS` | the declaration roots, separated by `:` (「Declarations」) | no root, so no service is declared |
 | `CARD_NODE_URL` | the base address of the node service (「The node service」) | none; every verb that reaches a node ends with an error naming the setting |
 | `CARD_NODE_TOKEN` | the node service's bearer token | empty |

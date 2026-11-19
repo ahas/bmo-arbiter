@@ -36,11 +36,13 @@ impl Roots {
 }
 
 /// The arbiter's own tree the master and the verbs read where none is named: the one
-/// `BMO_DEPLOY_DIR` names; else, where the binary `<tree>/bin/bmo-arbiter` stands in a release beside
-/// the deploy link's, the link itself, never resolved, so each read finds the release live then; else
-/// the tree the binary stands in (docs/placement.md, 「Master and slaves」).
+/// `BMO_DEPLOY_DIR` names, where it carries the node arbiter's package — the same variable names the
+/// release of whatever unit started the shell, and such a foreign tree is passed by; else, where the
+/// binary `<tree>/bin/bmo-arbiter` stands in a release beside the deploy link's, the link itself, never
+/// resolved, so each read finds the release live then; else the tree the binary stands in
+/// (docs/placement.md, 「Master and slaves」).
 pub fn code_root(deploy_dir: Option<PathBuf>, exe: Option<&Path>, link: &Path) -> PathBuf {
-  if let Some(named) = deploy_dir.filter(|named| !named.as_os_str().is_empty()) {
+  if let Some(named) = deploy_dir.filter(|named| names_arbiter_tree(named)) {
     return named;
   }
   let Some(tree) = exe.and_then(|exe| Some(exe.parent()?.parent()?.to_owned())) else {
@@ -51,6 +53,13 @@ pub fn code_root(deploy_dir: Option<PathBuf>, exe: Option<&Path>, link: &Path) -
     Some(releases) if store_of(&tree).as_ref() == Some(&releases) => link.to_owned(),
     _ => tree,
   }
+}
+
+/// Whether the tree `BMO_DEPLOY_DIR` names is the arbiter's own: it carries the node arbiter's package,
+/// the `card/` the install uploads from. A deployment's release and a checkout both do; the release of
+/// whatever unit started the shell does not.
+fn names_arbiter_tree(tree: &Path) -> bool {
+  !tree.as_os_str().is_empty() && tree.join("card").join("card.py").is_file()
 }
 
 /// A node as the rules see it, with its shell, whether its slave answered and its card's memory as the

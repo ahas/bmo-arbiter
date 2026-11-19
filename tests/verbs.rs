@@ -104,6 +104,12 @@ fn a_binary_in_a_release_reads_the_deploy_link_and_any_other_reads_its_own_tree(
   std::os::unix::fs::symlink(releases.join("live"), &link).unwrap();
   let dev = top.path().join("checkout");
   std::fs::create_dir_all(dev.join("bin")).unwrap();
+  std::fs::create_dir_all(dev.join("card")).unwrap();
+  std::fs::write(dev.join("card").join("card.py"), "").unwrap();
+  let foreign = top.path().join("other-unit");
+  std::fs::create_dir_all(&foreign).unwrap();
+  let empty = top.path().join("empty-named");
+  let blank = std::path::PathBuf::new();
   let exe_in = |tree: &Path| tree.join("bin").join("bmo-arbiter");
 
   assert_eq!(code_root(None, Some(&exe_in(&releases.join("old"))), &link), link);
@@ -113,6 +119,22 @@ fn a_binary_in_a_release_reads_the_deploy_link_and_any_other_reads_its_own_tree(
   assert_eq!(
     code_root(None, Some(&exe_in(&releases.join("old"))), &top.path().join("no-link")),
     releases.join("old")
+  );
+  // A deploy dir naming another unit's release, or nothing at all, is passed by.
+  assert_eq!(
+    code_root(Some(foreign), Some(&exe_in(&releases.join("old"))), &link),
+    link,
+    "a tree holding no card package gives its place to the deploy link"
+  );
+  assert_eq!(
+    code_root(Some(empty), Some(&exe_in(&releases.join("old"))), &link),
+    link,
+    "a deploy dir that does not stand is passed by too"
+  );
+  assert_eq!(
+    code_root(Some(blank), Some(&exe_in(&releases.join("old"))), &link),
+    link,
+    "a deploy dir named empty is passed by"
   );
 }
 
