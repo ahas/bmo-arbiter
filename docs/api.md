@@ -28,7 +28,7 @@ no list of callers.
   the revision alone, in the same commit as this document. Major, minor and patch do not move before the
   first release.
 
-This document states version **0.1.0-rev.16**.
+This document states version **0.1.0-rev.17**.
 
 ## The wire format
 
@@ -480,7 +480,8 @@ it.
   live arbiter that is not a ticket), or runs it as a command:
   `python turn.py --service <name> [--lock <path>] [--state <file>] -- <command> [<argument> …]`, which
   holds a turn and the lock around the command and exits with its code, or `3` where the service has no
-  place on the node. A fault the arbiter answers with is said on standard error and waited out: the command
+  place on the node; a command ended by a signal has `turn.py` end by the same signal, once the lock is let
+  go and the ticket given back, so a unit stopped with `SIGTERM` reads as stopped and not as failed. A fault the arbiter answers with is said on standard error and waited out: the command
   starts only once a turn is given.
   While the command runs, a `SIGTERM` sent to `turn.py` is passed on to the command and `turn.py` waits
   for it to end, so a stop reaches the command once and its own way of ending runs to the end; `SIGINT`

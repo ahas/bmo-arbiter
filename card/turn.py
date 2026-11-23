@@ -21,7 +21,8 @@ While the command runs, a SIGTERM is passed on to it and waited out, so a stop r
 its own way of ending runs to the end; SIGINT and SIGHUP, which a terminal sends to the command as well,
 are left to the command. With `--state <file>`, the card is lent while the command keeps running: SIGUSR1
 lets the lock and the ticket go, SIGUSR2 asks for a turn again and takes the lock back, and the file says
-`held` or `lent` once each is done, and is removed once the command has ended.
+`held` or `lent` once each is done, and is removed once the command has ended. It ends as the command ended:
+with its code, or, where a signal ended the command, by the same signal once the lock and the ticket are let go.
 
 An occupant that can let go of the card in the middle of its work holds a turn that gives way instead
 (docs/node-arbiter.md, 「Giving way」): `GivingTurn` asks for it with the seconds letting go takes, watches its
@@ -463,5 +464,15 @@ def run_passing_stop(command: list[str], fd: int, lending: Lending | None = None
             signal.signal(signum, disposition)
 
 
+def end_as(code: int) -> int:
+    """This process ended the way its command ended: by the same signal where a signal ended it (a negative
+    code), so whatever started it reads a stop as a stop, else with the command's code."""
+    if code < 0:
+        signal.signal(-code, signal.SIG_DFL)
+        os.kill(os.getpid(), -code)
+        return 128 - code
+    return code
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(end_as(main()))

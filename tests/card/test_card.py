@@ -1262,10 +1262,18 @@ class TurnCommandTest(unittest.TestCase):
         "sys.exit(7)\n"
     )
 
-    def run_turn(self, folder: Path, *extra: str) -> subprocess.Popen:
+    # A command that leaves SIGTERM to its default, so a stop ends it by the signal.
+    UNCAUGHT = (
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').write('up')\n"
+        "while True:\n"
+        "    time.sleep(0.02)\n"
+    )
+
+    def run_turn(self, folder: Path, *extra: str, command: str = COMMAND) -> subprocess.Popen:
         env = {**os.environ, "CARD_TURN_PORT": str(unanswering_port(self))}
         process = subprocess.Popen([sys.executable, str(HERE / "turn.py"), "--service", "tester", "--lock",
-                                    str(folder / "lock"), *extra, "--", sys.executable, "-c", self.COMMAND,
+                                    str(folder / "lock"), *extra, "--", sys.executable, "-c", command,
                                     str(folder / "up"), str(folder / "heard")], env=env)
         self.addCleanup(lambda: process.poll() is None and process.kill())
         deadline = time.monotonic() + 20
@@ -1283,6 +1291,20 @@ class TurnCommandTest(unittest.TestCase):
             process.send_signal(signal.SIGTERM)
             self.assertEqual(process.wait(timeout=20), 7)
             self.assertEqual((folder / "heard").read_text(), "1")
+
+    def test_a_command_a_stop_ends_by_its_signal_ends_turn_by_the_same_signal(self) -> None:
+        import signal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            process = self.run_turn(folder, command=self.UNCAUGHT)
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=20), -signal.SIGTERM)
+            fd = os.open(folder / "lock", os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
 
     def test_the_card_is_lent_and_taken_back_while_the_command_runs(self) -> None:
         import signal
