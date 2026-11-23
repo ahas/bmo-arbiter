@@ -1560,7 +1560,10 @@ async fn no_rank_takes_a_card_a_claim_or_the_bench_holds_and_a_claim_takes_a_car
     .lock()
     .unwrap()
     .insert("a".into(), slave(9000.0, store_resident(), Some("trainer"), json!([])));
-  rewrite_rules(&stand, &format!("{RULES}\noccupants:\n  - name: trainer\n    tier: 0\n    claims: true\n"));
+  rewrite_rules(
+    &stand,
+    &format!("{RULES}\noccupants:\n  - name: trainer\n    tier: 0\n    claims: true\n"),
+  );
   rounds(&mut master, 1).await;
   assert_eq!(adapted(&stand), ["lab-arena stop a"]);
   assert_eq!(demand(&demands, on_a).taken.as_deref(), Some("trainer"));
