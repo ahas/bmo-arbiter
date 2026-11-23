@@ -1,6 +1,7 @@
 //! No Hangul beyond the ledger: the arbiter answers in English and in codes, and a person's words in
 //! another language are a console's language pack. The ledger, `korean-ledger.json`, is a JSON object from
-//! each file's path to the lines with Korean it may hold; a file it does not name may hold none.
+//! each file's path to the lines with Korean it may hold; a file it does not name may hold none. The README
+//! at the root and its translations beside it are documents for readers of each language, and are not read.
 
 use crate::support;
 
@@ -11,6 +12,15 @@ use std::path::Path;
 use support::{ROOT, files_under, shown};
 
 const LEDGER: &str = "korean-ledger.json";
+
+/// Whether `path` is the README at the root or one of its translations, `README.<language>.md`.
+fn is_readme(path: &Path) -> bool {
+  path.parent() == Some(Path::new(ROOT))
+    && path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .is_some_and(|name| name.starts_with("README") && name.ends_with(".md"))
+}
 
 /// The Hangul syllables block, U+AC00 to U+D7A3, named by code point so this file holds none of it.
 fn is_hangul(c: char) -> bool {
@@ -43,6 +53,7 @@ fn ledger() -> BTreeMap<String, usize> {
 fn no_file_holds_more_hangul_than_the_ledger_allows() {
   let files: Vec<(String, String)> = files_under(Path::new(ROOT))
     .into_iter()
+    .filter(|path| !is_readme(path))
     .map(|path| {
       let bytes = fs::read(&path).expect("a file is readable");
       (shown(&path), String::from_utf8_lossy(&bytes).into_owned())

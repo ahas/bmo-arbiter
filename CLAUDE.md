@@ -36,8 +36,10 @@ These rules hold every change to this repository.
 ## Language
 
 - Everything in this repository is English: code, comments, strings, tests, documents, commit messages
-  and branch names. No Korean in code or tests; the Hangul check in `tests/` and the testbed's `korean`
-  check hold this against `korean-ledger.json`, which allows none.
+  and branch names, except the README's translations beside it at the root (`README.ko.md`,
+  `README.ja.md`, `README.zh-CN.md`), which the Hangul check does not read. No Korean in code or tests;
+  the Hangul check in `tests/` and the testbed's `korean` check hold this against `korean-ledger.json`,
+  which allows none.
 - What the arbiter says is an English sentence for a person, or a status, a protocol word and a
   kebab-case code for a machine. Words a person reads in another language are a console's language pack.
 - No personal data: no user names, home directories, machine names, addresses or names of any agent.
