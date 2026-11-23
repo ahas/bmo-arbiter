@@ -1,0 +1,73 @@
+# What installing the card master on a fresh machine needs, read by the testbed's install verb (bmo-testbed's
+# docs/install.md, 「The install declaration」). The settings are docs/api.md's 「Settings」, 「The master」.
+
+install = 1
+
+restart = "systemctl --user restart bmo-card-master.service"
+
+[[needs]]
+program = "cargo"
+what = "Builds the master and the hosted tool; the Rust toolchain from https://rustup.rs."
+
+[[needs]]
+program = "bun"
+what = "Runs the TypeScript client's check, a service's adapter whose command begins with bun, and the jake hub's console a hub node is reached through; the Bun runtime from https://bun.sh."
+
+[[needs]]
+program = "ssh"
+what = "Runs the master's commands on an ssh node, the node arbiter's install among them; the openssh-client package."
+
+[[needs]]
+program = "scp"
+what = "Carries the node arbiter's package and its files to an ssh node; the openssh-client package."
+
+[[needs]]
+program = "git"
+what = "Reads a declaration root's git index for the services' card declarations; the git package."
+
+[[port]]
+name = "arbiter.master"
+number = 7440
+
+# The bearer every route of the master takes, the console's and the voice's calls among them.
+[[token]]
+name = "arbiter.master"
+file = "env/arbiter.token"
+
+# The master's deployment settings, read by its unit as its EnvironmentFile. The data root is the shared one, where
+# the rules and the placements stand. The declaration roots are added by the services that declare themselves, each
+# as its own CARD_DECLARATIONS line; a hub node is reached through the jake hub's console in its checkout.
+[[settings]]
+file = "~/.config/bmo-arbiter/env"
+text = """
+BMO_DATA_DIR={{data_root}}
+CARD_MASTER_PORT={{port.arbiter.master}}
+CARD_MASTER_TOKEN={{token.arbiter.master}}
+CARD_NODE_URL=http://127.0.0.1:{{port.node.server}}
+CARD_NODE_TOKEN={{token.node.service}}
+BMO_BUN={{home}}/.bun/bin/bun
+BMO_HUB_CONSOLE={{checkout.jake}}/src/console/main.ts
+"""
+
+# The rules the master plans every card by (docs/placement.md, 「The rules」): none yet, so every node takes the
+# defaults until the operator names its groups, units and rules here.
+[[settings]]
+file = "placements/card-rules.yaml"
+mode = "644"
+text = """
+# The card rules (bmo-arbiter's docs/placement.md, 「The rules」), read again whenever this file changes.
+occupants: []
+nodes: []
+units: []
+rules: []
+"""
+
+[[line]]
+file = "env/web-console.env"
+key = "ARBITER_ADDRESS"
+value = "http://127.0.0.1:{{port.arbiter.master}}"
+
+[[line]]
+file = "env/web-console.env"
+key = "ARBITER_TOKEN"
+value = "{{token.arbiter.master}}"

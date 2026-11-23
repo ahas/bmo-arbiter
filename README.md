@@ -31,7 +31,7 @@ hosted tool `bmo/gpu`, which calls the master's usage route from the tool host.
 | `deploy/` | The master's systemd user unit, which a deployment links from the deploy tree |
 
 At the root stand the Cargo manifest, the version, the MIT license, `testbed.toml` with its Korean ledger,
-`rustfmt.toml` and `CLAUDE.md`.
+`install.toml` (what installing the unit on a fresh machine needs), `rustfmt.toml` and `CLAUDE.md`.
 
 ## Documents
 

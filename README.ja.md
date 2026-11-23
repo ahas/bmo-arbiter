@@ -30,7 +30,7 @@
 | `docs/` | アービターが何をするかの正規の記述と OpenAPI ドキュメント |
 | `deploy/` | デプロイがデプロイツリーからリンクする、マスターの systemd ユーザーユニット |
 
-ルートには Cargo マニフェスト、バージョン、MIT ライセンス、韓国語台帳を伴う `testbed.toml`、`rustfmt.toml`、
+ルートには Cargo マニフェスト、バージョン、MIT ライセンス、韓国語台帳を伴う `testbed.toml`、`install.toml`（新しいマシンにユニットをインストールするのに必要なもの）、`rustfmt.toml`、
 `CLAUDE.md` があります。
 
 ## ドキュメント

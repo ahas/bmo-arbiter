@@ -27,7 +27,7 @@
 | `docs/` | 仲裁器行为的规范说明以及 OpenAPI 文档 |
 | `deploy/` | 主控的 systemd 用户单元，由部署从部署树链接 |
 
-根目录下有 Cargo 清单、版本文件、MIT 许可证、附带韩文台账的 `testbed.toml`、`rustfmt.toml` 和 `CLAUDE.md`。
+根目录下有 Cargo 清单、版本文件、MIT 许可证、附带韩文台账的 `testbed.toml`、`install.toml`（在新机器上安装本单元所需的内容）、`rustfmt.toml` 和 `CLAUDE.md`。
 
 ## 文档
 

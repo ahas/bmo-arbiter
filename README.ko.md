@@ -30,7 +30,7 @@ MCP 서버 `bmo-arbiter mcp`를 통해 카드에서 차례를 얻습니다. 슈�
 | `docs/` | 중재자가 하는 일에 대한 정식 기술과 OpenAPI 문서 |
 | `deploy/` | 배포가 배포 트리에서 링크하는 마스터의 systemd 사용자 유닛 |
 
-루트에는 Cargo 매니페스트, 버전, MIT 라이선스, 한국어 대장을 곁들인 `testbed.toml`, `rustfmt.toml`, `CLAUDE.md`가
+루트에는 Cargo 매니페스트, 버전, MIT 라이선스, 한국어 대장을 곁들인 `testbed.toml`, `install.toml`(새 머신에 유닛을 설치하는 데 필요한 것), `rustfmt.toml`, `CLAUDE.md`가
 있습니다.
 
 ## 문서
