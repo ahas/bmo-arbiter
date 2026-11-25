@@ -31,7 +31,7 @@ use rmcp::transport::stdio;
 #[derive(Parser)]
 #[command(
   name = "bmo-arbiter",
-  version,
+  version = bmo_arbiter::VERSION,
   about = "The card arbiter's master and its harness plugin"
 )]
 struct Cli {

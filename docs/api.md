@@ -19,16 +19,16 @@ no list of callers.
 
 ## Versions
 
-- **One version for the repository,** `0.1.0` with a revision until the first release:
-  `0.1.0-rev.<n>`, the first `0.1.0` being the base and each later bump one revision. It stands in
-  `VERSION`, in the workspace's manifest for every crate, in the TypeScript package, in `GET /health`, in
-  the OpenAPI document and in the MCP server, and the node arbiter shows it, with the commit it was carried
-  from, as its own.
-- **A change to this document's routes, fields, events, codes, protocols, files, verbs or settings** raises
-  the revision alone, in the same commit as this document. Major, minor and patch do not move before the
-  first release.
+- **The version is the set's** (bmo-chat's `docs/conventions.md`, 「Versions」): a release tags the commit
+  `v<version>` and makes no commit, and a build reads its version off the tag, which the testbed hands it as
+  `BMO_VERSION`. `GET /health`, the MCP server and `--version` answer it, and the install carries it to the
+  node arbiter, which shows it, with the commit it was carried from, as its own. The workspace manifest's
+  version for every crate, the TypeScript package's and the OpenAPI document's are a placeholder that never
+  moves.
+- **A change to this document's routes, fields, events, codes, protocols, files, verbs or settings** changes
+  this document in the same commit and moves no version.
 
-This document states version **0.1.0-rev.17**.
+This document is fixed at the release the commit is tagged with.
 
 ## The wire format
 
@@ -108,7 +108,7 @@ data root and reads the deployment's own settings from `~/.config/bmo-arbiter/en
 | Environment | Meaning | Where unset |
 | --- | --- | --- |
 | `BMO_DATA_DIR` | the master's data root, whose `placements/` holds the rules, the placements, the request journal and the unit descriptions | `~/.local/share/bmo/data` |
-| `BMO_CODE_ROOT` | the arbiter's own tree: the `card/` package the install uploads and the `VERSION` it carries | `BMO_DEPLOY_DIR` where it names an arbiter tree, else the deploy link beside the binary where it stands in a release, else the tree the binary stands in |
+| `BMO_CODE_ROOT` | the arbiter's own tree: the `card/` package the install uploads, and the git checkout whose commit the version it carries names | `BMO_DEPLOY_DIR` where it names an arbiter tree, else the deploy link beside the binary where it stands in a release, else the tree the binary stands in |
 | `BMO_DEPLOY_DIR` | the deploy link of the arbiter's own release, read afresh each time. The same shell variable names the release of whatever unit started the shell, so a value under which no `card/` package stands is another unit's tree and is passed by, the rules after it standing | none |
 | `CARD_DECLARATIONS` | the declaration roots, separated by `:` (「Declarations」) | no root, so no service is declared |
 | `CARD_NODE_URL` | the base address of the node service (「The node service」) | none; every verb that reaches a node ends with an error naming the setting |
@@ -530,7 +530,7 @@ All in the node account's home, written by the master's verbs unless said otherw
 | `~/.config/bmo-card/rules.log` | the node arbiter, one line per rules file it takes up | |
 | `~/.config/bmo-card/env` | `install`, `0600` | `CARD_LOCK`, and `CARD_DESKTOP=1` on a WSL machine |
 | `~/.config/bmo-card/lend.env` | `lend` alone, `0600` | the lend settings (「Settings」) |
-| `~/bmo-card/VERSION` | `install` | this repository's version and the commit the files were carried from, marked where they differ from it: `0.1.0-rev.10+<commit>` or `0.1.0-rev.10+<commit>.changes` |
+| `~/bmo-card/VERSION` | `install` | the version the master was built at and the commit the files were carried from, marked where they differ from it: `<version>+<commit>` or `<version>+<commit>.changes` |
 
 The node arbiter reads the occupants and rules files again within a second of a change.
 

@@ -30,7 +30,7 @@ hosted tool `bmo/gpu`, which calls the master's usage route from the tool host.
 | `docs/` | The canonical statements of what the arbiter does, and the OpenAPI document |
 | `deploy/` | The master's systemd user unit, which a deployment links from the deploy tree |
 
-At the root stand the Cargo manifest, the version, the MIT license, `testbed.toml` with its Korean ledger,
+At the root stand the Cargo manifest, the MIT license, `testbed.toml` with its Korean ledger,
 `install.toml` (what installing the unit on a fresh machine needs), `rustfmt.toml` and `CLAUDE.md`.
 
 ## Documents
@@ -45,9 +45,10 @@ At the root stand the Cargo manifest, the version, the MIT license, `testbed.tom
 
 ## Version
 
-- **One version for the repository,** `0.1.0` with a revision until the first release. `VERSION` holds it,
-  every crate and the TypeScript package carry it, and the node arbiter shows the same version as its own.
-- **How a change moves it** is stated in `docs/api.md`, 「Versions」.
+- **The version is the set's,** read off the git tag when a build is made; the master answers it and carries
+  it to the node arbiter, which shows it as its own. Every crate's and the TypeScript package's version is a
+  placeholder that never moves.
+- **How it is read and carried** is stated in `docs/api.md`, 「Versions」.
 
 ## Commands
 

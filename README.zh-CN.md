@@ -27,7 +27,7 @@
 | `docs/` | 仲裁器行为的规范说明以及 OpenAPI 文档 |
 | `deploy/` | 主控的 systemd 用户单元，由部署从部署树链接 |
 
-根目录下有 Cargo 清单、版本文件、MIT 许可证、附带韩文台账的 `testbed.toml`、`install.toml`（在新机器上安装本单元所需的内容）、`rustfmt.toml` 和 `CLAUDE.md`。
+根目录下有 Cargo 清单、MIT 许可证、附带韩文台账的 `testbed.toml`、`install.toml`（在新机器上安装本单元所需的内容）、`rustfmt.toml` 和 `CLAUDE.md`。
 
 ## 文档
 
@@ -41,9 +41,9 @@
 
 ## 版本
 
-- **整个仓库只有一个版本，** 在首次发布之前为带修订号的 `0.1.0`。`VERSION` 保存它，每个 crate 和 TypeScript 包都
-  使用该版本，节点仲裁器也将同一版本显示为自己的版本。
-- **变更如何影响版本**见 `docs/api.md` 的「Versions」。
+- **版本属于整个套件，** 在构建时从 git 标签读取；主控以此版本作答并把它带给节点仲裁器，节点仲裁器将其显示为自己的
+  版本。每个 crate 和 TypeScript 包的版本只是永不变动的占位值。
+- **版本如何读取和传递**见 `docs/api.md` 的「Versions」。
 
 ## 命令
 

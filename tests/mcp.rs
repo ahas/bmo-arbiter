@@ -182,7 +182,7 @@ async fn the_server_lists_exactly_the_documented_tools_and_each_calls_its_progra
     .await;
   assert_eq!(
     (started["serverInfo"]["name"].clone(), started["serverInfo"]["version"].clone()),
-    (json!("bmo-arbiter"), json!(env!("CARGO_PKG_VERSION")))
+    (json!("bmo-arbiter"), json!(bmo_arbiter_plugin::VERSION))
   );
   server.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await;
 

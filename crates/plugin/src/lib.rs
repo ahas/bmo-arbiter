@@ -12,3 +12,11 @@ mod tools;
 pub use openapi::{openapi, openapi_json};
 pub use server::ArbiterServer;
 pub use tools::{Answered, ArbiterTool, Clients, Program, ToolFailure, tools};
+
+/// The version the MCP server names itself at: the set's version the build was made at, which the testbed
+/// hands the build as `BMO_VERSION`, else the manifest's placeholder (bmo-chat's `docs/conventions.md`,
+/// 「Versions」).
+pub const VERSION: &str = match option_env!("BMO_VERSION") {
+  Some(version) => version,
+  None => env!("CARGO_PKG_VERSION"),
+};

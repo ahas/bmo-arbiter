@@ -9,8 +9,8 @@ These rules hold every change to this repository.
   verb, setting and code; `docs/node-arbiter.md` for the node arbiter; `docs/placement.md` for units, the
   dump store, the master and the rules; `docs/PERSONAL-DATA.md` for what no file may hold.
 - A change that would make a document wrong or incomplete repairs the document first, stating what is
-  true now, and the code is written to match. A change to the boundary moves the version as
-  `docs/api.md` says, in the same commit.
+  true now, and the code is written to match. A change to the boundary repairs `docs/api.md` in the same
+  commit and moves no version (`docs/api.md`, 「Versions」).
 - A document states what is true now: no change history, no rationale told through an earlier design,
   no pasted source, signature or config fragment, and no file-and-line pins.
 

@@ -160,7 +160,7 @@ pub fn parse_store(text: &str) -> Option<u64> {
   line.captures(text)?.get(1)?.as_str().parse().ok()
 }
 
-/// The version the node arbiter shows (docs/api.md, 「Versions」): this repository's `VERSION`, then the
+/// The version the node arbiter shows (docs/api.md, 「Versions」): the version this build was made at, then the
 /// commit the tree stands at, marked where the arbiter's files differ from it.
 pub fn version(code_root: &Path) -> String {
   let git = |args: &[&str]| {
@@ -174,11 +174,7 @@ pub fn version(code_root: &Path) -> String {
       .filter(|done| done.status.success())
       .map(|done| String::from_utf8_lossy(&done.stdout).trim().to_owned())
   };
-  let release = std::fs::read_to_string(code_root.join("VERSION"))
-    .map(|text| text.trim().to_owned())
-    .ok()
-    .filter(|text| !text.is_empty())
-    .unwrap_or_else(|| "unknown".to_owned());
+  let release = crate::VERSION;
   let commit = git(&["rev-parse", "--short=12", "HEAD"]).filter(|commit| !commit.is_empty());
   let Some(commit) = commit else { return format!("{release}+unknown") };
   match git(&["status", "--porcelain", "--", "card"]) {

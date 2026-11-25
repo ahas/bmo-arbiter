@@ -613,9 +613,9 @@ no service's own install runs it.
 - **What it writes from them:**
   - `~/.config/bmo-card/env` (`0600`): `CARD_LOCK`, the lock in the node account's home, and
     `CARD_DESKTOP=1` on a WSL machine;
-  - `~/bmo-card/VERSION`, this repository's version and the commit the files were carried from, marked
-    where the arbiter's files differ from it (`0.1.0+<commit>`, or `0.1.0+<commit>.changes`), which the
-    slave shows as its version;
+  - `~/bmo-card/VERSION`, the version the master was built at and the commit the files were carried from,
+    marked where the arbiter's files differ from it (`<version>+<commit>`, or `<version>+<commit>.changes`),
+    which the slave shows as its version;
   - the dump store, made in one allocation where it is missing or another size (`docs/placement.md`,
     「The dump store」).
 - **The lend settings** stand in `~/.config/bmo-card/lend.env` (`0600`), written by the `lend` verb alone,
@@ -651,7 +651,8 @@ node:
    for a claim; the `lend` verb is what replaces such a unit (「Lending the card」).
 3. Reads the machine, and refuses one without a card.
 4. Carries the settings in a private `0600` file.
-5. Uploads the package's files from this repository's `card/` folder, and the `VERSION`.
+5. Uploads the package's files from this repository's `card/` folder, and the `VERSION` file naming the
+   master's version and the commit.
 6. Makes the dump store at its size (`--store-gib`, which the master gives as the group's `store_gib`,
    else the card's memory once over), refusing a disk that spins, and says how many extents it lies in;
    a store at another size is made again only where the arbiter answers no unit `evicted` or `mixed`.

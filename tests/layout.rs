@@ -85,9 +85,3 @@ fn a_directory_named_after_its_parent_is_found() {
   assert_eq!(twins.len(), 1, "{twins:?}");
   assert!(twins[0].ends_with("card/card"), "{twins:?}");
 }
-
-#[test]
-fn the_version_file_is_the_package_version() {
-  let version = fs::read_to_string(Path::new(ROOT).join("VERSION")).expect("VERSION is readable");
-  assert_eq!(version.trim(), env!("CARGO_PKG_VERSION"));
-}

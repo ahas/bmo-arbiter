@@ -226,8 +226,7 @@ impl World {
     std::fs::create_dir_all(root.join("slaves")).unwrap();
     std::fs::write(root.join("data/placements/card-rules.yaml"), RULES).unwrap();
     std::fs::write(root.join("nodes.ts"), NODES).unwrap();
-    // The arbiter's own tree: its version and the node arbiter's files.
-    std::fs::write(root.join("code/VERSION"), "0.1.0\n").unwrap();
+    // The arbiter's own tree: the node arbiter's files.
     for name in CARD_FILES {
       std::fs::write(root.join("code/card").join(name), format!("{name} one\n")).unwrap();
     }
