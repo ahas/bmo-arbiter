@@ -1,6 +1,6 @@
 ---
 name: bmo-arbiter
-description: Share a GPU card with every other process that uses it, through the bmo-arbiter MCP server. Use before putting anything on a GPU card of a machine the card arbiter stands on (loading a model, a training run, a benchmark), to take a turn on the card and give it back; also to read the card's queue and units, read the cluster's nodes and placements, or put a service on a node or take it off one.
+description: How the bmo-arbiter MCP tools take a turn on a GPU card and give it back, read the card's queue and units, and read or change the cluster's nodes and placements, with the arguments each takes.
 ---
 
 # bmo-arbiter
