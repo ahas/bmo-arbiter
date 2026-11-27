@@ -592,7 +592,7 @@ The node arbiter reads the occupants and rules files again within a second of a 
 
 ### The node service
 
-The master learns from the node service (bmo-node, `0.1.0-rev.2`) which nodes there are, how each is
+The master learns from the node service (bmo-node) which nodes there are, how each is
 reached and which services each is reserved for, and writes a node's role there. It calls the node service
 only through that service's published Rust client, `bmo-node-client`, at `CARD_NODE_URL` with
 `CARD_NODE_TOKEN`:

@@ -2765,7 +2765,7 @@
   "info": {
     "description": "The card arbiter: the master, one for the system, which pictures the cluster, places services on nodes, grants cards of a service as demands ask them and keeps what each service says of its units; and the node arbiter on every GPU node, which hands out turns on its card as tickets and moves the card's units in and out of its memory. A route's tag names the program that serves it. Bodies are JSON with camelCase keys, times are integers of epoch milliseconds and spans integers of milliseconds. The master's routes take its bearer token where it is configured with one; the node arbiter's answer on the node's loopback and take none. Every failure and refusal is a non-2xx status with a body of `code` and `error`. A page is `items` and `more`. Any other method and path is answered 404 `no-route`.",
     "title": "bmo-arbiter",
-    "version": "0.1.0-rev.17"
+    "version": "0.0.0"
   },
   "openapi": "3.1.0",
   "paths": {

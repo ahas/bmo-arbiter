@@ -8,7 +8,7 @@ members = ["crates/client", "crates/plugin", "tools/gpu"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-rev.17"
+version = "0.0.0"
 edition = "2024"
 license = "MIT"
 
@@ -47,7 +47,7 @@ bmo-arbiter-client = { path = "crates/client" }
 bmo-arbiter-plugin = { path = "crates/plugin" }
 # The node service's published client, at the version this repository is built against (docs/api.md,
 # 「The node service」).
-bmo-node-client = { path = "../node/crates/client", version = "=0.1.0-rev.2" }
+bmo-node-client = { path = "../node/crates/client" }
 chrono = { version = "0.4.41", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.5.40", features = ["derive", "env", "string"] }
 futures-util.workspace = true
