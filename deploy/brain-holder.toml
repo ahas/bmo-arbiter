@@ -3,7 +3,7 @@
 held_by = "arbiter"
 
 [[memory]]
-key = "when"
+key = "arbiter.when"
 type = "tip"
 recall_condition = "a GPU card idle or busy, or a model to load"
 text = "Read the cards with bmo/gpu; take a ticket with arbiter_ticket_take before loading a card."
